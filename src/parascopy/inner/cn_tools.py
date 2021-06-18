@@ -1,0 +1,598 @@
+import collections
+import numpy as np
+import itertools
+import os
+
+from . import common
+from .common import NonOverlappingSet
+from .genome import Interval
+
+
+def regions2_str(regions2, genome, use_comma=False, sep=','):
+    if regions2 is None or len(regions2) == 0:
+        return '*'
+    if genome is None:
+        return sep.join('{!r}:{}'.format(region2, '+' if strand2 else '-') for region2, strand2 in regions2)
+    fn = Interval.to_str_comma if use_comma else Interval.to_str
+    return sep.join('{}:{}'.format(fn(region2, genome), '+' if strand2 else '-') for region2, strand2 in regions2)
+
+
+class DuplRegion:
+    def __init__(self, ix, region1, regions2):
+        self._ix = ix
+        self._region1 = region1
+        # List of pairs (region, strand: bool)
+        self._regions2 = regions2
+        self._copy_num = 2 + 2 * len(self.regions2) if self.regions2 is not None else None
+
+    @property
+    def ix(self):
+        return self._ix
+
+    @property
+    def region1(self):
+        return self._region1
+
+    @property
+    def regions2(self):
+        return self._regions2
+
+    def regions2_str(self, *args, **kwargs):
+        return regions2_str(self._regions2, *args, **kwargs)
+
+    @property
+    def cn(self):
+        return self._copy_num
+
+    def __str__(self):
+        cls_name = self.__class__.__name__
+        return '{}[{}]({!r}  copy num {})'.format(cls_name, self._ix, self._region1, self._copy_num)
+
+    def continue_if_possible(self, other, max_dist, strict_order=True):
+        """
+        Creates a region with start at self.region1.start and end at other.region1.end.
+        If possible, returns a pair `region`, `regions2`. Otherwise, returns None.
+        """
+        if self._copy_num != other._copy_num or self._region1.distance(other._region1) > max_dist:
+            return None
+
+        assert self._region1.forward_order(other._region1, strict_order)
+        new_regions2 = []
+        b_used = np.zeros(len(other._regions2), dtype=np.bool)
+        for i, (a_reg, a_strand) in enumerate(self._regions2):
+            for j, (b_reg, b_strand) in enumerate(other._regions2):
+                if b_used[j] or a_strand != b_strand or a_reg.chrom_id != b_reg.chrom_id:
+                    continue
+                if not a_strand:
+                    a_reg, b_reg = b_reg, a_reg
+
+                if a_reg.forward_order(b_reg, strict_order) and b_reg.start - a_reg.end < max_dist:
+                    b_used[j] = True
+                    new_region = Interval(a_reg.chrom_id, a_reg.start, b_reg.end)
+                    new_regions2.append((new_region, a_strand))
+                    break
+            else:
+                # Cannot continue one of the second regions.
+                return None
+
+        new_region1 = Interval(self.region1.chrom_id, self.region1.start, other.region1.end)
+        return new_region1, new_regions2
+
+    def __lt__(self, other):
+        return self._region1.__lt__(other._region1)
+
+
+class Window(DuplRegion):
+    def __init__(self, ix, region1, regions2, gc_content, const_region_ix):
+        super().__init__(ix, region1, regions2)
+        self._gc_content = gc_content
+        self._const_region_ix = const_region_ix
+        self.in_viterbi = True
+        self.multiplier = None
+
+    @property
+    def gc_content(self):
+        return self._gc_content
+
+    @property
+    def const_region_ix(self):
+        return self._const_region_ix
+
+
+class ConstRegion(DuplRegion):
+    def __init__(self, ix, region1, regions2, skip, dupl_ixs):
+        """
+        Duplication indices should have the same order as regions2.
+        """
+        super().__init__(ix, region1, regions2)
+        self.skip = skip
+        self._dupl_ixs = dupl_ixs
+        self._group_name = None
+
+    @property
+    def dupl_ixs(self):
+        return self._dupl_ixs
+
+    def set_group_name(self, group_name):
+        self._group_name = group_name
+
+    @property
+    def group_name(self):
+        return self._group_name
+
+
+class RegionGroup(DuplRegion):
+    def __init__(self, name, const_region, psv_ixs):
+        super().__init__(name, const_region.region1, const_region.regions2)
+        self._region_ixs = [const_region.ix]
+        const_region.set_group_name(name)
+        self._psv_ixs = psv_ixs
+        self._window_ixs = []
+
+    @property
+    def name(self):
+        return self._ix
+
+    def continue_group(self, const_region, psv_ixs, max_dist):
+        assert self.cn == const_region.cn
+        continuation = self.continue_if_possible(const_region, max_dist)
+        if continuation is None:
+            return False
+
+        const_region.set_group_name(self.name)
+        self._region1 = continuation[0]
+        self._regions2 = continuation[1]
+        self._region_ixs.append(const_region.ix)
+        self._psv_ixs.extend(psv_ixs)
+        return True
+
+    @property
+    def region_ixs(self):
+        return self._region_ixs
+
+    @property
+    def psv_ixs(self):
+        return self._psv_ixs
+
+    def append_window(self, window_ix):
+        self._window_ixs.append(window_ix)
+
+    @property
+    def window_ixs(self):
+        return self._window_ixs
+
+
+class CopyNumPrediction(DuplRegion):
+    def __init__(self, region1, regions2, region_ix, pred_cn, pred_cn_str, qual):
+        super().__init__(None, region1, regions2)
+        self._pred_cn = pred_cn
+        self._pred_cn_str = pred_cn_str
+        self._qual = qual
+        self._region_ix = region_ix
+
+    @property
+    def pred_cn(self):
+        return self._pred_cn
+
+    @property
+    def pred_cn_str(self):
+        return self._pred_cn_str
+
+    @property
+    def qual(self):
+        return self._qual
+
+    @property
+    def region_ix(self):
+        return self._region_ix
+
+    @property
+    def cn_is_known(self):
+        return self._pred_cn is not None and self._pred_cn_str[0].isdigit()
+
+
+def find_const_regions(duplications, interval, skip_regions, genome, min_size, max_copy_num):
+    """
+    Parameters:
+    * duplications - list of duplications on the same chromosome. Duplications should have a defined CIGAR.
+        Will not work for iterator of duplications.
+    Returns list of `ConstRegion`s.
+    """
+    assert isinstance(duplications, list)
+    result = []
+    reg_chrom_id = None
+    # List of (pos: int, is_start: bool, index: int). If index is -1, the region is skipped.
+    endpoints = []
+    for i, dupl in enumerate(duplications):
+        if reg_chrom_id is None:
+            reg_chrom_id = dupl.region1.chrom_id
+        else:
+            assert reg_chrom_id == dupl.region1.chrom_id
+
+        endpoints.append((dupl.region1.start, True, i))
+        endpoints.append((dupl.region1.end, False, i))
+    for region in skip_regions:
+        endpoints.append((region.start, True, -1))
+        endpoints.append((region.end, False, -1))
+    endpoints.sort()
+    if not endpoints or endpoints[-1][0] < interval.end:
+        endpoints.append((interval.end, True, -1))
+
+    prev_pos = min(interval.start, endpoints[0][0])
+    curr_dupl = set()
+    curr_skip_amount = 0
+
+    for pos, is_start, index in endpoints:
+        if pos > prev_pos:
+            region1 = Interval(interval.chrom_id, prev_pos, pos)
+            if curr_skip_amount == 0:
+                regions2 = []
+                dupl_ixs = []
+                for i in curr_dupl:
+                    reg2 = duplications[i].subregion2(prev_pos, pos)
+                    if reg2:
+                        regions2.append((reg2, duplications[i].strand))
+                        dupl_ixs.append(i)
+                sort_ixs = sorted(range(len(regions2)), key=lambda i: regions2[i])
+                regions2 = [regions2[i] for i in sort_ixs]
+                dupl_ixs = [dupl_ixs[i] for i in sort_ixs]
+                const_reg = ConstRegion(len(result), region1, regions2,
+                    skip=len(region1) < min_size and len(regions2) < max_copy_num // 2 and interval.contains(region1),
+                    dupl_ixs=dupl_ixs)
+            else:
+                const_reg = ConstRegion(len(result), region1, None, skip=True, dupl_ixs=None)
+                const_reg._copy_num = 2 * (len(curr_dupl) + 1 + curr_skip_amount)
+            result.append(const_reg)
+            prev_pos = pos
+
+        if is_start:
+            if index >= 0:
+                curr_dupl.add(index)
+            else:
+                curr_skip_amount += 1
+        else:
+            if index >= 0:
+                curr_dupl.remove(index)
+            else:
+                curr_skip_amount -= 1
+
+    assert not curr_dupl
+    # Because of the additional fake endpoint at the end.
+    assert curr_skip_amount <= 1
+    return result
+
+
+def _extend_windows(windows, const_region, interval_start, interval_seq, duplications, window_size,
+        padding=50, window_len_ratio=0.9):
+    if const_region.skip or len(const_region.region1) < window_size - 2 * padding:
+        return
+    region_dupls = [duplications[i] for i in const_region.dupl_ixs]
+    region1 = const_region.region1
+
+    remainder = (len(region1) - 2 * padding) % window_size
+    left = remainder // 2
+    right = remainder - left
+    prev_ends2 = [None] * len(region_dupls)
+
+    for window_start in range(region1.start + left + padding, region1.end - right - padding, window_size):
+        window_end = window_start + window_size
+        assert window_end <= region1.end
+        subregion1 = Interval(region1.chrom_id, window_start, window_end)
+        subregions2 = []
+        big_difference = False
+
+        # One of the duplications has a large deletion in this position.
+        skip_this_window = False
+        for j, dupl in enumerate(region_dupls):
+            subregion2 = dupl.aligned_region(subregion1)
+            if subregion2 is None:
+                skip_this_window = True
+                # continue because we need to update all prev_ends.
+                continue
+            assert const_region.regions2[j][0].contains(subregion2)
+            if dupl.strand:
+                len2 = len(subregion2) if prev_ends2[j] is None else subregion2.end - prev_ends2[j]
+                prev_ends2[j] = subregion2.end
+            else:
+                len2 = len(subregion2) if prev_ends2[j] is None else prev_ends2[j] - subregion2.start
+                prev_ends2[j] = subregion2.start
+
+            if len2 < window_len_ratio * window_size or window_size < window_len_ratio * len2:
+                big_difference = True
+            subregions2.append((subregion2, dupl.strand))
+        if skip_this_window:
+            continue
+
+        gc_content = int(common.gc_content(interval_seq[window_start - interval_start : window_end - interval_start]))
+        window = Window(len(windows), subregion1, subregions2, gc_content, const_region.ix)
+        if big_difference:
+            window.in_viterbi = False
+        windows.append(window)
+
+
+def _psv_matches_const_region(const_region, psv, genome):
+    psv_allele_lengths = list(map(len, psv.alleles))
+    if psv.start < const_region.region1.start or const_region.region1.end < psv.start + psv_allele_lengths[0]:
+        return False
+
+    pos2 = psv.info['pos2']
+    if len(pos2) != len(const_region.regions2):
+        common.log('WARN: PSV {}:{:,} does not match with region {}'.format(psv.chrom, psv.pos, const_region.ix))
+        return False
+
+    for (region2, reg_strand), pos2_entry in zip(const_region.regions2, pos2):
+        pos2_entry = pos2_entry.split(':')
+        curr_chrom_id = genome.chrom_id(pos2_entry[0])
+        curr_start = int(pos2_entry[1]) - 1
+        curr_strand = pos2_entry[2] == '+'
+        allele = 1 if len(pos2_entry) < 4 else int(pos2_entry[3])
+        curr_end = curr_start + psv_allele_lengths[allele]
+
+        if curr_chrom_id != region2.chrom_id or reg_strand != curr_strand:
+            common.log('WARN: PSV {}:{:,} does not match with region {}'.format(psv.chrom, psv.pos, const_region.ix))
+            return False
+        if curr_start < region2.start or region2.end < curr_end:
+            if curr_start < region2.start - 100 or curr_end > region2.end + 100:
+                common.log('WARN: PSV {}:{:,} does not match with region {}'.format(psv.chrom, psv.pos, const_region.ix))
+            return False
+    return True
+
+
+def _create_region_groups(const_regions, psvs, genome, max_dist=1000):
+    """
+    Groups closeby const regions if they have the same CN even if there is a region with a different CN between them.
+    """
+    psv_ix = 0
+    n_psvs = len(psvs)
+
+    # Key: copy_num, value: list of PloidyRegionsGroups.
+    groups = collections.defaultdict(list)
+    for const_region in const_regions:
+        if const_region.skip:
+            continue
+
+        region1_end = const_region.region1.end
+        curr_psvs = []
+        while psv_ix < n_psvs and psvs[psv_ix].start < region1_end:
+            if _psv_matches_const_region(const_region, psvs[psv_ix], genome):
+                curr_psvs.append(psv_ix)
+            psv_ix += 1
+
+        copy_num = const_region.cn // 2
+        # If copy_num was already encountered, we try to continue last group with this copy_num.
+        if copy_num not in groups or not groups[copy_num][-1].continue_group(const_region, curr_psvs, max_dist):
+            group_name ='{:02d}-{:02d}'.format(copy_num, len(groups[copy_num]) + 1)
+            groups[copy_num].append(RegionGroup(group_name, const_region, curr_psvs))
+    return sorted(itertools.chain(*groups.values()))
+
+
+class DuplHierarchy:
+    """
+    Hierarchy of duplicated regions:
+        psvs < windows < const_regions < region_groups.
+    """
+    def __init__(self, psvs, const_regions, genome, duplications, window_size, max_copy_num):
+        self._psvs = psvs
+        self._const_regions = const_regions
+        first_region = self._const_regions[0].region1
+        last_region = self._const_regions[-1].region1
+        interval = Interval(first_region.chrom_id, first_region.start, last_region.end)
+        interval_seq = interval.get_sequence(genome)
+        interval_start = interval.start
+
+        self._windows = []
+        for const_region in const_regions:
+            if const_region.cn > max_copy_num:
+                continue
+            _extend_windows(self._windows, const_region, interval_start, interval_seq, duplications, window_size)
+
+        self._region_groups = _create_region_groups(const_regions, psvs, genome)
+        self._group_by_name = { group.name: i for i, group in enumerate(self._region_groups) }
+        self._init()
+
+    def _init(self):
+        self._init_searchers()
+        self._store_group_windows()
+        self._check_indices()
+
+    def _init_searchers(self):
+        self._psv_searcher = NonOverlappingSet.from_variants(self._psvs)
+        # self._window_searcher = NonOverlappingSet.from_dupl_regions(self._windows)
+        # self._const_region_searcher = NonOverlappingSet.from_dupl_regions(self._windows)
+
+    def _check_indices(self):
+        for i, window in enumerate(self._windows):
+            assert i == window.ix
+        for i, const_region in enumerate(self._const_regions):
+            assert i == const_region.ix
+        for i, group in enumerate(self.region_groups):
+            assert i == self._group_by_name[group.name]
+
+    def _store_group_windows(self):
+        for window in self._windows:
+            self.get_group(self.window_group_name(window)).window_ixs.append(window.ix)
+
+    @property
+    def psvs(self):
+        return self._psvs
+
+    @property
+    def psv_searcher(self):
+        return self._psv_searcher
+
+    @property
+    def windows(self):
+        return self._windows
+
+    @property
+    def const_regions(self):
+        return self._const_regions
+
+    @property
+    def region_groups(self):
+        return self._region_groups
+
+    def get_group(self, group_name):
+        return self._region_groups[self._group_by_name[group_name]]
+
+    def window_group_name(self, window):
+        return self._const_regions[window.const_region_ix].group_name
+
+    def summarize_region_groups(self, genome, out):
+        for region_group in self._region_groups:
+            out.write('Region group {}\n'.format(region_group.name))
+            out.write('    Sum length {:,} bp{}\n'.format(len(region_group.region1),
+                ' (including breaks)' if len(region_group.region_ixs) > 1 else ''))
+            out.write('    Copy number:  {}\n'.format(region_group.cn))
+            out.write('    PSVs:    {}\n'.format(len(region_group.psv_ixs)))
+            out.write('    Windows: {} (suitable for HMM: {})\n'.format(len(region_group.window_ixs),
+                sum(self._windows[i].in_viterbi for i in region_group.window_ixs)))
+            out.write('    Constant regions: {}\n'.format(len(region_group.region_ixs)))
+            for region_ix in region_group.region_ixs:
+                subregion = self._const_regions[region_ix]
+                out.write('    ====\n')
+                out.write('    {} ({:,} bp)\n'.format(subregion.region1.to_str_comma(genome), len(subregion.region1)))
+                out.write('    {}\n'.format(subregion.regions2_str(genome, use_comma=True, sep='\n    ')))
+            out.write('    ====\n')
+
+
+class OutputFiles:
+    def __init__(self, out_dir, filenames):
+        """
+        filenames: dictionary { key: path }, for example
+        ```
+        out = OutputFiles('dir', dict(a='a.csv'))
+        out.open()
+        out.a # dir/a.csv
+        out.close()
+        ```
+        """
+        self._out_dir = out_dir
+        self._filenames = filenames
+        self._files = None
+
+    def open(self):
+        assert self._files is None
+        self._files = {}
+        for key, filename in self._filenames.items():
+            self._files[key] = open(os.path.join(self._out_dir, filename), 'w')
+
+    def close(self):
+        for f in self._files.values():
+            f.close()
+        self._files = None
+
+    def __enter__(self):
+        self.open()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.close()
+
+    def __getattr__(self, key):
+        return self._files[key]
+
+    def flush(self):
+        for f in self._files.values():
+            f.flush()
+
+    def checked_write(self, key, *text):
+        if key in self._files:
+            for line in text:
+                self._files[key].write(line)
+
+
+class RegionGroupExtra:
+    """
+    Structure that stores all necessary information for a single region group, as well as Viterbi results.
+    """
+    def __init__(self, dupl_hierarchy, region_group, genome):
+        from . import paralog_cn
+
+        self._dupl_hierarchy = dupl_hierarchy
+        self._region_group = region_group
+        windows = dupl_hierarchy.windows
+        self._group_windows = [windows[i] for i in region_group.window_ixs]
+        self._viterbi_windows = [window for window in self._group_windows if window.in_viterbi]
+        self._windows_searcher = NonOverlappingSet.from_dupl_regions(self._group_windows)
+        self._viterbi_windows_searcher = NonOverlappingSet.from_dupl_regions(self._viterbi_windows)
+
+        psvs = dupl_hierarchy.psvs
+        self._region_psvs = [psvs[i] for i in region_group.psv_ixs]
+
+        self._sample_const_regions = None
+        self._sample_reliable_regions = None
+
+        self._psv_infos = paralog_cn.create_psv_infos(self._region_psvs, self._region_group, genome)
+        self._psv_f_values = None
+
+    @property
+    def dupl_hierarchy(self):
+        return self._dupl_hierarchy
+
+    @property
+    def region_group(self):
+        return self._region_group
+
+    @property
+    def group_windows(self):
+        return self._group_windows
+
+    @property
+    def group_windows_searcher(self):
+        return self._windows_searcher
+
+    @property
+    def viterbi_windows(self):
+        return self._viterbi_windows
+
+    @property
+    def viterbi_windows_searcher(self):
+        return self._viterbi_windows_searcher
+
+    @property
+    def psvs(self):
+        return self._region_psvs
+
+    def set_viterbi_res(self, sample_const_regions, sample_reliable_regions):
+        self._sample_const_regions = sample_const_regions
+        self._sample_reliable_regions = sample_reliable_regions
+
+    @property
+    def sample_const_regions(self):
+        return self._sample_const_regions
+
+    @property
+    def sample_reliable_regions(self):
+        return self._sample_reliable_regions
+
+    def set_f_values(self, f_values):
+        self._psv_f_values = f_values
+
+    def set_from_model_params(self, model_params, n_samples):
+        copy_num = self._region_group.cn // 2
+        self._psv_f_values = model_params.load_psv_f_values(self._psv_infos, copy_num)
+        if self._psv_f_values is None:
+            return
+        for psv_info in self._psv_infos:
+            psv_info.use_samples = np.zeros(n_samples, dtype=np.bool)
+
+    def set_psv_records_info(self, genome):
+        if not self.has_f_values:
+            return
+
+        for psv, fval, psv_info in zip(self._region_psvs, self._psv_f_values, self._psv_infos):
+            psv.info['info'] = psv_info.info_content
+            psv.info['fval'] = tuple(fval)
+
+    @property
+    def has_f_values(self):
+        return self._psv_f_values is not None
+
+    @property
+    def psv_f_values(self):
+        return self._psv_f_values
+
+    @property
+    def psv_infos(self):
+        return self._psv_infos
