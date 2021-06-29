@@ -163,12 +163,12 @@ class RegionGroup(DuplRegion):
 
 
 class CopyNumPrediction(DuplRegion):
-    def __init__(self, region1, regions2, region_ix, pred_cn, pred_cn_str, qual):
+    def __init__(self, region1, regions2, pred_cn, pred_cn_str, qual):
         super().__init__(None, region1, regions2)
         self._pred_cn = pred_cn
         self._pred_cn_str = pred_cn_str
         self._qual = qual
-        self._region_ix = region_ix
+        self._info = {}
 
     @property
     def pred_cn(self):
@@ -189,6 +189,10 @@ class CopyNumPrediction(DuplRegion):
     @property
     def cn_is_known(self):
         return self._pred_cn is not None and self._pred_cn_str[0].isdigit()
+
+    @property
+    def info(self):
+        return self._info
 
 
 def find_const_regions(duplications, interval, skip_regions, genome, min_size, max_copy_num):

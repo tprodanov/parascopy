@@ -37,6 +37,13 @@ class HmmModel:
         self._transition = None
         self._emission_matrices = None
 
+        # Vector of natural log probabilities (n_samples).
+        self._total_probs = None
+        # Three matrices of size (n_samples x n_states x n_observations).
+        self._alphas = None
+        self._betas = None
+        self._gammas = None
+
     @property
     def n_samples(self):
         return self._n_samples
@@ -64,6 +71,22 @@ class HmmModel:
     @property
     def max_state_dist(self):
         return self._max_state_dist
+
+    @property
+    def total_probs(self):
+        return self._total_probs
+
+    @property
+    def alphas(self):
+        return self._alphas
+
+    @property
+    def betas(self):
+        return self._betas
+
+    @property
+    def gammas(self):
+        return self._gammas
 
     def set_uniform_initial(self):
         self._initial = np.full(self._n_hidden, -np.log(self._n_hidden))
@@ -143,46 +166,40 @@ class HmmModel:
             states_matrix[sample_id, :] = states_vec
         return probs, states_matrix
 
-    def path_likelihood(self, sample_id, path, states_vec=None):
+    def path_likelihood(self, sample_id, path):
         """
         Returns log-probability of the path, where path is a list of segments with attributes
         start_ix, end_ix and state.
-
-        If path does not cover all observations, returned value is
-        log P(path) + transition(states_vec, path[0]) + transition(path[-1], states_vec).
-        states_vec is required in that case.
+        Should call run_forward_backward beforehand.
         """
+        assert self._total_probs is not None
+        alpha = self._alphas[sample_id]
+        beta = self._betas[sample_id]
         emission_matrix = self._emission_matrices[sample_id]
-        prob = 0
+
+        prob = -self._total_probs[sample_id]
+        first_segment = path[0]
+        prob += alpha[first_segment.state, first_segment.start_ix]
+        last_segment = path[-1]
+        prob += beta[last_segment.state, last_segment.end_ix - 1]
+        if not np.isfinite(prob):
+            return prob
+
         prev = None
         for segment in path:
             if prev is not None:
                 assert prev.end_ix == segment.start_ix
-                prob += self._transition[prev.state, segment.state, segment.start_ix - 1]
-            prob += np.sum(emission_matrix[segment.state, segment.start_ix : segment.end_ix])
+                prob += self._transition[prev.state, segment.state, segment.start_ix - 1] \
+                    + emission_matrix[segment.state, segment.start_ix]
             prob += np.sum(self._transition[segment.state, segment.state, segment.start_ix : segment.end_ix - 1])
+            prob += np.sum(emission_matrix[segment.state, segment.start_ix + 1 : segment.end_ix])
             prev = segment
-
-        first_segment = path[0]
-        if first_segment.start_ix > 0:
-            prev = np.clip(states_vec[first_segment.start_ix - 1],
-                a_min=first_segment.state - self._max_state_dist, a_max=first_segment.state + self._max_state_dist)
-            prob += self._transition[prev, first_segment.state, first_segment.start_ix - 1]
-        else:
-            prob += self._initial[first_segment.state]
-
-        last_segment = path[-1]
-        if last_segment.end_ix < self._n_observations:
-            snext = np.clip(states_vec[last_segment.end_ix],
-                a_min=last_segment.state - self._max_state_dist, a_max=last_segment.state + self._max_state_dist)
-            prob += self._transition[last_segment.state, snext, last_segment.end_ix - 1]
         return prob
 
-    def forward_backward(self, sample_id, possible_states=None):
+    def _forward_backward(self, sample_id, possible_states=None):
         """
         Returns two matrices in natural log space: alpha and beta (both n_states x n_observations).
         """
-
         if possible_states is not None:
             a0, b0 = possible_states[sample_id]
         else:
@@ -215,30 +232,23 @@ class HmmModel:
                     self._transition[state, a : b, obs_ix])
         return alpha, beta
 
-    def calculate_prob_matrices(self, sample_ids=None, possible_states=None, ret_more=False):
-        """
-        Returns log probabilities matrices (n_samples x n_states x n_observations).
-        """
-        if sample_ids is None:
-            sample_ids = np.arange(self._n_samples)
-
+    def run_forward_backward(self, possible_states=None):
         ret_shape = (self._n_samples, self._n_hidden, self._n_observations)
-        prob_matrices = np.full(ret_shape, np.nan)
-        if ret_more:
-            alphas = np.full(ret_shape, np.nan)
-            betas = np.full(ret_shape, np.nan)
+        alphas = np.full(ret_shape, np.nan)
+        betas = np.full(ret_shape, np.nan)
+        gammas = np.full(ret_shape, np.nan)
 
-        for sample_id in sample_ids:
-            alpha, beta = self.forward_backward(sample_id, possible_states=possible_states)
+        for sample_id in range(self._n_samples):
+            alpha, beta = self._forward_backward(sample_id, possible_states=possible_states)
             sum_prob = logsumexp(alpha[:, self._n_observations - 1])
-            prob_matrices[sample_id] = alpha + beta - sum_prob
-            if ret_more:
-                alphas[sample_id] = alpha
-                betas[sample_id] = beta
+            alphas[sample_id] = alpha
+            betas[sample_id] = beta
+            gammas[sample_id] = alpha + beta - sum_prob
 
-        if ret_more:
-            return prob_matrices, alphas, betas
-        return prob_matrices
+        self._total_probs = logsumexp(alphas[:, :, self._n_observations - 1], axis=1)
+        self._alphas = alphas
+        self._betas = betas
+        self._gammas = gammas
 
 
 class CopyNumHmm(HmmModel):
@@ -326,18 +336,18 @@ class CopyNumHmm(HmmModel):
                 emission_matrices[sample_id, :, obs_ix] = curr_emissions - logsumexp(curr_emissions)
         self.set_emission_matrices(emission_matrices)
 
-    def baum_welch_initial(self, prob_matrices, min_prob):
+    def baum_welch_initial(self, min_prob):
         log_n_samples = np.log(self._n_samples)
-        initial = logsumexp(prob_matrices[:, :, 0], axis=0) - log_n_samples
+        initial = logsumexp(self._gammas[:, :, 0], axis=0) - log_n_samples
         initial = np.maximum(initial, min_prob)
         initial -= logsumexp(initial)
         self.set_initial(initial)
 
-    def baum_welch_transitions(self, alphas, betas):
+    def baum_welch_transitions(self):
         """
         Returns matrix of size (n_observations - 1, 2): probabilities of going down, and of going up.
         """
-        total_probs = logsumexp(alphas[:, :, self._n_observations - 1], axis=1)
+        assert self._total_probs is not None
         log_n_samples = np.log(self._n_samples)
 
         state_dist = self._max_state_dist
@@ -363,11 +373,11 @@ class CopyNumHmm(HmmModel):
                 transitions_vec = self._transition[curr_range, next_range, obs_ix]
                 # All next shapes == (n_samples, curr_b - curr_a)
                 next_emissions = self._emission_matrices[:, next_range, obs_ix + 1]
-                curr_alphas = alphas[:, curr_range, obs_ix]
-                next_betas = betas[:, next_range, obs_ix + 1]
+                curr_alphas = self._alphas[:, curr_range, obs_ix]
+                next_betas = self._betas[:, next_range, obs_ix + 1]
 
                 summands = curr_alphas + next_betas + transitions_vec[np.newaxis, :] + next_emissions
-                prob = logsumexp(logsumexp(summands, axis=1) - total_probs) - log_n_samples
+                prob = logsumexp(logsumexp(summands, axis=1) - self._total_probs) - log_n_samples
                 jump_probs[i] = prob
             down_up[obs_ix, 0] = logsumexp(jump_probs[:state_dist])
             down_up[obs_ix, 1] = logsumexp(jump_probs[state_dist:])
@@ -663,27 +673,6 @@ def _summarize_paths(dupl_hierarchy, windows, paths, genome, samples, summary_ou
                 segment.cn, windows[segment.start_ix].ix, windows[segment.end_ix - 1].ix))
 
 
-def _write_path_likelihoods(paths, sample_paths, model, samples, group_name, out):
-    for sample_id, first_path_name in enumerate(sample_paths):
-        first_prob = model.path_likelihood(sample_id, paths[first_path_name])
-        out.write('{}\t{}\t{}\t{:.2f}\t'
-            .format(samples[sample_id], group_name, first_path_name, first_prob / _LOG10))
-
-        other_paths = []
-        for path_name, path in paths.items():
-            if path_name == first_path_name:
-                continue
-            prob = model.path_likelihood(sample_id, path)
-            other_paths.append((path_name, prob / _LOG10))
-        other_paths.sort(key=operator.itemgetter(1), reverse=True)
-
-        for i, (path_name, prob) in enumerate(other_paths):
-            if i > 3 and first_prob - prob > 100:
-                break
-            out.write('{}{}:{:.1f}'.format(', ' if i else '', path_name, prob))
-        out.write('\n')
-
-
 def _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs, copy_num_range, mult_bounds):
     n_samples = len(obs_depth)
     range_size = len(copy_num_range)
@@ -704,7 +693,7 @@ def _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs, copy_num_ran
     return x0, lik0, sol.x, sol.fun
 
 
-def _find_multipliers(depth_matrix, windows, bg_depth, prob_matrices, model, min_samples, edge_prob=0.1, sample_ids=None):
+def _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples, edge_prob=0.1, sample_ids=None):
     if sample_ids is None:
         sample_ids = np.arange(model.n_samples)
         sample_ids_slice = slice(0, model.n_samples)
@@ -717,6 +706,7 @@ def _find_multipliers(depth_matrix, windows, bg_depth, prob_matrices, model, min
 
     n_hidden = model.n_hidden
     copy_num_range = model.get_copy_num(np.arange(1, n_hidden - 1))
+    prob_matrices = model.gammas
 
     multipliers = np.ones(len(windows))
     for obs_ix, window in enumerate(windows):
@@ -805,7 +795,8 @@ def _write_hmm_params(group_name, iteration, windows, multipliers, mult_weights,
         params_out.write('\n')
 
 
-def _prob_matrices_to_states(prob_matrices, model):
+def _prob_matrices_to_states(model):
+    prob_matrices = model.gammas
     n_samples, n_hidden, n_observations = prob_matrices.shape
     copy_numbers = model.get_copy_num(np.arange(n_hidden))
     states_matrix = np.zeros((n_samples, n_observations))
@@ -832,15 +823,17 @@ def _get_mult_weights(multipliers, ref_copy_num):
 
 def _single_iteration(depth_matrix, windows, bg_depth, model, group_name, iteration, params_out,
         possible_states=None, *, min_samples, min_trans_prob, max_trans_prob, use_multipliers):
-    prob_matrices, alphas, betas = model.calculate_prob_matrices(possible_states=possible_states, ret_more=True)
-    total_prob = np.sum(logsumexp(alphas[:, :, model.n_observations - 1], axis=1))
+    model.run_forward_backward(possible_states)
+    total_prob = np.sum(model.total_probs)
     common.log('        Iteration {:>2}:   Likelihood {:,.3f}'.format(iteration, total_prob / _LOG10))
 
-    model.baum_welch_initial(prob_matrices, min_trans_prob)
-    down_up = model.baum_welch_transitions(alphas, betas)
+    down_up = model.baum_welch_transitions()
+    n_samples = depth_matrix.shape[1]
+    min_initial_prob = max(min_trans_prob / 2, -np.log(n_samples))
+    model.baum_welch_initial(min_initial_prob)
     model.recalculate_transition_probs(down_up, min_trans_prob, max_trans_prob)
     if use_multipliers:
-        multipliers = _find_multipliers(depth_matrix, windows, bg_depth, prob_matrices, model, min_samples)
+        multipliers = _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples)
         mult_weights = _get_mult_weights(multipliers, model.ref_copy_num)
     else:
         multipliers = np.ones(model.n_observations)
@@ -850,7 +843,7 @@ def _single_iteration(depth_matrix, windows, bg_depth, model, group_name, iterat
     model.calculate_emission_matrices(depth_matrix, windows, multipliers, mult_weights, bg_depth)
     params_out.write('# Likelihood for group {} iteration {}: {:.5f}\n'.format(
         group_name, iteration, total_prob / _LOG10))
-    return total_prob, prob_matrices, multipliers
+    return total_prob, multipliers
 
 
 def _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, copy_num_range):
@@ -913,12 +906,12 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
     ITERATIONS = 50
     # Do not run this for if there are not enough samples, or if the model was loaded from a previous run.
     for iteration in range(1, 0 if single_iter else ITERATIONS + 1):
-        prob, prob_matrices, multipliers = _single_iteration(depth_matrix, windows, bg_depth, model,
+        prob, multipliers = _single_iteration(depth_matrix, windows, bg_depth, model,
             group_name, iteration, out.hmm_params, possible_states=possible_states, min_samples=min_samples,
             min_trans_prob=min_trans_prob, max_trans_prob=max_trans_prob, use_multipliers=use_multipliers)
-        possible_states = _narrow_possible_states(prob_matrices)
+        possible_states = _narrow_possible_states(model.gammas)
 
-        pseudo_states_matrix = _prob_matrices_to_states(prob_matrices, model)
+        pseudo_states_matrix = _prob_matrices_to_states(model)
         out_prefix = '{}\t{}'.format(group_name, iteration)
         _write_states_matrix(pseudo_states_matrix, window_ixs, out_prefix, out.hmm_states, fmt='{:.4g}')
 
@@ -945,20 +938,19 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
     const_regions_extra, paths, sample_paths = _extract_paths(states_matrix, model, windows,
         dupl_hierarchy.const_regions, model_params)
     _summarize_paths(dupl_hierarchy, windows, paths, genome, samples, out.viterbi_summary)
-    _write_path_likelihoods(paths, sample_paths, model, samples, group_name, out.viterbi_paths)
 
-    prob_matrices = model.calculate_prob_matrices(possible_states=possible_states)
+    model.run_forward_backward(possible_states=possible_states)
     common.log('    Writing detailed copy number profiles')
-    _analyze_detailed_cn(model, prob_matrices, samples, windows, genome, out.detailed_cn)
+    _write_detailed_cn(model, samples, windows, genome, out.detailed_cn)
 
     common.log('    Finalizing total copy number predictions')
     sample_const_regions = []
     sample_reliable_regions = []
     for sample_id in range(n_samples):
         sample_path = paths[sample_paths[sample_id]]
-        sample_path = _split_path_by_probs(sample_path, prob_matrices[sample_id], model, windows, const_regions_extra)
+        sample_path = _split_path_by_probs(sample_path, model.gammas[sample_id], model, windows, const_regions_extra)
 
-        sample_const_regions.append(_get_sample_const_regions(sample_id, sample_path, states_matrix[sample_id], model))
+        sample_const_regions.append(_get_sample_const_regions(sample_id, sample_path, model))
         sample_reliable_regions.append(_get_sample_reliable_region(sample_path))
     region_group_extra.set_viterbi_res(sample_const_regions, sample_reliable_regions)
 
@@ -967,7 +959,8 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
         model_params.set_hmm_results(region_group, window_ixs, model, multipliers, paths)
 
 
-def _analyze_detailed_cn(model, prob_matrices, samples, windows, genome, out):
+def _write_detailed_cn(model, samples, windows, genome, out):
+    prob_matrices = model.gammas
     for i, window in enumerate(windows):
         out.write(window.region1.to_bed(genome))
         out.write('\t{}\t'.format(window.ix))
@@ -991,7 +984,6 @@ def write_headers(out, samples):
     out.checked_write('hmm_states', 'region_group\titeration\twindow_ix\t{}\n'.format(samples_str))
     out.checked_write('hmm_params', 'region_group\titeration\twindow_ix\tmultiplier\tmult_weight\t'
         'down_bw\tup_bw\ttrans_down1\ttrans_same\ttrans_up1\n')
-    out.checked_write('viterbi_paths', 'sample\tregion\tpath\tother_paths\n')
     out.checked_write('detailed_cn',
         '## Cell format: best_copy_num:-log10(prob) second_best:-log10(prob).\n',
         '#chrom\tstart\tend\twindow_ix\thomologous_regions\t{}\n'.format(samples_str))
@@ -1034,15 +1026,16 @@ def _split_path_by_probs(path, prob_matrix, model, windows, const_regions_extra,
     return new_path
 
 
-def _get_sample_const_regions(sample_id, main_path, states_vec, model):
-    n_observations = len(states_vec)
+def _get_sample_const_regions(sample_id, main_path, model):
     res = []
     for segment in main_path:
-        probs = [model.path_likelihood(sample_id, (segment,), states_vec)]
-        for state in range(max(0, segment.state - 2), min(model.n_hidden, segment.state + 2)):
+        probs = [model.path_likelihood(sample_id, (segment,))]
+        cns = [model.get_copy_num(segment.state)]
+        for state in range(max(0, segment.state - 2), min(model.n_hidden, segment.state + 3)):
             if state != segment.state:
                 curr_path = (SimpleSegment(segment.start_ix, segment.end_ix, state),)
-                probs.append(model.path_likelihood(sample_id, curr_path, states_vec))
+                probs.append(model.path_likelihood(sample_id, curr_path))
+                cns.append(model.get_copy_num(state))
 
         probs = np.array(probs)
         probs -= logsumexp(probs)
@@ -1050,10 +1043,18 @@ def _get_sample_const_regions(sample_id, main_path, states_vec, model):
         qual = np.clip(-10 * oth_lik / _LOG10, 0, 10000)
         dupl_region = segment.dupl_region
 
-        pred_cn = model.get_copy_num(segment.state)
+        pred_cn = cns[0]
         pred_cn_str = model.format_cn(pred_cn)
-        res.append(cn_tools.CopyNumPrediction(dupl_region.region1, dupl_region.regions2,
-            segment.const_region_ix, pred_cn, pred_cn_str, qual))
+        cn_pred = cn_tools.CopyNumPrediction(dupl_region.region1, dupl_region.regions2, pred_cn, pred_cn_str, qual)
+        cn_pred.info['region_ix'] = segment.const_region_ix
+
+        if qual <= 40 and len(probs) > 1:
+            probs = np.abs(probs)
+            ixs = np.argsort(probs)
+            cn_pred.info['agCN_probs'] = ','.join(
+                '{}:{:.2f}'.format(model.format_cn(cns[i]), probs[i] / _LOG10) for i in ixs if probs[i] < 11)
+
+        res.append(cn_pred)
     return res
 
 

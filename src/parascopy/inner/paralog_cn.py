@@ -139,11 +139,12 @@ def _e_step(psv_infos, psv_f_values, sample_genotypes, genotype_priors, n_sample
             individual_probs[psv_ix, sample_ixs, sample_gt_ix] = curr_probs
             res[sample_ixs, sample_gt_ix] += curr_probs
 
-    res += genotype_priors[np.newaxis, :]
-    res[~usable_samples] = np.nan
-    row_sums = logsumexp(res, axis=1)
-    total_lik = np.sum(row_sums[usable_samples]) + total_f_prior
-    res -= row_sums[:, np.newaxis]
+    with np.errstate(invalid='ignore'):
+        res += genotype_priors[np.newaxis, :]
+        res[~usable_samples] = np.nan
+        row_sums = logsumexp(res, axis=1)
+        total_lik = np.sum(row_sums[usable_samples]) + total_f_prior
+        res -= row_sums[:, np.newaxis]
     return res, total_lik, individual_probs
 
 
@@ -756,14 +757,15 @@ def _detect_gene_conversion(genotypes_str, sample_gt_probs, support_psvs, suppor
     model.set_emission_matrices(emission_matrix[np.newaxis, :, :])
     sample_id = 0
     prob, states_vec = model.viterbi(sample_id)
+    model.run_forward_backward()
 
     res = []
     for segment in cn_hmm.get_simple_path(states_vec):
         if segment.state == best_gt or segment.end_ix == segment.start_ix + 1:
             continue
         segment0 = cn_hmm.SimpleSegment(segment.start_ix, segment.end_ix, best_gt)
-        prob0 = model.path_likelihood(sample_id, (segment0,), states_vec)
-        prob1 = model.path_likelihood(sample_id, (segment,), states_vec)
+        prob0 = model.path_likelihood(sample_id, (segment0,))
+        prob1 = model.path_likelihood(sample_id, (segment,))
         prob0 -= logsumexp((prob0, prob1))
         qual = -10 * prob0 / _LOG10
 
@@ -818,7 +820,7 @@ def estimate_paralog_cn(region_group_extra, all_psv_counts, samples, genome, out
         for sample_const_region in region_group_extra.sample_const_regions[sample_id]:
             entry = ResultEntry(sample_id, sample_const_region)
             entry.info['group'] = group_name
-            entry.info['region_ix'] = sample_const_region.region_ix
+            entry.info.update(sample_const_region.info)
 
             reg_start = sample_const_region.region1.start
             reg_end = sample_const_region.region1.end
@@ -901,7 +903,7 @@ def estimate_paralog_cn(region_group_extra, all_psv_counts, samples, genome, out
                 else:
                     qual = -10 * np.log1p(-prob) / _LOG10
                 paralog_cn[copy] = best_cn
-                paralog_qual[copy] = min(qual, 1000)
+                paralog_qual[copy] = min(qual, 10000)
 
             if sample_cn not in genotypes_str_cache:
                 sample_genotypes_str = [','.join(map(str, gt)) for gt in sample_genotypes]

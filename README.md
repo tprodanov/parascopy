@@ -1,25 +1,27 @@
 Parascopy
-=========
+---------
 
 Parascopy is designed for robust and accurate estimation of paralog-specific copy number for duplicated genes using whole-genome sequencing.
 
 Created by Timofey Prodanov `timofey.prodanov[at]gmail.com` and Vikas Bansal `vibansal[at]health.ucsd.edu` at the University of California San Diego.
 
 Table of contents
-=================
+-----------------
 * [Citing Parascopy](#citing-parascopy)
 * [Installation](#installation)
 * [General usage](#general-usage)
+* [Precomputed data](#precomputed-data)
+* [Known issues](#known-issues)
 * [Issues](#issues)
 * [See also](#see-also)
 
 Citing Parascopy
-================
+----------------
 
 Currently, the paper is in progress, please check later.
 
 Installation
-============
+------------
 
 <!-- To install the Parascopy you can use `conda`:
 ```
@@ -49,9 +51,9 @@ Some parascopy commands require installed
 You do not need to install these tools if you installed parascopy through `conda`.
 
 General usage
-=============
+-------------
 
-Main focus of this tool is a *homology table* -- a database of duplications in the genome.
+Main focus of this tool is a *homology table* - a database of duplications in the genome.
 
 To construct a homology table you would need to run:
 ```bash
@@ -59,7 +61,7 @@ parascopy pretable -f genome.fa -o pretable.bed.gz
 parascopy table -i pretable.bed.gz -f genome.fa -o table.bed.gz
 ```
 Note, that the reference genome should be indexed with both `samtools faidx` and `bwa index`.
-Alternatively, you can download a precomputed homology table [here](TODO).
+Alternatively, you can download a [precomputed homology table](#precomputed-data).
 
 To find aggregate and paralog-specific copy number (agCN and psCN) across multiple samples, you should run
 ```bash
@@ -74,12 +76,30 @@ parascopy cn-using out1/model -I input2.list -t table.bed.gz -f genome.fa -d dep
 
 See `parascopy help` or `parascopy <command> --help` for more information.
 
+Precomputed data
+----------------
+
+For hg38 you can use the following precomputed data:
+- Precomputed homology tables:
+    [hg19 (25 Mb)](dl.dropboxusercontent.com/s/skxti7w2sx6xmu6/hg19.tar)
+    and [hg38 (40 Mb)](https://dl.dropboxusercontent.com/s/d7al17hnuvnpwrl/hg38.tar).
+- Precomputed model parameters for five superpopulations:
+    [hg38 (11 Mb)](https://dl.dropboxusercontent.com/s/2td926g2jql3nsf/models.tar.gz).
+
+Known issues
+------------
+
+If aggregate copy number jumps significantly in a short region (especially for disease-associated genes, such as SMN1),
+it is possible that the alignment file is missing reads for some duplicated loci.
+You can try to map unaligned reads, or map all reads using a different alignment.
+To extract unaligned reads use `samtools view input.bam "*"` (does not extract unmapped reads with a mapped mate).
+
 Issues
-======
+------
 Please submit issues [here](https://github.com/tprodanov/parascopy/issues) or send them to `timofey.prodanov[at]gmail.com`.
 
 See also
-========
+--------
 
 Additionally, you may be interested in these tools:
 * [Longshot](https://github.com/pjedge/longshot/): fast and accurate long read variant calling tool,

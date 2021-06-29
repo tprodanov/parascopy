@@ -387,7 +387,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
 
     extra_files = dict(depth='depth.csv', psv_matrix='psv_matrix.csv', psv_observations='psv_observations.csv',
         region_groups='region_groups.txt', windows='windows.bed',
-        hmm_states='hmm_states.csv', viterbi_paths='viterbi_paths.csv', hmm_params='hmm_params.csv',
+        hmm_states='hmm_states.csv', hmm_params='hmm_params.csv',
         viterbi_summary='viterbi_summary.txt', detailed_cn='detailed_copy_num.bed',
         paralog_cn='paralog_copy_num.csv', gene_conversion='gene_conversion.bed')
     if not model_params.is_loaded:
@@ -481,10 +481,10 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params):
         return region_ix, 'Skip'
     data.prepare()
 
-    _create_dir(os.path.join(data.args.output, region.subdir), data.args.rewrite == 'full')
+    _create_dir(os.path.join(data.args.output, region.subdir), data.args.rerun == 'full')
     success_path = os.path.join(data.args.output, region.subdir, 'extra', 'success')
     if os.path.exists(success_path):
-        if data.args.rewrite is None:
+        if data.args.rerun == 'none':
             common.log('Skipping region %s' % region.full_name(data.genome))
             return region_ix, None
         os.remove(success_path)
@@ -823,10 +823,11 @@ def parse_args(prog_name, in_args, is_new):
                 'You can specify only the first number of both numbers.').format(*DEFAULT_COPY_NUM_BOUND))
 
     exec_args = parser.add_argument_group('Execution parameters')
-    exec_args.add_argument('--rewrite', choices=('full', 'part'), metavar='full|part',
-        help='Rewrite output directory.\n'
-            '    full - rewrite everything,\n'
-            '    part - do not rewrite pooled reads.')
+    exec_args.add_argument('--rerun', choices=('full', 'partial', 'none'), metavar='full|partial|none', default='none',
+        help='Rerun CN analysis for all loci:\n'
+            '    full:    complete rerun,\n'
+            '    partial: use pooled reads from a previous run,\n'
+            '    none:    skip successfully finished loci [default].')
     exec_args.add_argument('-@', '--threads', type=int, metavar='<int>', default=4,
         help='Number of available threads [default: %(default)s].')
     exec_args.add_argument('--samtools', metavar='<path>|none', default='samtools',
@@ -868,7 +869,7 @@ def main(prog_name=None, in_args=None, is_new=None):
     if loaded_models:
         args.min_samples = None
     else:
-        _create_dir(os.path.join(directory, 'model'), args.rewrite == 'full')
+        _create_dir(os.path.join(directory, 'model'), args.rerun == 'full')
 
     if args.regions_subset:
         regions_subset = set(args.regions_subset)

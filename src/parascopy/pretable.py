@@ -145,7 +145,8 @@ def _write_genome_reads(region_seqs, read_len, step, min_aln_len, outp):
     for seq_i, seq in enumerate(region_seqs):
         for i, start in enumerate(range(0, len(seq) - min_aln_len + 1, step)):
             curr_seq = seq[start : start + read_len]
-            if 'N' in curr_seq:
+            # Because there could be unexpected letters (not only N).
+            if curr_seq.count('A') + curr_seq.count('C') + curr_seq.count('G') + curr_seq.count('T') != len(curr_seq):
                 continue
             outp.write('>%d-%d\n%s\n' % (seq_i, i, curr_seq))
             count += 1
@@ -166,9 +167,9 @@ def _run_bwa(in_path, out_path, genome, args):
         raise RuntimeError('BWA finished with non-zero status')
 
 
-def _filter_high_copy_num(duplications, tangled_regions, max_copy_number, min_aln_len):
+def _filter_high_copy_num(duplications, tangled_regions, max_homologies, min_aln_len):
     """
-    Tries to select one region with copy number higher than max_copy_number.
+    Tries to select one region with copy number higher than max_homologies.
     Adds this region to tangled_regions and returns a list of duplications that go beyond it.
     The functions merges regions if there is more than one region with high copy number.
     """
@@ -184,11 +185,11 @@ def _filter_high_copy_num(duplications, tangled_regions, max_copy_number, min_al
     for pos, is_start in endpoints:
         if is_start:
             copy_num += 1
-            if copy_num == max_copy_number and region_start is None:
+            if copy_num == max_homologies and region_start is None:
                 region_start = pos
         else:
             copy_num -= 1
-            if copy_num == max_copy_number - 1:
+            if copy_num == max_homologies - 1:
                 region_end = pos
     assert copy_num == 0
     assert (region_start is None) == (region_end is None)
@@ -233,12 +234,12 @@ def _analyze_hits(regions, region_seqs, aln_file, genome, args):
             grouped_results[key].append(dupl)
 
     min_aln_len = args.min_aln_len
-    max_copy_num = args.max_copy_num
+    max_homologies = args.max_homologies
     retained = []
     for single_read_alns in grouped_results.values():
         n_alns = len(single_read_alns)
-        if n_alns > max_copy_num:
-            single_read_alns = _filter_high_copy_num(single_read_alns, tangled_regions, max_copy_num, min_aln_len)
+        if n_alns > max_homologies:
+            single_read_alns = _filter_high_copy_num(single_read_alns, tangled_regions, max_homologies, min_aln_len)
             stats.many_hits += n_alns - len(single_read_alns)
             n_alns = len(single_read_alns)
         for dupl in single_read_alns:
@@ -400,8 +401,8 @@ def main(prog_name=None, in_args=None):
         help='Minimal alignment length [default: %(default)s].')
     filt_args.add_argument('--min-seq-sim', type=float, metavar='<float>', default=0.96,
         help='Minimal sequence similarity [default: %(default)s].')
-    filt_args.add_argument('--max-copy-num', type=int, metavar='<int>', default=10,
-        help='Skip regions with copy number higher than <int> [default: %(default)s].')
+    filt_args.add_argument('--max-homologies', type=int, metavar='<int>', default=10,
+        help='Skip regions with more than <int> homologies (copies) in the genome [default: %(default)s].')
     filt_args.add_argument('--keep-self-alns', action='store_true',
         help='If true, partial self-alignments will be kept\n'
             '(for example keep an alignment with a 300bp shift).\n'
