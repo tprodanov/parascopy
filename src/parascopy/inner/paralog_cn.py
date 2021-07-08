@@ -834,8 +834,6 @@ def estimate_paralog_cn(region_group_extra, all_psv_counts, samples, genome, out
             curr_rel = rel_psvs[psv_start_ix : psv_end_ix]
             curr_n_rel = np.sum(curr_rel)
             entry.info['rel_psvs'] = curr_n_rel
-            if curr_n_rel:
-                entry.info['psv_info'] = '{:.3f}'.format(np.mean(psv_info_content[psv_start_ix : psv_end_ix][curr_rel]))
 
             curr_res_ix = len(sample_results)
             if sample_results and sample_results[-1].pred_cn == entry.pred_cn:
@@ -949,14 +947,15 @@ def estimate_paralog_cn(region_group_extra, all_psv_counts, samples, genome, out
             if len(curr_rel_psvs) < 3:
                 _add_paralog_filter(curr_results, Filter.FewReliable)
 
-            info_update = dict(max_f_value='{:.3f}'.format(max_f_value), gene_conv='T' if gene_conv else 'F',
-                semirel_psvs=len(curr_gene_conv_psvs) - len(curr_rel_psvs))
-
+            info_update = dict(
+                n_psvs=len(psv_ixs),
+                rel_psvs=len(curr_rel_psvs),
+                semirel_psvs=len(curr_gene_conv_psvs) - len(curr_rel_psvs),
+                psv_info='{:.3f}'.format(mean_info),
+                max_f_value='{:.3f}'.format(max_f_value),
+                gene_conv='T' if gene_conv else 'F')
             if end_ix > start_ix + 1:
                 info_update['link'] = link_ix
-                info_update['link_psvs'] = len(psv_ixs)
-                info_update['link_rel_psvs'] = len(curr_rel_psvs)
-                info_update['link_psv_info'] = '{:.3f}'.format(mean_info)
 
             for res_entry in curr_results:
                 res_entry.paralog_cn = paralog_cn

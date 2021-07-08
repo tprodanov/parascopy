@@ -10,6 +10,7 @@ Table of contents
 * [Citing Parascopy](#citing-parascopy)
 * [Installation](#installation)
 * [General usage](#general-usage)
+* [Output files](#output-files)
 * [Precomputed data](#precomputed-data)
 * [Known issues](#known-issues)
 * [Issues](#issues)
@@ -75,6 +76,11 @@ parascopy cn-using out1/model -I input2.list -t table.bed.gz -f genome.fa -d dep
 ```
 
 See `parascopy help` or `parascopy <command> --help` for more information.
+
+Output files
+------------
+
+See output file format [here](docs/cn_output.md).
 
 Precomputed data
 ----------------
