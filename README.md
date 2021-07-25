@@ -1,3 +1,6 @@
+[![Install with bioconda](https://img.shields.io/conda/v/bioconda/parascopy.svg?label=Install%20with%20conda&color=blueviolet&style=flat-square)](https://anaconda.org/bioconda/parascopy)
+[![Updated](https://anaconda.org/bioconda/parascopy/badges/latest_release_date.svg?style=flat-square)](https://anaconda.org/bioconda/parascopy)
+
 Parascopy
 ---------
 
@@ -24,12 +27,14 @@ Currently, the paper is in progress, please check later.
 Installation
 ------------
 
-<!-- To install the Parascopy you can use `conda`:
-```
+You can install Parascopy using `conda`:
+```bash
+conda config --add channels bioconda
+conda config --add channels conda-forge
 conda install -c bioconda parascopy
-``` -->
+```
 
-Parascopy is written in Python, to manually install it you can run the following commands:
+Alternatively, you can install it manually using the following commands:
 ```bash
 git clone https://github.com/tprodanov/parascopy.git
 cd parascopy
