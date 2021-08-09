@@ -486,9 +486,28 @@ def genotype_likelihoods(ploidy, allele_counts, error_prob=0.001, gt_counts=None
     return gt_counts, likelihoods
 
 
-def calculate_all_psv_gt_probs(region_group_extra):
+def _fill_psv_gts(sample_id, sample_cn, psv_infos, psv_counts, psv_start_ix, psv_end_ix):
     from . import paralog_cn
 
+    for psv_ix in range(psv_start_ix, psv_end_ix):
+        counts = psv_counts[psv_ix][sample_id]
+        if counts.skip:
+            continue
+
+        psv_info = psv_infos[psv_ix]
+        if psv_info.psv_gt_probs[sample_id] is not None:
+            continue
+
+        if sample_cn not in psv_info.precomp_datas:
+            psv_info.precomp_datas[sample_cn] = paralog_cn._PrecomputedData(psv_info.allele_corresp, sample_cn)
+        psv_genotypes = psv_info.precomp_datas[sample_cn].psv_genotypes
+        _, probs = genotype_likelihoods(sample_cn, counts.allele_counts, gt_counts=psv_genotypes)
+        probs -= logsumexp(probs)
+        psv_info.psv_gt_probs[sample_id] = probs
+        psv_info.sample_cns[sample_id] = sample_cn
+
+
+def calculate_all_psv_gt_probs(region_group_extra):
     psv_ixs = region_group_extra.region_group.psv_ixs
     if len(psv_ixs) == 0:
         return
@@ -496,6 +515,7 @@ def calculate_all_psv_gt_probs(region_group_extra):
     psv_counts = region_group_extra.psv_read_counts
     psv_finder = region_group_extra.psv_finder
     psv_infos = region_group_extra.psv_infos
+    ref_cn = region_group_extra.region_group.cn
 
     n_psvs = len(psv_counts)
     n_samples = len(psv_counts[0])
@@ -506,20 +526,12 @@ def calculate_all_psv_gt_probs(region_group_extra):
             reg_end = sample_const_region.region1.end
             sample_cn = sample_const_region.pred_cn
             psv_start_ix, psv_end_ix = psv_finder.select(reg_start, reg_end)
+            _fill_psv_gts(sample_id, sample_cn, psv_infos, psv_counts, psv_start_ix, psv_end_ix)
 
-            for psv_ix in range(psv_start_ix, psv_end_ix):
-                counts = psv_counts[psv_ix][sample_id]
-                if counts.skip:
-                    continue
-                psv_info = psv_infos[psv_ix]
-
-                if sample_cn not in psv_info.precomp_datas:
-                    psv_info.precomp_datas[sample_cn] = paralog_cn._PrecomputedData(psv_info.allele_corresp, sample_cn)
-                psv_genotypes = psv_info.precomp_datas[sample_cn].psv_genotypes
-                _, probs = genotype_likelihoods(sample_cn, counts.allele_counts, gt_counts=psv_genotypes)
-                probs -= logsumexp(probs)
-                psv_info.psv_gt_probs[sample_id] = probs
-                psv_info.sample_cns[sample_id] = sample_cn
+        reliable_region = region_group_extra.sample_reliable_regions[sample_id]
+        if reliable_region is not None:
+            psv_start_ix, psv_end_ix = psv_finder.select(reliable_region.start, reliable_region.end)
+            _fill_psv_gts(sample_id, ref_cn, psv_infos, psv_counts, psv_start_ix, psv_end_ix)
 
 
 def calculate_support_matrix(region_group_extra):

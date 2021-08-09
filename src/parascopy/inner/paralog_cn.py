@@ -260,7 +260,6 @@ class _PsvInfo:
         self.ref_cn = region_group.cn
 
         self.info_content = np.nan
-        self.use_samples = None
         self.n_used_samples = 0
         self.in_em = False
         self.sample_ids = None
@@ -274,7 +273,6 @@ class _PsvInfo:
         self.support_matrix = None
 
     def set_use_samples(self, use_samples, min_samples):
-        self.use_samples = use_samples
         self.sample_ids = np.where(use_samples)[0]
         self.n_used_samples = len(self.sample_ids)
         self.in_em = self.n_used_samples >= min_samples
