@@ -1,7 +1,7 @@
 
 __pkg_name__ = 'parascopy'
 __title__ = 'Parascopy'
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 __author__ = 'Timofey Prodanov, Vikas Bansal'
 __license__ = 'MIT'
 
@@ -11,4 +11,4 @@ def long_version():
         authors_str = ', '.join(authors[:-1]) + ' and ' + authors[-1]
     else:
         authors_str = authors[0]
-    return '{} v{}.\nCreated by {}.'.format(__title__, __version__, authors_str)
+    return '{} v{}\nCreated by {}'.format(__title__, __version__, authors_str)

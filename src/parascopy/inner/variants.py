@@ -4,6 +4,7 @@ import itertools
 import pysam
 import numpy as np
 from scipy.stats import poisson, multinomial
+from scipy.special import logsumexp
 from functools import lru_cache
 
 from .cigar import Cigar, Operation
@@ -187,24 +188,6 @@ def from_freebayes(record, header):
             ref_start = ref_pos
     if ref_start is not None:
         yield _create_record(record, header, cigars, ref_start, ref_len)
-
-
-# class VariantsSet:
-#     def __init__(self, variants, genome):
-#         self._chroms = [None] * genome.n_chromosomes
-#         for variant in variants:
-#             chrom_id = genome.chrom_id(variant.chrom)
-#             if self._chroms[chrom_id] is None:
-#                 self._chroms[chrom_id] = []
-#             self._chroms[chrom_id].append(variant)
-
-#         self._starts = []
-#         for chrom in self._chroms:
-#             if chrom is None:
-#                 self._starts.append(None)
-#             else:
-#                 chrom.sort(key=operator.attrgetter('start'))
-#                 self._starts.append(list(map(operator.attrgetter('start'), chrom)))
 
 
 class _AdditionalInfo:
@@ -501,3 +484,79 @@ def genotype_likelihoods(ploidy, allele_counts, error_prob=0.001, gt_counts=None
         probs /= sum(probs)
         likelihoods[i] = multinomial.logpmf(allele_counts, total_reads, probs)
     return gt_counts, likelihoods
+
+
+def calculate_all_psv_gt_probs(region_group_extra):
+    from . import paralog_cn
+
+    psv_ixs = region_group_extra.region_group.psv_ixs
+    if len(psv_ixs) == 0:
+        return
+    common.log('    Calculating PSV genotype probabilities')
+    psv_counts = region_group_extra.psv_read_counts
+    psv_finder = region_group_extra.psv_finder
+    psv_infos = region_group_extra.psv_infos
+
+    n_psvs = len(psv_counts)
+    n_samples = len(psv_counts[0])
+
+    for sample_id in range(n_samples):
+        for sample_const_region in region_group_extra.sample_const_regions[sample_id]:
+            reg_start = sample_const_region.region1.start
+            reg_end = sample_const_region.region1.end
+            sample_cn = sample_const_region.pred_cn
+            psv_start_ix, psv_end_ix = psv_finder.select(reg_start, reg_end)
+
+            for psv_ix in range(psv_start_ix, psv_end_ix):
+                counts = psv_counts[psv_ix][sample_id]
+                if counts.skip:
+                    continue
+                psv_info = psv_infos[psv_ix]
+
+                if sample_cn not in psv_info.precomp_datas:
+                    psv_info.precomp_datas[sample_cn] = paralog_cn._PrecomputedData(psv_info.allele_corresp, sample_cn)
+                psv_genotypes = psv_info.precomp_datas[sample_cn].psv_genotypes
+                _, probs = genotype_likelihoods(sample_cn, counts.allele_counts, gt_counts=psv_genotypes)
+                probs -= logsumexp(probs)
+                psv_info.psv_gt_probs[sample_id] = probs
+                psv_info.sample_cns[sample_id] = sample_cn
+
+
+def calculate_support_matrix(region_group_extra):
+    """
+    Calculates probabilities of sample genotypes according to all individual PSVs (if they have f-values).
+    """
+    if not region_group_extra.has_f_values:
+        return
+
+    psv_finder = region_group_extra.psv_finder
+    psv_infos = region_group_extra.psv_infos
+    n_psvs = len(psv_infos)
+    n_samples = region_group_extra.n_samples
+    for psv_info in psv_infos:
+        psv_info.support_matrix = [None] * n_samples
+
+    f_values = region_group_extra.psv_f_values
+    psv_exponents = region_group_extra.psv_infos
+    psv_gt_coefs_cache = [{} for _ in range(n_psvs)]
+
+    for sample_id in range(n_samples):
+        for psv_ix in range(n_psvs):
+            psv_info = psv_infos[psv_ix]
+            psv_gt_probs = psv_info.psv_gt_probs[sample_id]
+            if np.isnan(f_values[psv_ix, 0]) or psv_gt_probs is None:
+                continue
+
+            sample_cn = psv_info.sample_cns[sample_id]
+            if sample_cn in psv_gt_coefs_cache[psv_ix]:
+                curr_psv_gt_coefs = psv_gt_coefs_cache[psv_ix][sample_cn]
+            else:
+                precomp_data = psv_info.precomp_datas[sample_cn]
+                f_pow_combs = precomp_data.f_power_combinations(f_values[psv_ix])
+                curr_psv_gt_coefs = precomp_data.eval_poly_matrices(f_pow_combs)
+                psv_gt_coefs_cache[psv_ix][sample_cn] = curr_psv_gt_coefs
+
+            psv_info.support_matrix[sample_id] = support_row = np.zeros(len(curr_psv_gt_coefs))
+            for sample_gt_ix, psv_gt_coefs in enumerate(curr_psv_gt_coefs):
+                support_row[sample_gt_ix] = logsumexp(psv_gt_coefs + psv_gt_probs)
+            support_row *= psv_exponents[psv_ix].info_content

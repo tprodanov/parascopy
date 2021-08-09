@@ -11,6 +11,7 @@ import string
 from Bio import bgzf
 import pysam
 import shutil
+from scipy.special import logsumexp
 
 from . import genome as genome_
 
@@ -396,3 +397,12 @@ def letter_suffix(index, chars=string.ascii_lowercase):
 def tricube_kernel(values):
     # Calculates tricube_kernel(abs(values)), values over 1 are ignored.
     return np.power(1.0 - np.power(np.minimum(np.abs(values), 1.0), 3), 3)
+
+
+LOG10 = np.log(10)
+
+def phred_qual(probs, best_ix, max_value=10000):
+    oth_prob = logsumexp(np.delete(probs, best_ix))
+    if np.isfinite(oth_prob):
+        return min(-10 * oth_prob / LOG10, max_value)
+    return max_value

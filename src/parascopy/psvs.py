@@ -111,7 +111,7 @@ class _Psv:
         return 'start=%s, end=%s, reg2=%s' % (self.start, self.end, self.reg2)
 
 
-def create_vcf_header(genome, chrom_ids=None, argv=None, add_f_values=False):
+def create_vcf_header(genome, chrom_ids=None, argv=None):
     vcf_header = pysam.VariantHeader()
     if argv is not None:
         vcf_header.add_line('##command="%s"' % ' '.join(argv))
@@ -119,10 +119,6 @@ def create_vcf_header(genome, chrom_ids=None, argv=None, add_f_values=False):
         vcf_header.add_line('##contig=<ID=%s,length=%d>' % (genome.chrom_name(chrom_id), genome.chrom_len(chrom_id)))
     vcf_header.add_line('##INFO=<ID=pos2,Number=.,Type=String,Description="Second positions of the PSV. '
         'Format: chrom:pos:strand[:allele]">')
-    if add_f_values:
-        vcf_header.add_line('##INFO=<ID=info,Number=1,Type=Float,Description="Information content.">')
-        vcf_header.add_line('##INFO=<ID=fval,Number=.,Type=Float,Description="f-values: each number represents '
-            'reliability of the PSV on one of the copies.">')
     return vcf_header
 
 
@@ -225,13 +221,13 @@ def create_psv_records(duplications, genome, vcf_header, region, tangled_regions
     return psv_records
 
 
-def write_psvs(psv_records, vcf_header, vcf_path):
+def write_psvs(psv_records, vcf_header, vcf_path, tabix):
     gzip = vcf_path.endswith('.gz')
     with pysam.VariantFile(vcf_path, 'wz' if gzip else 'w', header=vcf_header) as vcf_file:
         for psv in psv_records:
             vcf_file.write(psv)
-    if gzip:
-        common.Process(['tabix', '-p', 'vcf', vcf_path]).finish()
+    if gzip and tabix != 'none':
+        common.Process([tabix, '-p', 'vcf', vcf_path]).finish()
 
 
 def main(prog_name=None, in_args=None):
@@ -284,7 +280,7 @@ def main(prog_name=None, in_args=None):
                     dupl.set_sequences(genome=genome)
                     duplications.append(dupl)
             records.extend(create_psv_records(duplications, genome, vcf_header, region, tangled_regions))
-        write_psvs(records, vcf_header, args.output)
+        write_psvs(records, vcf_header, args.output, 'tabix')
 
 
 if __name__ == '__main__':

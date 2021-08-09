@@ -510,7 +510,7 @@ class RegionGroupExtra:
     """
     Structure that stores all necessary information for a single region group, as well as Viterbi results.
     """
-    def __init__(self, dupl_hierarchy, region_group, genome):
+    def __init__(self, dupl_hierarchy, region_group, psv_read_counts, n_samples, genome):
         from . import paralog_cn
 
         self._dupl_hierarchy = dupl_hierarchy
@@ -523,11 +523,13 @@ class RegionGroupExtra:
 
         psvs = dupl_hierarchy.psvs
         self._region_psvs = [psvs[i] for i in region_group.psv_ixs]
+        self._psv_finder = common.NonOverlappingSet.from_variants(self._region_psvs)
+        self._psv_read_counts = [psv_read_counts[i] for i in region_group.psv_ixs]
 
         self._sample_const_regions = None
         self._sample_reliable_regions = None
 
-        self._psv_infos = paralog_cn.create_psv_infos(self._region_psvs, self._region_group, genome)
+        self._psv_infos = paralog_cn.create_psv_infos(self._region_psvs, self._region_group, n_samples, genome)
         self._psv_f_values = None
 
     @property
@@ -558,6 +560,14 @@ class RegionGroupExtra:
     def psvs(self):
         return self._region_psvs
 
+    @property
+    def psv_finder(self):
+        return self._psv_finder
+
+    @property
+    def psv_read_counts(self):
+        return self._psv_read_counts
+
     def set_viterbi_res(self, sample_const_regions, sample_reliable_regions):
         self._sample_const_regions = sample_const_regions
         self._sample_reliable_regions = sample_reliable_regions
@@ -581,13 +591,48 @@ class RegionGroupExtra:
         for psv_info in self._psv_infos:
             psv_info.use_samples = np.zeros(n_samples, dtype=np.bool)
 
-    def set_psv_records_info(self, genome):
+    def update_psv_records(self, reliable_thresholds):
+        from . import paralog_cn
+
         if not self.has_f_values:
             return
+        semirel_threshold, reliable_threshold = reliable_thresholds
 
         for psv, fval, psv_info in zip(self._region_psvs, self._psv_f_values, self._psv_infos):
-            psv.info['info'] = psv_info.info_content
             psv.info['fval'] = tuple(fval)
+            psv.info['info'] = psv_info.info_content
+            min_fval = min(fval)
+            psv_type = 'u'
+            if min_fval >= reliable_threshold:
+                psv_type = 'r'
+            elif min_fval >= semirel_threshold:
+                psv_type = 's'
+            psv.info['rel'] = psv_type
+
+            for sample_id, psv_gt_probs in enumerate(psv_info.psv_gt_probs):
+                if psv_gt_probs is None:
+                    continue
+                format = psv.samples[sample_id]
+                sample_cn = psv_info.sample_cns[sample_id]
+                precomp_data = psv_info.precomp_datas[sample_cn]
+                best_gt = np.argmax(psv_gt_probs)
+
+                # For example PSV genotype (4,2) -> 0/0/0/0/1/1
+                psv_gt = precomp_data.psv_genotypes[best_gt]
+                psv_gt = np.repeat(np.arange(len(psv_gt)), psv_gt)
+                format['GT'] = tuple(psv_gt)
+                format['GQ'] = int(common.phred_qual(psv_gt_probs, best_gt))
+
+                support_row = psv_info.support_matrix[sample_id]
+                if support_row is None:
+                    continue
+                n_copies = len(precomp_data.sample_genotypes[0])
+                _, pscn, pscn_qual = paralog_cn.calculate_marginal_probs(precomp_data.sample_genotypes, support_row,
+                    n_copies, sample_cn)
+                pscn, pscn_qual, any_known = paralog_cn.paralog_cn_str(pscn, pscn_qual)
+                if any_known:
+                    format['psCN'] = pscn
+                    format['psCNq'] = pscn_qual
 
     @property
     def has_f_values(self):
@@ -600,3 +645,18 @@ class RegionGroupExtra:
     @property
     def psv_infos(self):
         return self._psv_infos
+
+    @property
+    def n_samples(self):
+        return len(self._sample_const_regions)
+
+    def set_reliable_psvs(self, semirel_threshold, reliable_threshold):
+        if self.has_f_values:
+            psvs_in_em = np.array([psv_info.in_em for psv_info in self.psv_infos])
+            with np.errstate(invalid='ignore'):
+                self.psv_is_reliable = np.all(self.psv_f_values >= reliable_threshold, axis=1) & psvs_in_em
+                self.psv_is_semirel = np.all(self.psv_f_values >= semirel_threshold, axis=1) & psvs_in_em
+        else:
+            n_psvs = len(self._psv_infos)
+            self.psv_is_reliable = np.zeros(n_psvs, dtype=np.bool)
+            self.psv_is_semirel = np.zeros(n_psvs, dtype=np.bool)

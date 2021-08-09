@@ -12,9 +12,6 @@ from .genome import Interval
 from . import cn_tools
 
 
-_LOG10 = np.log(10)
-
-
 class HmmModel:
     """
     Class that stores an HMM model.
@@ -790,8 +787,8 @@ def _write_hmm_params(group_name, iteration, windows, multipliers, mult_weights,
         if obs_ix == n_observations - 1:
             params_out.write('\t'.join(('NA',) * 7))
         else:
-            params_out.write('{:.3f}\t{:.3f}\t'.format(*(down_up[obs_ix] / _LOG10)))
-            params_out.write('\t'.join(map('{:.3f}'.format, jump_probs[obs_ix] / _LOG10)))
+            params_out.write('{:.3f}\t{:.3f}\t'.format(*(down_up[obs_ix] / common.LOG10)))
+            params_out.write('\t'.join(map('{:.3f}'.format, jump_probs[obs_ix] / common.LOG10)))
         params_out.write('\n')
 
 
@@ -825,7 +822,7 @@ def _single_iteration(depth_matrix, windows, bg_depth, model, group_name, iterat
         possible_states=None, *, min_samples, min_trans_prob, max_trans_prob, use_multipliers):
     model.run_forward_backward(possible_states)
     total_prob = np.sum(model.total_probs)
-    common.log('        Iteration {:>2}:   Likelihood {:,.3f}'.format(iteration, total_prob / _LOG10))
+    common.log('        Iteration {:>2}:   Likelihood {:,.3f}'.format(iteration, total_prob / common.LOG10))
 
     down_up = model.baum_welch_transitions()
     n_samples = depth_matrix.shape[1]
@@ -842,7 +839,7 @@ def _single_iteration(depth_matrix, windows, bg_depth, model, group_name, iterat
     _write_hmm_params(group_name, iteration, windows, multipliers, mult_weights, down_up, model, params_out)
     model.calculate_emission_matrices(depth_matrix, windows, multipliers, mult_weights, bg_depth)
     params_out.write('# Likelihood for group {} iteration {}: {:.5f}\n'.format(
-        group_name, iteration, total_prob / _LOG10))
+        group_name, iteration, total_prob / common.LOG10))
     return total_prob, multipliers
 
 
@@ -974,8 +971,8 @@ def _write_detailed_cn(model, samples, windows, genome, out):
             best_cn = model.get_copy_num(best_state)
             second_cn = model.get_copy_num(second_state)
             out.write('\t{}:{:.3f} {}:{:.3f}'.format(
-                model.format_cn(best_cn), abs(probs[best_state] / _LOG10),
-                model.format_cn(second_cn), abs(probs[second_state] / _LOG10)))
+                model.format_cn(best_cn), abs(probs[best_state] / common.LOG10),
+                model.format_cn(second_cn), abs(probs[second_state] / common.LOG10)))
         out.write('\n')
 
 
@@ -1039,8 +1036,7 @@ def _get_sample_const_regions(sample_id, main_path, model):
 
         probs = np.array(probs)
         probs -= logsumexp(probs)
-        oth_lik = logsumexp(probs[1:])
-        qual = np.clip(-10 * oth_lik / _LOG10, 0, 10000)
+        qual = common.phred_qual(probs, best_ix=0)
         dupl_region = segment.dupl_region
 
         pred_cn = cns[0]
@@ -1052,8 +1048,7 @@ def _get_sample_const_regions(sample_id, main_path, model):
             probs = np.abs(probs)
             ixs = np.argsort(probs)
             cn_pred.info['agCN_probs'] = ','.join(
-                '{}:{:.2f}'.format(model.format_cn(cns[i]), probs[i] / _LOG10) for i in ixs if probs[i] < 11)
-
+                '{}:{:.3g}'.format(model.format_cn(cns[i]), probs[i] / common.LOG10) for i in ixs if probs[i] < 11)
         res.append(cn_pred)
     return res
 

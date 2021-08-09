@@ -11,6 +11,7 @@ import numpy as np
 import traceback
 import multiprocessing
 import gzip
+from Bio import bgzf
 from time import perf_counter
 from datetime import timedelta
 
@@ -125,45 +126,31 @@ def _update_psv_observations(record, sample_id, psvs, psv_set, psv_observations)
 PsvCounts = collections.namedtuple('PsvCounts', 'allele_counts partial other skip')
 
 
-def _write_psv_observations(psvs, samples, psv_observations, outp, matrix_outp):
+def _count_psv_observations(psvs, samples, psv_observations):
     """
     Returns matrix of PsvCounts (n_psvs x n_samples).
     """
-    outp.write('pos\tref\talt\tsample\tref_cov\talt_cov\tpartial\tother_cov\tobservations\tuse\n')
-    matrix_outp.write('pos\tref\talt\tpos2\texp_gt_counts\t%s\n' % '\t'.join(samples))
-
     n_psvs = len(psvs)
     n_samples = len(samples)
     res = [[None] * n_samples for _ in range(n_psvs)]
 
     for psv_ix, psv in enumerate(psvs):
         pos2 = psv.info['pos2']
-        exp_gt_counts = variants_.gt_counts_from_pos2(pos2, len(psv.alleles))
-        psv_summary = '%d\t%s\t%s\t' % (psv.pos, psv.ref, ','.join(psv.alts))
-        matrix_outp.write(psv_summary)
-        matrix_outp.write('%s\t' % ','.join(pos2))
-        matrix_outp.write(','.join(map(str, exp_gt_counts)))
 
         for sample_id, sample in enumerate(samples):
-            outp.write(psv_summary)
             obs = psv_observations[psv_ix][sample_id]
             ref_cov = obs[psv.ref]
             alt_cov = tuple(obs[alt] for alt in psv.alts)
             partial = sum(value for key, value in obs.items() if '-' in key)
             total_reads = sum(obs.values())
             oth_cov = total_reads - ref_cov - sum(alt_cov) - partial
-            outp.write('%s\t%d\t%s\t%d\t%d\t%s\t' % (sample, ref_cov, ','.join(map(str, alt_cov)), partial, oth_cov,
-                ' '.join('%s:%d' % tup for tup in obs.most_common())))
-
             skip = partial >= 0.1 * total_reads or oth_cov >= 0.1 * total_reads
-            outp.write('F' if skip else 'T')
-            outp.write('\n')
-            if skip:
-                matrix_outp.write('\t*')
-            else:
-                matrix_outp.write('\t%d|%s|%d' % (ref_cov, '|'.join(map(str, alt_cov)), oth_cov + partial))
-            res[psv_ix][sample_id] = PsvCounts((ref_cov, *alt_cov), partial, oth_cov, skip)
-        matrix_outp.write('\n')
+
+            allele_counts = (ref_cov, *alt_cov)
+            res[psv_ix][sample_id] = PsvCounts(allele_counts, partial, oth_cov, skip)
+            format = psv.samples[sample_id]
+            format['DP'] = total_reads
+            format['AC'] = allele_counts
     return res
 
 
@@ -314,6 +301,25 @@ class _TimeLogger:
         self._out.close()
 
 
+def _update_vcf_header(vcf_header, samples):
+    vcf_header.add_line('##INFO=<ID=fval,Number=.,Type=Float,Description="f-values: '
+        'frequency of the reference allele for each repeat copy">')
+    vcf_header.add_line('##INFO=<ID=info,Number=1,Type=Float,Description="Information content">')
+    vcf_header.add_line('##INFO=<ID=rel,Number=1,Type=String,'
+        'Description="PSV reliability: r (reliable) | s (semi-reliable) | u (unreliable)">')
+    vcf_header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
+    vcf_header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">')
+    vcf_header.add_line('##FORMAT=<ID=AC,Number=R,Type=Integer,Description="Allele counts">')
+    vcf_header.add_line('##FORMAT=<ID=DP,Number=1,Type=Integer,'
+        'Description="Total read count (includes reads that do not support any allele)">')
+    vcf_header.add_line('##FORMAT=<ID=psCN,Number=.,Type=String,'
+        'Description="Paralog-specific copy number calculated using this PSV only">')
+    vcf_header.add_line('##FORMAT=<ID=psCNq,Number=.,Type=Integer,'
+        'Description="Phred-quality of the psCN value">')
+    for sample in samples:
+        vcf_header.add_sample(sample)
+
+
 def analyze_region(interval, data, samples, bg_depth, model_params):
     subdir = os.path.join(data.args.output, interval.subdir)
     duplications = []
@@ -363,8 +369,8 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         skip_regions = Interval.combine_overlapping(skip_regions)
         model_params.set_skip_regions(skip_regions)
 
-    psvs_path = os.path.join(subdir, 'psvs.vcf.gz')
-    psv_header = psvs_.create_vcf_header(genome, (interval.chrom_id,), add_f_values=True)
+    psv_header = psvs_.create_vcf_header(genome, (interval.chrom_id,))
+    _update_vcf_header(psv_header, samples)
     psv_records = psvs_.create_psv_records(duplications, genome, psv_header, interval, skip_regions)
 
     window_size = bg_depth.window_size
@@ -385,8 +391,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         pool_reads.pool_reads_inner(data.bam_files, data.read_groups, pooled_bam_path, interval,
             duplications, genome, Weights(), args.samtools, verbose=True, time_log=time_log)
 
-    extra_files = dict(depth='depth.csv', psv_matrix='psv_matrix.csv', psv_observations='psv_observations.csv',
-        region_groups='region_groups.txt', windows='windows.bed',
+    extra_files = dict(depth='depth.csv', region_groups='region_groups.txt', windows='windows.bed',
         hmm_states='hmm_states.csv', hmm_params='hmm_params.csv',
         viterbi_summary='viterbi_summary.txt', detailed_cn='detailed_copy_num.bed',
         paralog_cn='paralog_copy_num.csv', gene_conversion='gene_conversion.bed')
@@ -394,7 +399,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         extra_files.update(dict(
             psv_f_values='em_f_values.csv', interm_psv_f_values='em_interm_f_values.csv',
             em_likelihoods='em_likelihoods.csv', em_sample_psv_gts='em_sample_psv_gts.csv',
-            em_sample_gts='em_sample_gts.csv', em_sample_psv_support='em_sample_psv_support.csv',
+            em_sample_gts='em_sample_gts.csv',
             use_psv_sample='em_use_psv_sample.csv', psv_filtering='em_psv_filtering.txt',
         ))
 
@@ -416,8 +421,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
 
         time_log.log('Writing read depth and PSV observations')
         depth_matrix = _create_depth_matrix(dupl_hierarchy.windows, window_counts)
-        psv_counts = _write_psv_observations(psv_records, samples, psv_observations,
-            out.psv_observations, out.psv_matrix)
+        psv_counts = _count_psv_observations(psv_records, samples, psv_observations)
         dupl_hierarchy.summarize_region_groups(genome, out.region_groups)
         _write_windows(dupl_hierarchy, genome, out.windows)
         out.flush()
@@ -425,40 +429,45 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         for region_group in dupl_hierarchy.region_groups:
             if not region_group.window_ixs:
                 continue
-            group_extra = cn_tools.RegionGroupExtra(dupl_hierarchy, region_group, genome)
+            group_extra = cn_tools.RegionGroupExtra(dupl_hierarchy, region_group, psv_counts, len(samples), genome)
             if len(group_extra.viterbi_windows) < args.min_windows:
                 continue
 
             group_name = region_group.name
-            time_log.log('Group {}: copy number HMM'.format(group_name))
+            time_log.log('Group {}: aggregate copy number HMM'.format(group_name))
             common.log('[{}] Region group {}'.format(interval.name, group_name))
             cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
                 min_samples=args.min_samples, copy_num_range=args.copy_num_range, copy_num_jump=args.copy_num_jump,
                 min_trans_prob=args.transition_prob * np.log(10), use_multipliers=args.use_multipliers)
             out.flush()
 
+            time_log.log('Group {}: PSV genotype probabilities')
+            variants_.calculate_all_psv_gt_probs(group_extra)
             if model_params.is_loaded:
                 group_extra.set_from_model_params(model_params, len(samples))
             else:
                 time_log.log('Group {}: reliable PSVs EM'.format(group_name))
-                paralog_cn.find_reliable_psvs(group_extra, psv_counts, samples, genome, out, args.min_samples,
+                paralog_cn.find_reliable_psvs(group_extra, samples, genome, out, args.min_samples,
                     args.reliable_threshold[1], args.copy_num_bound[0])
                 model_params.set_psv_f_values(group_extra, genome)
+            group_extra.set_reliable_psvs(*args.reliable_threshold)
 
-            group_extra.set_psv_records_info(genome)
-            time_log.log('Group {}: paralog copy number and gene conversion'.format(group_name))
-            results.extend(paralog_cn.estimate_paralog_cn(group_extra, psv_counts, samples, genome, out,
-                args.reliable_threshold, *args.copy_num_bound))
+            time_log.log('Group {}: sample-PSV genotype probabilities')
+            variants_.calculate_support_matrix(group_extra)
+            group_extra.update_psv_records(args.reliable_threshold)
+            time_log.log('Group {}: paralog-specific copy number and gene conversion'.format(group_name))
+            results.extend(paralog_cn.estimate_paralog_cn(group_extra, samples, genome, out,
+                paralog_max_copy_num=args.copy_num_bound[0], max_genotypes=args.copy_num_bound[1]))
             out.flush()
 
     time_log.log('Writing results')
     common.log('[{}] Writing PSVs'.format(interval.name))
-    psvs_.write_psvs(psv_records, psv_header, psvs_path)
+    psvs_.write_psvs(psv_records, psv_header, os.path.join(subdir, 'psvs.vcf.gz'), args.tabix)
 
     results.sort()
-    with open(os.path.join(subdir, 'res.samples.bed'), 'w') as out1:
+    with bgzf.open(os.path.join(subdir, 'res.samples.bed.gz'), 'wt') as out1:
         _write_summary(results, interval.name, genome, samples, out1)
-    with open(os.path.join(subdir, 'res.matrix.bed'), 'w') as out2:
+    with bgzf.open(os.path.join(subdir, 'res.matrix.bed.gz'), 'wt') as out2:
         paralog_cn.write_matrix_summary(results, interval.name, genome, samples, out2)
     time_log.log('Success')
     time_log.close()
@@ -507,35 +516,51 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params):
     return region_ix, None
 
 
-def _join_summaries(out_dir, regions, successful, genome, filename):
+def _join_summaries(out_dir, regions, successful, genome, filename, tabix):
+    """
+    Join vcf or bed files (vcf file when is_bed_file is False).
+    """
+    if filename.endswith('.bed') or filename.endswith('.bed.gz'):
+        is_bed_file = True
+    else:
+        assert filename.endswith('.vcf') or filename.endswith('.vcf.gz')
+        is_bed_file = False
+
     entries = []
     write_header = True
     header = []
 
+    maxsplit = 3 + is_bed_file
     for region, success in zip(regions, successful):
         if not success:
             continue
-        with open(os.path.join(out_dir, region.subdir, filename)) as inp:
+        with common.open_possible_gzip(os.path.join(out_dir, region.subdir, filename)) as inp:
             for line in inp:
                 if line.startswith('#'):
                     if write_header:
                         header.append(line)
                     continue
-                line = line.split('\t', maxsplit=4)
+                line = line.split('\t', maxsplit=maxsplit)
                 line[0] = genome.chrom_id(line[0])
                 line[1] = int(line[1])
-                line[2] = int(line[2])
+                if is_bed_file:
+                    line[2] = int(line[2])
                 entries.append(line)
             write_header = not header
 
     entries.sort()
-    with open(os.path.join(out_dir, filename), 'w') as out:
-        out.writelines(header)
+    out_filename = os.path.join(out_dir, filename)
+    with common.open_possible_gzip(out_filename, 'w', bgzip=True) as out:
+        for line in header:
+            out.write(line)
         for entry in entries:
             entry[0] = genome.chrom_name(entry[0])
             entry[1] = str(entry[1])
-            entry[2] = str(entry[2])
+            if is_bed_file:
+                entry[2] = str(entry[2])
             out.write('\t'.join(entry))
+    if out_filename.endswith('.gz') and tabix != 'none':
+        common.Process([tabix, '-p', 'bed' if is_bed_file else 'vcf', out_filename]).finish()
 
 
 def run(regions, data, samples, bg_depth, models):
@@ -588,8 +613,9 @@ def run(regions, data, samples, bg_depth, models):
         with open(os.path.join(out_dir, 'model', 'list.txt'), 'w') as joint_list:
             for region in itertools.compress(regions, successful):
                 joint_list.write('{}.gz\n'.format(region.subdir))
-    _join_summaries(out_dir, regions, successful, data.genome, 'res.samples.bed')
-    _join_summaries(out_dir, regions, successful, data.genome, 'res.matrix.bed')
+    _join_summaries(out_dir, regions, successful, data.genome, 'res.samples.bed.gz', data.args.tabix)
+    _join_summaries(out_dir, regions, successful, data.genome, 'res.matrix.bed.gz', data.args.tabix)
+    _join_summaries(out_dir, regions, successful, data.genome, 'psvs.vcf.gz', data.args.tabix)
 
     n_successes = sum(successful)
     if n_successes < n_regions:
@@ -833,6 +859,9 @@ def parse_args(prog_name, in_args, is_new):
     exec_args.add_argument('--samtools', metavar='<path>|none', default='samtools',
         help='Path to samtools executable [default: %(default)s].\n'
             'Use python wrapper if "none", can lead to errors.')
+    exec_args.add_argument('--tabix', metavar='<path>', default='tabix',
+        help='Path to "tabix" executable [default: %(default)s].\n'
+            'Use "none" to skip indexing output files.')
 
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
@@ -842,6 +871,8 @@ def parse_args(prog_name, in_args, is_new):
     args.is_new = is_new
     if args.samtools != 'none':
         common.check_executable(args.samtools)
+    if args.tabix != 'none':
+        common.check_executable(args.tabix)
 
     if is_new:
         if len(args.copy_num_bound) == 1:
