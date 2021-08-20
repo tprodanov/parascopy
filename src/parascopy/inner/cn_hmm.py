@@ -468,46 +468,68 @@ def _minus_value_len(key_value):
     return -len(key_value[1])
 
 
+def _get_boundary(window, next_window, const_region, all_windows):
+    if next_window is None or next_window.const_region_ix != window.const_region_ix:
+        return const_region
+
+    sign = np.sign(next_window.ix - window.ix)
+    ix_diff = sign * (next_window.ix - window.ix)
+    if ix_diff == 1:
+        # Next HMM window touches current window.
+        return window
+
+    middle_window = all_windows[window.ix + sign * (ix_diff // 2)]
+    assert middle_window.const_region_ix == window.const_region_ix
+    if ix_diff % 2 == 1:
+        # There is an even number of non-HMM windows between next_window & window.
+        return middle_window
+    try:
+        return middle_window.half_dupl_region(left_side=sign > 0)
+    except ValueError:
+        # Could not create a half region for some reason.
+        return all_windows[middle_window.ix - sign]
+
+
+def _extract_window_boundaries(hmm_windows, dupl_hierarchy):
+    """
+    Returns list of tuples (one tuple for each HMM window)
+    values are tuples (start_window, end_window, const_region).
+    start_window and end_window are then used to create a set of regions2 for an output entry.
+    """
+    boundaries = []
+    n_windows = len(hmm_windows)
+    all_windows = dupl_hierarchy.windows
+
+    for i, window in enumerate(hmm_windows):
+        const_region = dupl_hierarchy.const_regions[window.const_region_ix]
+        assert const_region.ix == window.const_region_ix
+
+        prev_window = hmm_windows[i - 1] if i else None
+        start_window = _get_boundary(window, prev_window, const_region, all_windows)
+
+        next_window = hmm_windows[i + 1] if i < n_windows - 1 else None
+        end_window = _get_boundary(window, next_window, const_region, all_windows)
+
+        boundaries.append((start_window, end_window, const_region))
+    return boundaries
+
+
 class PathSegment:
-    def __init__(self, start_ix, end_ix, state, model, windows, const_regions_extra):
+    def __init__(self, start_ix, end_ix, state, model, windows, window_boundaries):
         self.start_ix = start_ix
         self.end_ix = end_ix
         self.state = state
         self.cn = model.get_copy_num(state)
 
-        start_window = windows[start_ix]
-        end_window = windows[end_ix - 1]
-        const_region, reg_start_ix, reg_end_ix = const_regions_extra[start_window.const_region_ix]
-        assert const_region.ix == end_window.const_region_ix
-        if start_ix == reg_start_ix:
-            start_window = const_region
-        if end_ix == reg_end_ix:
-            end_window = const_region
+        start_window, _, const_region = window_boundaries[start_ix]
+        _, end_window, const_region_b = window_boundaries[end_ix - 1]
+        assert const_region.ix == const_region_b.ix
 
         combined = start_window.continue_if_possible(end_window, max_dist=sys.maxsize, strict_order=False)
         assert combined is not None
         self.dupl_region = cn_tools.DuplRegion(None, *combined)
         self.const_region_ix = const_region.ix
         self.group_name = const_region.group_name
-
-    def crop(self, template_segment):
-        if self.end_ix <= template_segment.start_ix or self.start_ix >= template_segment.end_ix:
-            return None
-        cls = self.__class__
-        res = cls.__new__(cls)
-        res.start_ix = max(self.start_ix, template_segment.start_ix)
-        res.end_ix = min(self.end_ix, template_segment.end_ix)
-        res.state = self.state
-        res.cn = self.cn
-        res.const_region_ix = self.const_region_ix
-        res.group_name = self.group_name
-
-        start_window = self.dupl_region if self.start_ix > template_segment.start_ix else template_segment.dupl_region
-        end_window = self.dupl_region if self.end_ix < template_segment.end_ix else template_segment.dupl_region
-        combined = start_window.continue_if_possible(end_window, max_dist=sys.maxsize, strict_order=False)
-        assert combined is not None
-        res.dupl_region = cn_tools.DuplRegion(None, *combined)
-        return res
 
     def __len__(self):
         return self.end_ix - self.start_ix
@@ -566,28 +588,27 @@ class Path:
         return len(self.segments)
 
 
-def _extract_paths(states_matrix, model, windows, const_regions, model_params):
+def _extract_paths(states_matrix, model, windows, model_params, group_name, window_boundaries):
     """
     Returns two lists:
         - paths: dictionary {name: Path},
         - sample_paths: list of path names, one for each sample.
     """
     n_samples, n_observations = states_matrix.shape
-    const_regions_extra = {}
-    obs_subregions = []
+
+    # List of tuples (start_ix, end_ix) for different constant regions.
+    const_region_boundaries = []
     for i, window in enumerate(windows):
-        region_ix = window.const_region_ix
-        if region_ix not in const_regions_extra:
-            const_regions_extra[region_ix] = [const_regions[region_ix], i, i + 1]
-            obs_subregions.append([i, i + 1])
+        prev_window = windows[i - 1] if i else None
+        if prev_window is None or prev_window.const_region_ix != window.const_region_ix:
+            const_region_boundaries.append([i, i + 1])
         else:
-            const_regions_extra[region_ix][2] = i + 1
-            obs_subregions[-1][1] = i + 1
+            const_region_boundaries[-1][1] = i + 1
+    const_region_boundaries = list(map(tuple, const_region_boundaries))
 
     pre_paths = collections.defaultdict(list)
     in_path_info = {}
     if model_params.is_loaded:
-        group_name = next(iter(const_regions_extra.values()))[0].group_name
         for path_name, path_str in model_params.get_hmm_paths(group_name):
             path_str = path_str.split(',')
             weight = float(path_str[0])
@@ -603,12 +624,12 @@ def _extract_paths(states_matrix, model, windows, const_regions, model_params):
         max_const_state = np.clip(np.max(states_matrix) + 1, a_min=model.left_states, a_max=model.n_hidden - 1)
         for state in range(min_const_state, max_const_state + 1):
             const_path = []
-            for start, end in obs_subregions:
+            for start, end in const_region_boundaries:
                 const_path.append((start, end, state))
             pre_paths[tuple(const_path)] = []
 
     for sample_id, row in enumerate(states_matrix):
-        pre_path = get_simple_path(row, obs_subregions)
+        pre_path = get_simple_path(row, const_region_boundaries)
         pre_paths[pre_path].append(sample_id)
 
     names_counter = collections.Counter()
@@ -617,7 +638,7 @@ def _extract_paths(states_matrix, model, windows, const_regions, model_params):
     for pre_path, sample_ids in sorted(pre_paths.items(), key=_minus_value_len):
         segments = []
         for start_ix, end_ix, state in pre_path:
-            segments.append(PathSegment(start_ix, end_ix, state, model, windows, const_regions_extra))
+            segments.append(PathSegment(start_ix, end_ix, state, model, windows, window_boundaries))
         path = Path(segments, sample_ids)
 
         if model_params.is_loaded:
@@ -637,7 +658,7 @@ def _extract_paths(states_matrix, model, windows, const_regions, model_params):
         paths[path.name] = path
         for sample_id in sample_ids:
             sample_paths[sample_id] = path.name
-    return const_regions_extra, paths, sample_paths
+    return paths, sample_paths
 
 
 def _summarize_paths(dupl_hierarchy, windows, paths, genome, samples, summary_out):
@@ -670,13 +691,13 @@ def _summarize_paths(dupl_hierarchy, windows, paths, genome, samples, summary_ou
                 segment.cn, windows[segment.start_ix].ix, windows[segment.end_ix - 1].ix))
 
 
-def _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs, copy_num_range, mult_bounds):
+def _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs, agcn_range, mult_bounds):
     n_samples = len(obs_depth)
-    range_size = len(copy_num_range)
+    range_size = len(agcn_range)
     assert nbinom_params.shape == (n_samples, 2)
     assert copy_num_probs.shape == (range_size, n_samples)
-    assert copy_num_range[0] > 0
-    nbinom_n_matrix = nbinom_params[:, 0] * copy_num_range[:, np.newaxis] / 2
+    assert agcn_range[0] > 0
+    nbinom_n_matrix = nbinom_params[:, 0] * agcn_range[:, np.newaxis] / 2
     nbinom_ps = nbinom_params[:, 1]
 
     def inner(mult):
@@ -702,7 +723,7 @@ def _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples, edge_
     edge_log_prob = np.log(edge_prob)
 
     n_hidden = model.n_hidden
-    copy_num_range = model.get_copy_num(np.arange(1, n_hidden - 1))
+    agcn_range = model.get_copy_num(np.arange(1, n_hidden - 1))
     prob_matrices = model.gammas
 
     multipliers = np.ones(len(windows))
@@ -718,16 +739,16 @@ def _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples, edge_
         nbinom_params = bg_depth.at(curr_sample_ids, window.gc_content)
         copy_num_probs = prob_matrices[curr_sample_ids, 1:n_hidden - 1, obs_ix].T
         mult0, lik0, mult1, lik1 = _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs,
-            copy_num_range, mult_bounds)
+            agcn_range, mult_bounds)
         multipliers[obs_ix] = mult1
     return multipliers
 
 
-def _setup_model(depth_matrix, windows, bg_depth, copy_num_range, copy_num_jump, min_trans_prob):
+def _setup_model(depth_matrix, windows, bg_depth, agcn_range, agcn_jump, min_trans_prob):
     n_observations, n_samples = depth_matrix.shape
     ref_copy_num = windows[0].cn
-    left_states, right_states = _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, copy_num_range)
-    model = CopyNumHmm(n_samples, ref_copy_num, left_states, right_states, n_observations, copy_num_jump)
+    left_states, right_states = _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, agcn_range)
+    model = CopyNumHmm(n_samples, ref_copy_num, left_states, right_states, n_observations, agcn_jump)
 
     # Set prior for the reference copy number on the first iteration.
     initial = np.full(model.n_hidden, min_trans_prob / 2)
@@ -742,8 +763,7 @@ def _setup_model(depth_matrix, windows, bg_depth, copy_num_range, copy_num_jump,
     return model, multipliers
 
 
-def _load_joint_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_params,
-        copy_num_jump, use_multipliers):
+def _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_params, agcn_jump, use_multipliers):
     n_observations, n_samples = depth_matrix.shape
     ref_copy_num = windows[0].cn
 
@@ -751,7 +771,7 @@ def _load_joint_model(depth_matrix, windows, window_ixs, bg_depth, group_name, m
     min_cn, max_cn = map(int, joint_entry.info['copy_nums'].split(','))
     left_states = ref_copy_num - min_cn
     right_states = max_cn - ref_copy_num
-    model = CopyNumHmm(n_samples, ref_copy_num, left_states, right_states, n_observations, copy_num_jump)
+    model = CopyNumHmm(n_samples, ref_copy_num, left_states, right_states, n_observations, agcn_jump)
 
     initial = -np.array(list(map(float, joint_entry.info['initial'].split(','))))
     initial -= logsumexp(initial)
@@ -843,7 +863,7 @@ def _single_iteration(depth_matrix, windows, bg_depth, model, group_name, iterat
     return total_prob, multipliers
 
 
-def _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, copy_num_range):
+def _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, agcn_range):
     n_observations, n_samples = depth_matrix.shape
     norm_depth = np.zeros((n_observations, n_samples))
 
@@ -856,22 +876,22 @@ def _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, copy_nu
 
     norm_means = np.mean(norm_depth, axis=0)
     min_value = np.min(norm_means)
-    min_value = max(int(np.floor(min_value) - 1), ref_copy_num - 2 * copy_num_range[0])
-    min_copy_num = max(0, min(ref_copy_num - copy_num_range[0], min_value))
+    min_value = max(int(np.floor(min_value) - 1), ref_copy_num - 2 * agcn_range[0])
+    min_copy_num = max(0, min(ref_copy_num - agcn_range[0], min_value))
 
     max_value = np.max(norm_means)
-    max_value = min(int(np.ceil(max_value) + 1), ref_copy_num + 2 * copy_num_range[1])
-    max_copy_num = max(ref_copy_num + copy_num_range[1], max_value)
+    max_value = min(int(np.ceil(max_value) + 1), ref_copy_num + 2 * agcn_range[1])
+    max_ref_cn = max(ref_copy_num + agcn_range[1], max_value)
 
     left_states = ref_copy_num - max(0, min_copy_num - 1)
-    right_states = max_copy_num - ref_copy_num + 1
+    right_states = max_ref_cn - ref_copy_num + 1
     return left_states, right_states
 
 
 def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, genome, out, model_params, *,
-        min_samples, copy_num_range, copy_num_jump, min_trans_prob, max_trans_prob=np.log(0.1), use_multipliers=True):
+        min_samples, agcn_range, agcn_jump, min_trans_prob, max_trans_prob=np.log(0.1), use_multipliers=True):
     dupl_hierarchy = region_group_extra.dupl_hierarchy
-    windows = region_group_extra.viterbi_windows
+    windows = region_group_extra.hmm_windows
     ref_copy_num = windows[0].cn
     window_ixs = np.array([window.ix for window in windows])
     n_observations = len(windows)
@@ -879,13 +899,15 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
     region_group = region_group_extra.region_group
     group_name = region_group.name
 
+    window_boundaries = _extract_window_boundaries(windows, dupl_hierarchy)
+
     depth_matrix = full_depth_matrix[window_ixs, :]
     if model_params.is_loaded:
-        model, multipliers = _load_joint_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_params,
-            copy_num_jump, use_multipliers)
+        model, multipliers = _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_params,
+            agcn_jump, use_multipliers)
         single_iter = True
     else:
-        model, multipliers = _setup_model(depth_matrix, windows, bg_depth, copy_num_range, copy_num_jump, min_trans_prob)
+        model, multipliers = _setup_model(depth_matrix, windows, bg_depth, agcn_range, agcn_jump, min_trans_prob)
         assert np.all(multipliers == 1)
         single_iter = n_samples < min_samples
     common.log('    Calculating copy number profiles within range [{}, {}]'.format(
@@ -932,8 +954,7 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
 
     viterbi_prob, states_matrix = model.viterbi_many()
     _write_states_matrix(model.get_copy_num(states_matrix), window_ixs, group_name + '\tv', out.hmm_states)
-    const_regions_extra, paths, sample_paths = _extract_paths(states_matrix, model, windows,
-        dupl_hierarchy.const_regions, model_params)
+    paths, sample_paths = _extract_paths(states_matrix, model, windows, model_params, group_name, window_boundaries)
     _summarize_paths(dupl_hierarchy, windows, paths, genome, samples, out.viterbi_summary)
 
     model.run_forward_backward(possible_states=possible_states)
@@ -945,14 +966,14 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
     sample_reliable_regions = []
     for sample_id in range(n_samples):
         sample_path = paths[sample_paths[sample_id]]
-        sample_path = _split_path_by_probs(sample_path, model.gammas[sample_id], model, windows, const_regions_extra)
+        sample_path = _split_path_by_probs(sample_path, model.gammas[sample_id], model, windows, window_boundaries)
 
         sample_const_regions.append(_get_sample_const_regions(sample_id, sample_path, model))
         sample_reliable_regions.append(_get_sample_reliable_region(sample_path))
     region_group_extra.set_viterbi_res(sample_const_regions, sample_reliable_regions)
 
     if not model_params.is_loaded:
-        common.log('    Saving HMM parameters to joint data')
+        common.log('    Saving HMM parameters to model parameters')
         model_params.set_hmm_results(region_group, window_ixs, model, multipliers, paths)
 
 
@@ -986,7 +1007,7 @@ def write_headers(out, samples):
         '#chrom\tstart\tend\twindow_ix\thomologous_regions\t{}\n'.format(samples_str))
 
 
-def _split_path_by_probs(path, prob_matrix, model, windows, const_regions_extra, min_len=10, thresh_prob=np.log(0.99)):
+def _split_path_by_probs(path, prob_matrix, model, windows, window_boundaries, min_len=10, thresh_prob=np.log(0.99)):
     """
     Splits path segments into subsegments if there is a drop in probability longer than min_len.
     """
@@ -1017,7 +1038,7 @@ def _split_path_by_probs(path, prob_matrix, model, windows, const_regions_extra,
 
         for subsegment in over_thresh_path:
             new_segment = PathSegment(segment.start_ix + subsegment.start_ix, segment.start_ix + subsegment.end_ix,
-                segment.state, model, windows, const_regions_extra)
+                segment.state, model, windows, window_boundaries)
             new_path.append(new_segment)
     assert sum(map(len, path)) == sum(map(len, new_path))
     return new_path

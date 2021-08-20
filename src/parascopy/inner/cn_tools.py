@@ -83,12 +83,13 @@ class DuplRegion:
 
 
 class Window(DuplRegion):
-    def __init__(self, ix, region1, regions2, gc_content, const_region_ix):
+    def __init__(self, ix, region1, regions2, middles2, gc_content, const_region_ix):
         super().__init__(ix, region1, regions2)
         self._gc_content = gc_content
         self._const_region_ix = const_region_ix
         self.in_viterbi = True
         self.multiplier = None
+        self._middles2 = middles2
 
     @property
     def gc_content(self):
@@ -97,6 +98,29 @@ class Window(DuplRegion):
     @property
     def const_region_ix(self):
         return self._const_region_ix
+
+    def half_subregion1(self, left_side: bool):
+        middle1 = (self._region1.start + self._region1.end) // 2
+        if left_side:
+            return self._region1.with_min_end(middle1)
+        return self._region1.with_max_start(middle1)
+
+    def half_subregion2(self, subregion_ix, left_side):
+        subregion2, strand2 = self._regions2[subregion_ix]
+        middle2 = self._middles2[subregion_ix]
+
+        if strand2 == left_side:
+            half_subregion2 = subregion2.with_min_end(middle2)
+        else:
+            half_subregion2 = subregion2.with_max_start(middle2)
+        return half_subregion2, strand2
+
+    def half_dupl_region(self, left_side: bool):
+        region1 = self.half_subregion1(left_side)
+        regions2 = []
+        for i in range(len(self.regions2)):
+            regions2.append(self.half_subregion2(i, left_side))
+        return DuplRegion(None, region1, regions2)
 
 
 class ConstRegion(DuplRegion):
@@ -195,7 +219,7 @@ class CopyNumPrediction(DuplRegion):
         return self._info
 
 
-def find_const_regions(duplications, interval, skip_regions, genome, min_size, max_copy_num):
+def find_const_regions(duplications, interval, skip_regions, genome, min_size, max_ref_cn):
     """
     Parameters:
     * duplications - list of duplications on the same chromosome. Duplications should have a defined CIGAR.
@@ -241,7 +265,7 @@ def find_const_regions(duplications, interval, skip_regions, genome, min_size, m
                 regions2 = [regions2[i] for i in sort_ixs]
                 dupl_ixs = [dupl_ixs[i] for i in sort_ixs]
                 const_reg = ConstRegion(len(result), region1, regions2,
-                    skip=len(region1) < min_size and len(regions2) < max_copy_num // 2 and interval.contains(region1),
+                    skip=len(region1) < min_size and len(regions2) < max_ref_cn // 2 and interval.contains(region1),
                     dupl_ixs=dupl_ixs)
             else:
                 const_reg = ConstRegion(len(result), region1, None, skip=True, dupl_ixs=None)
@@ -282,9 +306,11 @@ def _extend_windows(windows, const_region, interval_start, interval_seq, duplica
         window_end = window_start + window_size
         assert window_end <= region1.end
         subregion1 = Interval(region1.chrom_id, window_start, window_end)
+        middle1 = (window_start + window_end) // 2
         subregions2 = []
-        big_difference = False
+        middles2 = []
 
+        big_difference = False
         # One of the duplications has a large deletion in this position.
         skip_this_window = False
         for j, dupl in enumerate(region_dupls):
@@ -304,11 +330,13 @@ def _extend_windows(windows, const_region, interval_start, interval_seq, duplica
             if len2 < window_len_ratio * window_size or window_size < window_len_ratio * len2:
                 big_difference = True
             subregions2.append((subregion2, dupl.strand))
+            # +1 if negative strand. This is because we need middle of the window, not exact match to middle1.
+            middles2.append(dupl.aligned_pos(middle1) + int(not dupl.strand))
         if skip_this_window:
             continue
 
         gc_content = int(common.gc_content(interval_seq[window_start - interval_start : window_end - interval_start]))
-        window = Window(len(windows), subregion1, subregions2, gc_content, const_region.ix)
+        window = Window(len(windows), subregion1, subregions2, middles2, gc_content, const_region.ix)
         if big_difference:
             window.in_viterbi = False
         windows.append(window)
@@ -375,7 +403,7 @@ class DuplHierarchy:
     Hierarchy of duplicated regions:
         psvs < windows < const_regions < region_groups.
     """
-    def __init__(self, psvs, const_regions, genome, duplications, window_size, max_copy_num):
+    def __init__(self, psvs, const_regions, genome, duplications, window_size, max_ref_cn):
         self._psvs = psvs
         self._const_regions = const_regions
         first_region = self._const_regions[0].region1
@@ -386,7 +414,7 @@ class DuplHierarchy:
 
         self._windows = []
         for const_region in const_regions:
-            if const_region.cn > max_copy_num:
+            if const_region.cn > max_ref_cn:
                 continue
             _extend_windows(self._windows, const_region, interval_start, interval_seq, duplications, window_size)
 
@@ -517,9 +545,9 @@ class RegionGroupExtra:
         self._region_group = region_group
         windows = dupl_hierarchy.windows
         self._group_windows = [windows[i] for i in region_group.window_ixs]
-        self._viterbi_windows = [window for window in self._group_windows if window.in_viterbi]
+        self._hmm_windows = [window for window in self._group_windows if window.in_viterbi]
         self._windows_searcher = NonOverlappingSet.from_dupl_regions(self._group_windows)
-        self._viterbi_windows_searcher = NonOverlappingSet.from_dupl_regions(self._viterbi_windows)
+        self._hmm_windows_searcher = NonOverlappingSet.from_dupl_regions(self._hmm_windows)
 
         psvs = dupl_hierarchy.psvs
         self._region_psvs = [psvs[i] for i in region_group.psv_ixs]
@@ -549,12 +577,12 @@ class RegionGroupExtra:
         return self._windows_searcher
 
     @property
-    def viterbi_windows(self):
-        return self._viterbi_windows
+    def hmm_windows(self):
+        return self._hmm_windows
 
     @property
-    def viterbi_windows_searcher(self):
-        return self._viterbi_windows_searcher
+    def hmm_windows_searcher(self):
+        return self._hmm_windows_searcher
 
     @property
     def psvs(self):
@@ -589,7 +617,7 @@ class RegionGroupExtra:
         if self._psv_f_values is None:
             return
         for psv_info in self._psv_infos:
-            psv_info.set_use_samples(np.zeros(n_samples, dtype=np.bool), 1)
+            psv_info.set_use_samples(np.zeros(n_samples, dtype=np.bool))
 
     def update_psv_records(self, reliable_thresholds):
         from . import paralog_cn

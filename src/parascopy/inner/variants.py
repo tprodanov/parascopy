@@ -6,6 +6,7 @@ import numpy as np
 from scipy.stats import poisson, multinomial
 from scipy.special import logsumexp
 from functools import lru_cache
+from collections import namedtuple
 
 from .cigar import Cigar, Operation
 from .genome import Interval
@@ -528,11 +529,6 @@ def calculate_all_psv_gt_probs(region_group_extra):
             psv_start_ix, psv_end_ix = psv_finder.select(reg_start, reg_end)
             _fill_psv_gts(sample_id, sample_cn, psv_infos, psv_counts, psv_start_ix, psv_end_ix)
 
-        reliable_region = region_group_extra.sample_reliable_regions[sample_id]
-        if reliable_region is not None:
-            psv_start_ix, psv_end_ix = psv_finder.select(reliable_region.start, reliable_region.end)
-            _fill_psv_gts(sample_id, ref_cn, psv_infos, psv_counts, psv_start_ix, psv_end_ix)
-
 
 def calculate_support_matrix(region_group_extra):
     """
@@ -572,3 +568,81 @@ def calculate_support_matrix(region_group_extra):
             for sample_gt_ix, psv_gt_coefs in enumerate(curr_psv_gt_coefs):
                 support_row[sample_gt_ix] = logsumexp(psv_gt_coefs + psv_gt_probs)
             support_row *= psv_exponents[psv_ix].info_content
+
+
+def _read_string(reader):
+    length = ord(reader.read(1))
+    return reader.read(length).decode()
+
+
+AlleleObservation = namedtuple('AlleleObservation', ('allele_ix', 'is_first_mate'))
+
+
+class _SkipPosition(Exception):
+    pass
+
+
+class VariantReadObservations:
+    def __init__(reader, byteorder, sample_conv, n_samples):
+        position = reader.read(4)
+        if not position:
+            raise StopIteration
+        self.position = int.from_bytes(position, byteorder)
+
+        self.partial_observations = np.zeros(n_samples, dtype=np.int16)
+        n_part_obs = int.from_bytes(reader.read(2), byteorder)
+        for _ in range(n_part_obs):
+            sample_id = sample_conv[int.from_bytes(reader.read(2), byteorder)]
+            count = int.from_bytes(reader.read(2), byteorder)
+            self.partial_observations[sample_id] = count
+
+        # self.use = np.ones(n_samples, dtype=np.bool)
+        # list of dictionaries (one for each sample),
+        # each dictionary: key = read hash (47 bits), value = AlleleObservation.
+        self.observations = [{} for _ in range(n_samples)]
+        while True:
+            allele_ix = ord(reader.read(1))
+            if allele_ix == 255:
+                break
+            if allele_ix == 254:
+                raise _SkipPosition
+
+            sample_id = sample_conv[int.from_bytes(reader.read(2), byteorder)]
+            read_hash = int.from_bytes(reader.read(8), byteorder)
+            is_first_mate = read_hash & 1
+            read_hash -= is_first_mate
+
+            # Read with the same hash is present (most probably read mate, collisions should be extremely rare).
+            if read_hash in self.observations[sample_id]:
+                if self.observations[sample_id][read_hash].allele_ix != allele_ix:
+                    del self.observations[sample_id][read_hash]
+            else:
+                self.observations[sample_id][read_hash] = AlleleObservation(allele_ix, bool(is_first_mate))
+
+        n_alleles = ord(reader.read(1))
+        self.alleles = [None] * n_alleles
+        for i in range(n_alleles):
+            self.alleles[i] = _read_string(reader)
+
+
+def read_freebayes_binary(inp, samples):
+    reader = io.BufferedReader(inp)
+    byteorder = 'big' if ord(reader.read(1)) else 'little'
+    n_samples = len(samples)
+    n_in_samples = int.from_bytes(reader.read(2), byteorder)
+
+    # Converter between sample IDs sample_conv[sample_id from input] = sample_id in parascopy.
+    sample_conv = np.zeros(n_in_samples, dtype=np.uint16)
+    for i in range(n_in_samples):
+        sample = _read_string(reader)
+        sample_conv[i] = samples.id(sample)
+
+    positions = []
+    while True:
+        try:
+            curr_pos = VariantReadObservations(reader, byteorder, sample_conv, n_samples)
+            positions.append(curr_pos)
+        except StopIteration:
+            break
+        except _SkipPosition:
+            pass

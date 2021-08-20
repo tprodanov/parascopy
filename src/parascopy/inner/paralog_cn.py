@@ -212,7 +212,6 @@ def _match_psv_alleles(psv, regions2, genome):
 def _select_psv_sample_pairs(region_group_extra, samples, outp, min_samples):
     group = region_group_extra.region_group
     psv_infos = region_group_extra.psv_infos
-    psv_counts = region_group_extra.psv_read_counts
     sample_reliable_regions = region_group_extra.sample_reliable_regions
     group_name = group.name
     n_psvs = len(psv_infos)
@@ -236,14 +235,14 @@ def _select_psv_sample_pairs(region_group_extra, samples, outp, min_samples):
         info_str = ''
         use_samples = np.zeros(n_samples, dtype=np.bool)
         for sample_id, sample_region in enumerate(sample_reliable_regions):
-            counts = psv_counts[psv_ix][sample_id]
-            good_obs = not counts.skip
+            good_obs = psv_info.psv_gt_probs[sample_id] is not None
             is_ref = sample_region is not None \
                 and sample_region.start <= psv_info.start and psv_info.end <= sample_region.end
             info_str += '\t{}{}'.format('+' if good_obs else '-', '+' if is_ref else '-')
             use_samples[sample_id] = good_obs and is_ref
 
-        psv_info.set_use_samples(use_samples, min_samples)
+        psv_info.set_use_samples(use_samples)
+        psv_info.in_em = psv_info.n_used_samples >= min_samples
         outp.write('{}\t{}:{}\t{}{}\n'.format(group_name, psv_info.chrom, psv_info.start + 1,
             psv_info.n_used_samples, info_str))
 
@@ -272,10 +271,9 @@ class _PsvInfo:
         self.precomp_data_ref_cn = None
         self.support_matrix = None
 
-    def set_use_samples(self, use_samples, min_samples):
+    def set_use_samples(self, use_samples):
         self.sample_ids = np.where(use_samples)[0]
         self.n_used_samples = len(self.sample_ids)
-        self.in_em = self.n_used_samples >= min_samples
 
     def distance(self, other):
         if other.psv_ix < self.psv_ix:
@@ -320,6 +318,7 @@ class _PsvInfo:
         self.precomp_data_ref_cn = self.precomp_datas[self.ref_cn]
         self.em_psv_gt_probs = np.zeros((self.n_used_samples, self.precomp_data_ref_cn.n_psv_genotypes))
         for i, sample_id in enumerate(self.sample_ids):
+            assert self.psv_gt_probs[sample_id] is not None
             self.em_psv_gt_probs[i] = self.psv_gt_probs[sample_id]
 
 
@@ -485,8 +484,8 @@ def write_headers(out, samples, args):
         '# If PSV has less than {} "good" samples, it is not used.\n'.format(args.min_samples),
         'region_group\tpsv\tgood\t' + samples_str)
 
-    max_copy_num = min(args.max_copy_num, args.copy_num_bound[0])
-    col_copies = '\t'.join(map('copy{}'.format, range(1, max_copy_num // 2 + 1))) + '\n'
+    max_ref_cn = min(args.max_ref_cn, args.pscn_bound[0])
+    col_copies = '\t'.join(map('copy{}'.format, range(1, max_ref_cn // 2 + 1))) + '\n'
     out.checked_write('interm_psv_f_values', 'region_group\tcluster\titeration\tpsv\tinfo_content\t' + col_copies)
     out.checked_write('psv_f_values', 'region_group\tpsv\tn_samples\tuse_in_em\tinfo_content\t' + col_copies)
 
@@ -739,7 +738,7 @@ def _create_sample_results_from_agcn(sample_id, region_group_extra):
         reg_end = sample_const_region.region1.end
         a, b = region_group_extra.group_windows_searcher.select(reg_start, reg_end)
         entry.info['n_windows'] = b - a
-        a, b = region_group_extra.viterbi_windows_searcher.select(reg_start, reg_end)
+        a, b = region_group_extra.hmm_windows_searcher.select(reg_start, reg_end)
         entry.info['hmm_windows'] = b - a
 
         psv_start_ix, psv_end_ix = region_group_extra.psv_finder.select(reg_start, reg_end)
@@ -802,7 +801,7 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
         psv_ixs = []
         for subresults in curr_results:
             for psv_ix in range(*psv_finder.select(subresults.region1.start, subresults.region1.end)):
-                if psv_infos[psv_ix].support_matrix[sample_id] is not None:
+                if psv_infos[psv_ix].psv_gt_probs[sample_id] is not None:
                     psv_ixs.append(psv_ix)
         psv_ixs = np.array(psv_ixs)
         if len(psv_ixs) == 0:

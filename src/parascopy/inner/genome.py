@@ -121,7 +121,8 @@ class Interval:
         self._start = start
         self._end = end
         if self._end <= self._start:
-            raise ValueError('Cannot construct an empty interval: start0 = %d, end = %d' % (self._start, self._end))
+            raise ValueError('Cannot construct an empty interval: start0 = {:,}, end = {:,}'
+                .format(self._start, self._end))
 
     @classmethod
     def parse(cls, string, genome):

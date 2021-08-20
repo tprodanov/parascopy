@@ -143,7 +143,7 @@ class Cigar:
         chr22:18944546-18944546         catatGttcat
     can be stored as GT-, GTT or as G-T, GTT. We need to account for both cases.
     """
-    def aligned_region(self, ref_start, ref_end, alt_size_diff):
+    def aligned_region(self, ref_start, ref_end, alt_size_diff=0):
         cigar_start, ref_pos, read_pos = self._index.find_by_ref(ref_start)
         read_start = None
 

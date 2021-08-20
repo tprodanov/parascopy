@@ -83,13 +83,27 @@ class Duplication:
 
         start1 = max(0, region1.start - self._region1.start)
         end1 = min(len(self._region1), region1.end - self._region1.start)
-        start2, end2 = self._full_cigar.aligned_region(start1, end1, 0)
+        start2, end2 = self._full_cigar.aligned_region(start1, end1)
         if end1 <= start1 or end2 <= start2:
             return None
         if self._strand:
             return Interval(self._region2.chrom_id, self._region2.start + start2, self._region2.start + end2)
         else:
             return Interval(self._region2.chrom_id, self._region2.end - end2, self._region2.end - start2)
+
+    def aligned_pos(self, pos1):
+        """
+        Returns pos2 that roughly corresponds to pos1.
+        """
+        rel_pos1 = pos1 - self._region1.start
+        if rel_pos1 < 0 or rel_pos1 >= len(self._region1):
+            return None
+
+        start2, end2 = self._full_cigar.aligned_region(rel_pos1, rel_pos1 + 1)
+        if self._strand:
+            return self._region2.start + start2
+        else:
+            return self._region2.end - end2
 
     def sub_duplication(self, region1):
         """

@@ -328,7 +328,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
     args = data.args
     exclude_dupl = data.exclude_dupl
     if model_params is None:
-        model_params = model_params_.JointData(interval, len(samples), is_loaded=False)
+        model_params = model_params_.ModelParams(interval, len(samples), is_loaded=False)
         model_params.save_args(args)
     else:
         args = model_params.load_args(args)
@@ -375,15 +375,15 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
 
     window_size = bg_depth.window_size
     const_regions = cn_tools.find_const_regions(duplications, interval, skip_regions, genome,
-        min_size=window_size, max_copy_num=args.max_copy_num)
+        min_size=window_size, max_ref_cn=args.max_ref_cn)
     dupl_hierarchy = cn_tools.DuplHierarchy(psv_records, const_regions, genome, duplications,
-        window_size=bg_depth.window_size, max_copy_num=args.max_copy_num)
+        window_size=bg_depth.window_size, max_ref_cn=args.max_ref_cn)
     if model_params.is_loaded:
         msg = model_params.check_dupl_hierarchy(dupl_hierarchy, genome)
         if msg:
             common.log(model_params.mismatch_warning())
             common.log(msg)
-            raise RuntimeError('Joint data mismatch')
+            raise RuntimeError('Model parameters mismatch')
 
     _write_bed_files(interval, duplications, const_regions, genome, subdir)
     pooled_bam_path = os.path.join(subdir, 'pooled_reads.bam')
@@ -430,14 +430,14 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
             if not region_group.window_ixs:
                 continue
             group_extra = cn_tools.RegionGroupExtra(dupl_hierarchy, region_group, psv_counts, len(samples), genome)
-            if len(group_extra.viterbi_windows) < args.min_windows:
+            if len(group_extra.hmm_windows) < args.min_windows:
                 continue
 
             group_name = region_group.name
             time_log.log('Group {}: aggregate copy number HMM'.format(group_name))
             common.log('[{}] Region group {}'.format(interval.name, group_name))
             cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
-                min_samples=args.min_samples, copy_num_range=args.copy_num_range, copy_num_jump=args.copy_num_jump,
+                min_samples=args.min_samples, agcn_range=args.agcn_range, agcn_jump=args.agcn_jump,
                 min_trans_prob=args.transition_prob * np.log(10), use_multipliers=args.use_multipliers)
             out.flush()
 
@@ -448,7 +448,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
             else:
                 time_log.log('Group {}: reliable PSVs EM'.format(group_name))
                 paralog_cn.find_reliable_psvs(group_extra, samples, genome, out, args.min_samples,
-                    args.reliable_threshold[1], args.copy_num_bound[0])
+                    args.reliable_threshold[1], args.pscn_bound[0])
                 model_params.set_psv_f_values(group_extra, genome)
             group_extra.set_reliable_psvs(*args.reliable_threshold)
 
@@ -457,7 +457,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
             group_extra.update_psv_records(args.reliable_threshold)
             time_log.log('Group {}: paralog-specific copy number and gene conversion'.format(group_name))
             results.extend(paralog_cn.estimate_paralog_cn(group_extra, samples, genome, out,
-                paralog_max_copy_num=args.copy_num_bound[0], max_genotypes=args.copy_num_bound[1]))
+                paralog_max_copy_num=args.pscn_bound[0], max_genotypes=args.pscn_bound[1]))
             out.flush()
 
     time_log.log('Writing results')
@@ -503,8 +503,8 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params):
         model_params = analyze_region(region, data, samples, bg_depth, model_params)
         if not model_params.is_loaded:
             filename = os.path.join(data.args.output, 'model', '{}.gz'.format(region.subdir))
-            with gzip.open(filename, 'wt') as joint_out:
-                model_params.write_to(joint_out, data.genome)
+            with gzip.open(filename, 'wt') as model_out:
+                model_params.write_to(model_out, data.genome)
     except Exception as exc:
         trace = traceback.format_exc().strip().split('\n')
         trace = '\n'.join(' ' * 11 + s for s in trace)
@@ -610,9 +610,9 @@ def run(regions, data, samples, bg_depth, models):
     successful = [exc is None for _, exc in results]
 
     if models[0] is None:
-        with open(os.path.join(out_dir, 'model', 'list.txt'), 'w') as joint_list:
+        with open(os.path.join(out_dir, 'model', 'list.txt'), 'w') as model_list:
             for region in itertools.compress(regions, successful):
-                joint_list.write('{}.gz\n'.format(region.subdir))
+                model_list.write('{}.gz\n'.format(region.subdir))
     _join_summaries(out_dir, regions, successful, data.genome, 'res.samples.bed.gz', data.args.tabix)
     _join_summaries(out_dir, regions, successful, data.genome, 'res.matrix.bed.gz', data.args.tabix)
     _join_summaries(out_dir, regions, successful, data.genome, 'psvs.vcf.gz', data.args.tabix)
@@ -754,7 +754,7 @@ def parse_args(prog_name, in_args, is_new):
         '{regions}-d <bg-depth> -o <dir> [args]').format(prog=prog_name, model='' if is_new else '<model> ',
         regions='(-r <region> [...] | -R <bed>) ' if is_new else '')
 
-    DEFAULT_COPY_NUM_BOUND = (8, 500)
+    DEFAULT_PSCN_BOUND = (8, 500)
     parser = argparse.ArgumentParser(
         description='Find aggregate and paralog-specific copy number for given unique and duplicated regions.',
         formatter_class=SingleMetavar, add_help=False, usage=usage)
@@ -810,8 +810,8 @@ def parse_args(prog_name, in_args, is_new):
             help='Exclude duplications for which the expression is true\n[default: %(default)s].')
         filt_args.add_argument('--short', type=int, metavar='<int>', default=500,
             help='Skip regions with short duplications (shorter than <int> bp),\n'
-                'not excluded in the -e/--exclude argument [%(default)s].')
-        filt_args.add_argument('--max-copy-num', type=int, metavar='<int>', default=10,
+                'not excluded in the -e/--exclude argument [default: %(default)s].')
+        filt_args.add_argument('--max-ref-cn', type=int, metavar='<int>', default=10,
             help='Skip regions with reference copy number higher than <int> [default: %(default)s].')
 
     aggr_det_args = parser.add_argument_group('Aggregate copy number detection arguments')
@@ -822,13 +822,13 @@ def parse_args(prog_name, in_args, is_new):
         aggr_det_args.add_argument('--min-windows', type=int, metavar='<int>', default=10,
             help='Predict aggregate and paralog copy number only in regions with at\n'
                 'least <int> windows [default: %(default)s].')
-        aggr_det_args.add_argument('--copy-num-range', type=int, metavar='<int> <int>', nargs=2, default=(5, 7),
+        aggr_det_args.add_argument('--agcn-range', type=int, metavar='<int> <int>', nargs=2, default=(5, 7),
             help='Detect aggregate copy number in a range around the reference copy number [default: 5 7].\n'
                 'For example, for a duplication with copy number 8 copy numbers 3-15 can\n'
                 'be detected. In addition, sample may be identified as having copy number <3 or >15.\n'
                 'In some cases, copy number within two ranges can be detected.')
-        aggr_det_args.add_argument('--copy-num-jump', type=int, metavar='<int>', default=6,
-            help='Maximal jump in the aggregate copy number between two consecutive windows [%(default)s].')
+        aggr_det_args.add_argument('--agcn-jump', type=int, metavar='<int>', default=6,
+            help='Maximal jump in the aggregate copy number between two consecutive windows [default: %(default)s].')
         aggr_det_args.add_argument('--transition-prob', type=float, metavar='<float>', default=-5,
             help='Log10 transition probability for the aggregate copy number HMM [default: %(default)s].')
     aggr_det_args.add_argument('--no-multipliers', action='store_false', dest='use_multipliers',
@@ -841,12 +841,12 @@ def parse_args(prog_name, in_args, is_new):
             help='PSV-reliability thresholds (reliable PSV has all f-values over the threshold).\n'
                 'First value is used for gene conversion detection,\n'
                 'second value is used to estimate paralog-specific CN [default: 0.80 0.95].')
-        par_det_args.add_argument('--copy-num-bound', type=int, metavar='<int> [<int>]',
-            default=DEFAULT_COPY_NUM_BOUND, nargs='+',
+        par_det_args.add_argument('--pscn-bound', type=int, metavar='<int> [<int>]',
+            default=DEFAULT_PSCN_BOUND, nargs='+',
             help=('Do not estimate paralog-specific copy number if any of the statements is true:\n'
-                '- aggregate copy number is higher than <int>[1] [default: {}],\n'
-                '- total number of genotypes is higher than <int>[2] [default: {}].\n'
-                'You can specify only the first number of both numbers.').format(*DEFAULT_COPY_NUM_BOUND))
+                '- aggregate copy number is higher than <int>[1]      [default: {}],\n'
+                '- total number of genotypes is higher than <int>[2]  [default: {}].\n'
+                'You can specify only the first number of both numbers.').format(*DEFAULT_PSCN_BOUND))
 
     exec_args = parser.add_argument_group('Execution parameters')
     exec_args.add_argument('--rerun', choices=('full', 'partial', 'none'), metavar='full|partial|none', default='none',
@@ -875,10 +875,10 @@ def parse_args(prog_name, in_args, is_new):
         common.check_executable(args.tabix)
 
     if is_new:
-        if len(args.copy_num_bound) == 1:
-            args.copy_num_bound.append(DEFAULT_COPY_NUM_BOUND[1])
-        elif len(args.copy_num_bound) != 2:
-            sys.stderr.write('Unexpected number of arguments for --copy-num-bound\n\n')
+        if len(args.pscn_bound) == 1:
+            args.pscn_bound.append(DEFAULT_PSCN_BOUND[1])
+        elif len(args.pscn_bound) != 2:
+            sys.stderr.write('Unexpected number of arguments for --pscn-bound\n\n')
             parser.print_usage(sys.stderr)
             exit(1)
     return args

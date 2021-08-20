@@ -106,7 +106,7 @@ class Entry:
 
         if self._region1 == dupl_region.region1 and regions2_match:
             return None
-        s = 'From joint data:\n'
+        s = 'From model parameters:\n'
         s += '    {}\n    '.format(self._region1.to_str_comma(genome))
         s += cn_tools.regions2_str(self._regions2, genome, use_comma=True, sep='\n    ')
         s += '\nFrom this run:\n'
@@ -181,7 +181,7 @@ class Entry:
         return (self._region1.start, self._ty.value) < (other._region1.start, other._ty.value)
 
 
-class JointData:
+class ModelParams:
     def __init__(self, main_interval, n_samples, is_loaded):
         self.entries = defaultdict(list)
         if main_interval is not None:
@@ -196,26 +196,33 @@ class JointData:
 
     def save_args(self, args):
         info = self.main_entry.info
-        info['max_copy_num'] = args.max_copy_num
-        info['copy_num_range'] = '{},{}'.format(*args.copy_num_range)
-        info['copy_num_jump'] = args.copy_num_jump
+        info['max_ref_cn'] = args.max_ref_cn
+        info['agcn_range'] = '{},{}'.format(*args.agcn_range)
+        info['agcn_jump'] = args.agcn_jump
 
         assert args.reliable_threshold[0] <= args.reliable_threshold[1]
         info['reliable_threshold'] = '{:.5g},{:.5g}'.format(*args.reliable_threshold)
-        info['copy_num_bound'] = '{},{}'.format(*args.copy_num_bound)
+        info['pscn_bound'] = '{},{}'.format(*args.pscn_bound)
         info['transition_prob'] = '{:.5g}'.format(args.transition_prob)
 
     def load_args(self, args):
         info = self.main_entry.info
+
+        def get(*keys):
+            for key in keys:
+                if key in info:
+                    return info[key]
+            raise KeyError('None of the keys "{}" are in the main entry "{}"'.format('", "'.join(keys), info))
+
         args = copy.copy(args)
         args.min_windows = 1
         args.min_samples = None
-        args.copy_num_range = tuple(map(int, info['copy_num_range'].split(',')))
-        args.max_copy_num = int(info['max_copy_num'])
-        args.copy_num_jump = int(info['copy_num_jump'])
+        args.agcn_range = tuple(map(int, get('agcn_range', 'copy_num_range').split(',')))
+        args.max_ref_cn = int(get('max_ref_cn', 'max_copy_num'))
+        args.agcn_jump = int(get('agcn_jump', 'copy_num_jump'))
 
         args.reliable_threshold = tuple(map(float, info['reliable_threshold'].split(',')))
-        args.copy_num_bound = tuple(map(int, info['copy_num_bound'].split(',')))
+        args.pscn_bound = tuple(map(int, get('pscn_bound', 'copy_num_bound').split(',')))
         args.transition_prob = float(info['transition_prob'])
         return args
 
@@ -291,7 +298,7 @@ class JointData:
     def check_dupl_hierarchy(self, dupl_hierarchy, genome):
         window_entries = self.entries[EntryType.Window]
         if len(window_entries) != len(dupl_hierarchy.windows):
-            return 'Region has {} windows while joint data has {} windows'.format(
+            return 'Region has {} windows while loaded model parameters have {} windows'.format(
                 len(dupl_hierarchy.windows), len(window_enties))
         for i, entry in enumerate(window_entries):
             window = dupl_hierarchy.windows[i]
@@ -299,13 +306,13 @@ class JointData:
             if window.ix != i or dupl_region_mism \
                     or int(entry.info['const_region']) != window.const_region_ix \
                     or int(entry.info['gc_content']) != window.gc_content:
-                return 'Window {} {} does not match with corresponding window in joint data:\n{}' \
+                return 'Window {} {} does not match with corresponding window in the model parameters:\n{}' \
                     .format(window.ix, window.region1.to_str(genome), dupl_region_mism)
             window.in_viterbi = entry.info['in_viterbi'] == 'T'
 
         region_entries = self.entries[EntryType.ConstRegion]
         if len(region_entries) != len(dupl_hierarchy.const_regions):
-            return 'Region has {} constant regions while joint data has {} constant regions'.format(
+            return 'Region has {} constant regions while loaded model parameters have {} constant regions'.format(
                 len(dupl_hierarchy.const_regions), len(region_enties))
         for i, entry in enumerate(region_entries):
             const_region = dupl_hierarchy.const_regions[i]
@@ -316,21 +323,22 @@ class JointData:
             dupl_region_mism = entry.dupl_region_mismatch(const_region, genome)
             if const_region.ix != int(entry.info['ix']) or const_region.group_name != entry_group \
                     or const_region.skip != entry_skip or dupl_region_mism:
-                return 'Constant region {} {} does not match with corresponding const region in joint data:\n{}' \
+                return 'Constant region {} {} does not match with corresponding const region in the model parameters:\n{}' \
                     .format(const_region.ix, const_region.region1.to_str(genome), dupl_region_mism)
 
         group_entries = self.entries[EntryType.RegionGroup]
         if len(group_entries) != len(dupl_hierarchy.region_groups):
-            return 'Region has {} region groups while joint data has {} region groups'.format(
+            return 'Region has {} region groups while model parameters have {} region groups'.format(
                 len(dupl_hierarchy.region_groups), len(group_entries))
         for entry in group_entries:
             try:
                 region_group = dupl_hierarchy.get_group(entry.info['name'])
             except KeyError:
-                return 'Joint data has unmatched group {} {}'.format(entry.info['name'], entry.region1.to_str(genome))
+                return 'Model parameters has unmatched group {} {}' \
+                    .format(entry.info['name'], entry.region1.to_str(genome))
             dupl_region_mism = entry.dupl_region_mismatch(region_group, genome)
             if dupl_region_mism:
-                return 'Region group {} {} does not match with corresponding region group in joint data:\n{}' \
+                return 'Region group {} {} does not match with corresponding region group in the model parameters:\n{}' \
                     .format(region_group.name, region_group.region1.to_str(genome), dupl_region_mism)
 
     def set_hmm_results(self, region_group, window_ixs, model, multipliers, paths):
@@ -421,7 +429,7 @@ class JointData:
     def mismatch_warning(self):
         main_entry = self.main_entry
         version = main_entry.info['version']
-        msg = 'Error: Joint data for region {} ({}) does not match current run ({}).\n'.format(
+        msg = 'Error: Model parameters for region {} ({}) does not match current run ({}).\n'.format(
             main_entry.info['name'], version, __version__)
         msg += '    Possible explanations:\n'
         if version != __version__:
@@ -440,9 +448,9 @@ class JointData:
             res.append(region)
             while i < len(skip_regions) and skip_regions[i].intersects(region):
                 if not skip_regions[i].contains(region):
-                    common.log('WARN: Skipped region {} is outside of the skipped regions from joint data.'
+                    common.log('WARN: Skipped region {} is outside of the skipped regions from model parameters.'
                         .format(skip_regions[i].to_str(genome)) +
-                        ' Only skipped regions from joint data would be used.')
+                        ' Only skipped regions from model parameters would be used.')
                 i += 1
         return res
 
@@ -457,7 +465,8 @@ class JointData:
             try:
                 psv_entry = psv_entries[self._psv_dict[psv_info.start]]
             except (KeyError, IndexError):
-                raise RuntimeError('Cannot find PSV {}:{} in joint data'.format(psv_info.chrom, psv_info.start + 1))
+                raise RuntimeError('Cannot find PSV {}:{} in model parameters'
+                    .format(psv_info.chrom, psv_info.start + 1))
             if psv_entry.info['info'] == '*':
                 continue
             psv_info.in_em = psv_entry.info['in_em'] == 'T'
@@ -484,7 +493,7 @@ def load_all(input, genome):
         for filename in filenames:
             try:
                 with gzip.open(filename, 'rt') as curr_inp:
-                    model_params = JointData.load(curr_inp, genome)
+                    model_params = ModelParams.load(curr_inp, genome)
                 _test = model_params.main_entry
                 models.append(model_params)
             except (ValueError, IndexError) as e:
