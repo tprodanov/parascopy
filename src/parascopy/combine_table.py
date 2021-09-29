@@ -127,18 +127,22 @@ class _Graph:
             else:
                 prop = ''
 
-            outp.write('    %d [label="%s\\n%s\\nlen=%d, %s strand"%s]\n'
-                % (node_a, dupl.region1.to_str_comma(genome), dupl.region2.to_str_comma(genome),
-                len(dupl.region1), dupl.strand_str, prop))
+            if dupl.is_tangled_region:
+                outp.write('    {} [label="{}\\nTangled region"{}]\n'
+                    .format(node_a, dupl.region1.to_str_comma(genome), prop))
+            else:
+                outp.write('    {} [label="{}\\n{}\\nlen={}, {} strand"{}]\n'
+                    .format(node_a, dupl.region1.to_str_comma(genome), dupl.region2.to_str_comma(genome),
+                    len(dupl.region1), dupl.strand_str, prop))
 
             for node_b in out_edges:
                 if removed_edges and (node_a, node_b) in removed_edges:
                     continue
-                outp.write('    %d -> %d\n' % (node_a, node_b))
+                outp.write('    {} -> {}\n'.format(node_a, node_b))
 
         for node_a, node_b in removed_edges or ():
             # Use curve to create ")", icurve to create "(", and finally none to add some space.
-            outp.write('    %d -> %d [color=red;arrowhead=noneicurvecurve;arrowsize=1.5]\n' % (node_a, node_b))
+            outp.write('    {} -> {} [color=red;arrowhead=noneicurvecurve;arrowsize=1.5]\n'.format(node_a, node_b))
         outp.write('}\n')
 
     def transitive_reduction(self):
@@ -338,6 +342,33 @@ def _split_self_overlapping_path(path, graph):
         yield path[start_i:n]
 
 
+def _path_segments(graph, paths, bounding_regions, tangled_regions):
+    for path, bound in zip(paths, bounding_regions):
+        segments = []
+        for i, node_id in enumerate(path):
+            segment = graph.get_value(node_id)
+            if bound is not None:
+                segment = segment.sub_duplication(bound)
+                if i:
+                    segment_reg1 = segment.region1
+                    prev = graph.get_value(path[i - 1])
+                    prev_reg1 = prev.region1
+                    if prev_reg1.contains(segment_reg1) or prev.region2.contains(segment.region2):
+                        # After bounding the segment, it no longer brings new information.
+                        continue
+                    if not prev_reg1.intersects(segment_reg1) or not prev.region2.intersects(segment.region2):
+                        # For some reason, after cropping regions, they stopped overlapping.
+                        # Likely, this means there is a short duplicated pattern
+                        yield segments
+                        segments = []
+                        tangled_start = min(prev_reg1.start, segment_reg1.start)
+                        tangled_end = min(prev_reg1.end, segment_reg1.end)
+                        tangled_regions.append(Interval(prev_reg1.chrom_id, tangled_start, tangled_end))
+            segments.append(segment)
+        if segments:
+            yield segments
+
+
 def _save_component(graph, chrom_names, component_id, graph_dir):
     """
     Simplifies duplications graph, extracts simple paths from it, and constructs combined duplications.
@@ -363,36 +394,24 @@ def _save_component(graph, chrom_names, component_id, graph_dir):
 
     if graph_dir:
         if n_tangled_nodes - n_self_overl:
-            common.log('    Component %d: %d tangled nodes' % (component_id, n_tangled_nodes - n_self_overl))
+            common.log('    Component {}: {} tangled nodes'.format(component_id, n_tangled_nodes - n_self_overl))
         if n_self_overl:
-            common.log('    Component %d: %d self-overlapping nodes' % (component_id, n_self_overl))
-        with open(os.path.join(graph_dir, '%05d.dot' % component_id), 'w') as graph_out:
+            common.log('    Component {}: {} self-overlapping nodes'.format(component_id, n_self_overl))
+        with open(os.path.join(graph_dir, '{:05d}.dot'.format(component_id)), 'w') as graph_out:
             graph.write_dot(graph_out, chrom_names, tangled_nodes, removed_edges)
 
     combined = []
-    for path, bound in zip(paths, bounding_regions):
-        segments = []
-        for i, node_id in enumerate(path):
-            segment = graph.get_value(node_id)
-            if bound is not None:
-                segment = segment.sub_duplication(bound)
-                if i:
-                    prev = graph.get_value(path[i - 1])
-                    if prev.region1.contains(segment.region1) or prev.region2.contains(segment.region2):
-                        # After bounding the segment, it no longer brings new information.
-                        continue
-            segments.append(segment)
-
+    tangled_regions = []
+    for segments in _path_segments(graph, paths, bounding_regions, tangled_regions):
         comb_dupl = combine_segments(segments, aln_fun)
-        comb_dupl.info['entries'] = len(path)
+        comb_dupl.info['entries'] = len(segments)
         comb_dupl.store_stats()
         comb_dupl.estimate_complexity()
         combined.append(comb_dupl)
 
     if n_tangled_nodes:
-        tangled_regions = Interval.combine_overlapping(
-            (graph.get_value(node_id).region1 for node_id in np.where(tangled_nodes)[0]),
-            max_dist=100)
+        tangled_regions.extend(graph.get_value(node_id).region1 for node_id in np.where(tangled_nodes)[0])
+        tangled_regions = Interval.combine_overlapping(tangled_regions, max_dist=100)
         for region in tangled_regions:
             combined.append(TangledRegion(region))
     combined.sort(key=operator.attrgetter('region1'))
@@ -545,7 +564,7 @@ def main(prog_name=None, in_args=None):
         version=long_version(), help='Show version.')
     args = parser.parse_args(in_args)
 
-    common.log('Using %d threads' % args.threads)
+    common.log('Using {} threads'.format(args.threads))
     if args.graph is not None:
         common.mkdir(args.graph)
 

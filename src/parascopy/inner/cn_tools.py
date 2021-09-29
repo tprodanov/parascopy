@@ -4,7 +4,7 @@ import itertools
 import os
 
 from . import common
-from .common import NonOverlappingSet
+from . import itree
 from .genome import Interval
 
 
@@ -403,12 +403,12 @@ class DuplHierarchy:
     Hierarchy of duplicated regions:
         psvs < windows < const_regions < region_groups.
     """
-    def __init__(self, psvs, const_regions, genome, duplications, window_size, max_ref_cn):
+    def __init__(self, interval, psvs, const_regions, genome, duplications, window_size, max_ref_cn):
+        self.interval = interval
         self._psvs = psvs
+        self._psv_searcher = itree.NonOverlTree(self._psvs, itree.start, itree.variant_end)
         self._const_regions = const_regions
-        first_region = self._const_regions[0].region1
-        last_region = self._const_regions[-1].region1
-        interval = Interval(first_region.chrom_id, first_region.start, last_region.end)
+
         interval_seq = interval.get_sequence(genome)
         interval_start = interval.start
 
@@ -423,14 +423,8 @@ class DuplHierarchy:
         self._init()
 
     def _init(self):
-        self._init_searchers()
         self._store_group_windows()
         self._check_indices()
-
-    def _init_searchers(self):
-        self._psv_searcher = NonOverlappingSet.from_variants(self._psvs)
-        # self._window_searcher = NonOverlappingSet.from_dupl_regions(self._windows)
-        # self._const_region_searcher = NonOverlappingSet.from_dupl_regions(self._windows)
 
     def _check_indices(self):
         for i, window in enumerate(self._windows):
@@ -470,15 +464,17 @@ class DuplHierarchy:
     def window_group_name(self, window):
         return self._const_regions[window.const_region_ix].group_name
 
-    def summarize_region_groups(self, genome, out):
+    def summarize_region_groups(self, genome, out, min_windows):
         for region_group in self._region_groups:
             out.write('Region group {}\n'.format(region_group.name))
             out.write('    Sum length {:,} bp{}\n'.format(len(region_group.region1),
                 ' (including breaks)' if len(region_group.region_ixs) > 1 else ''))
             out.write('    Copy number:  {}\n'.format(region_group.cn))
             out.write('    PSVs:    {}\n'.format(len(region_group.psv_ixs)))
-            out.write('    Windows: {} (suitable for HMM: {})\n'.format(len(region_group.window_ixs),
-                sum(self._windows[i].in_viterbi for i in region_group.window_ixs)))
+
+            total_windows = len(region_group.window_ixs)
+            windows_in_hmm = sum(self._windows[i].in_viterbi for i in region_group.window_ixs)
+            out.write('    Windows: {} (suitable for HMM: {})\n'.format(total_windows, windows_in_hmm))
             out.write('    Constant regions: {}\n'.format(len(region_group.region_ixs)))
             for region_ix in region_group.region_ixs:
                 subregion = self._const_regions[region_ix]
@@ -486,6 +482,10 @@ class DuplHierarchy:
                 out.write('    {} ({:,} bp)\n'.format(subregion.region1.to_str_comma(genome), len(subregion.region1)))
                 out.write('    {}\n'.format(subregion.regions2_str(genome, use_comma=True, sep='\n    ')))
             out.write('    ====\n')
+
+            if total_windows >= min_windows * 1.5 and windows_in_hmm == 0:
+                common.log('WARN: [{}  {}] cannot use any windows for the agCN HMM (out of total {} windows)'
+                    .format(self.interval.name, region_group.name, total_windows))
 
 
 class OutputFiles:
@@ -546,12 +546,12 @@ class RegionGroupExtra:
         windows = dupl_hierarchy.windows
         self._group_windows = [windows[i] for i in region_group.window_ixs]
         self._hmm_windows = [window for window in self._group_windows if window.in_viterbi]
-        self._windows_searcher = NonOverlappingSet.from_dupl_regions(self._group_windows)
-        self._hmm_windows_searcher = NonOverlappingSet.from_dupl_regions(self._hmm_windows)
+        self._windows_searcher = itree.NonOverlTree(self._group_windows, itree.region1_start, itree.region1_end)
+        self._hmm_windows_searcher = itree.NonOverlTree(self._hmm_windows, itree.region1_start, itree.region1_end)
 
         psvs = dupl_hierarchy.psvs
         self._region_psvs = [psvs[i] for i in region_group.psv_ixs]
-        self._psv_finder = common.NonOverlappingSet.from_variants(self._region_psvs)
+        self._psv_searcher = itree.NonOverlTree(self._region_psvs, itree.start, itree.variant_end)
         self._psv_read_counts = [psv_read_counts[i] for i in region_group.psv_ixs]
 
         self._sample_const_regions = None
@@ -589,8 +589,8 @@ class RegionGroupExtra:
         return self._region_psvs
 
     @property
-    def psv_finder(self):
-        return self._psv_finder
+    def psv_searcher(self):
+        return self._psv_searcher
 
     @property
     def psv_read_counts(self):

@@ -90,44 +90,40 @@ def main():
 
     if command == 'pretable':
         from . import pretable
-        _process_exceptions(pretable.main, inner_prog, inner_args)
-        return
+        return _process_exceptions(pretable.main, inner_prog, inner_args)
 
     if command == 'table':
         from . import combine_table
-        _process_exceptions(combine_table.main, inner_prog, inner_args)
-        return
+        return _process_exceptions(combine_table.main, inner_prog, inner_args)
 
     if command == 'depth':
         from . import depth
-        _process_exceptions(depth.main, inner_prog, inner_args)
-        return
+        return _process_exceptions(depth.main, inner_prog, inner_args)
 
     if command == 'cn' or command == 'cn-using':
         is_new = command == 'cn'
         from . import detect_cn
-        _process_exceptions(detect_cn.main, inner_prog, inner_args, is_new)
-        return
+        return _process_exceptions(detect_cn.main, inner_prog, inner_args, is_new)
 
     if command == 'pool':
         from . import pool_reads
-        _process_exceptions(pool_reads.main, inner_prog, inner_args)
-        return
+        return _process_exceptions(pool_reads.main, inner_prog, inner_args)
 
     if command == 'view':
         from . import view
-        _process_exceptions(view.main, inner_prog, inner_args)
-        return
+        return _process_exceptions(view.main, inner_prog, inner_args)
 
     if command == 'msa':
         from . import msa
-        _process_exceptions(msa.main, inner_prog, inner_args)
-        return
+        return _process_exceptions(msa.main, inner_prog, inner_args)
 
     if command == 'psvs':
         from . import psvs
-        _process_exceptions(psvs.main, inner_prog, inner_args)
-        return
+        return _process_exceptions(psvs.main, inner_prog, inner_args)
+
+    if command == 'call':
+        from . import call_variants
+        return _process_exceptions(call_variants.main, inner_prog, inner_args)
 
     _throw_error(prog_name, command)
 

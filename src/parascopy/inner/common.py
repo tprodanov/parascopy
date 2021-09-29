@@ -15,21 +15,20 @@ from scipy.special import logsumexp
 
 from . import genome as genome_
 
-# TODO Move rev_comp to genome, remove split_cigar
 
 _rev_comp = {'A':'T', 'T':'A', 'C':'G', 'G':'C','a':'T', 't':'A', 'c':'G', 'g':'C', 'N':'N', 'n':'N' }
 def rev_comp(seq): # reverse complement of string
     return ''.join(_rev_comp.get(nt, 'X') for nt in seq[::-1])
 
 
-def cond_rev_comp(seq, reverse):
-    if reverse:
-        return rev_comp(seq)
-    return seq
+def cond_rev_comp(seq, *, strand):
+    if strand:
+        return seq
+    return rev_comp(seq)
 
 
-def cond_reverse(qual, reverse):
-    return qual[::-1] if reverse else qual
+def cond_reverse(qual, *, strand):
+    return qual if strand else qual[::-1]
 
 
 def gc_count(seq):
@@ -38,34 +37,6 @@ def gc_count(seq):
 
 def gc_content(seq):
     return 100.0 * (seq.count('C') + seq.count('G')) / len(seq)
-
-
-def split_cigar(cigarstring): ## 57M2I43M13I54M -> (57, M) (2, I) (43, M) (13, I) (54, M)
-    prev = 0
-    cigarlist = []
-    l1 = 0
-    l2 = 0
-    aligned_len = 0
-    for i in range(len(cigarstring)):
-        b = ord(cigarstring[i])
-        if b < 48 or b > 57:
-            ml = int(cigarstring[prev:i])
-            prev = i+1
-            op = cigarstring[i]
-            cigarlist.append([ml, op])
-            if cigarstring[i] == 'M' or cigarstring[i] == 'X' or cigarstring[i] == '=':
-                l1 += ml
-                l2 += ml
-                aligned_len += ml
-            elif cigarstring[i] == 'D' or cigarstring[i] == 'N':
-                l2 += ml
-            elif cigarstring[i] == 'I':
-                l1 +=ml
-            elif cigarstring[i] == 'S':
-                l1 +=ml
-            elif cigarstring[i] == 'H':
-                pass
-    return [l1, l2, aligned_len, cigarlist]
 
 
 def log(string, out=sys.stderr):
@@ -260,6 +231,13 @@ def mkdir(path):
         pass
 
 
+def mkdir_clear(path, rewrite):
+    if os.path.exists(path) and rewrite:
+        log('Cleaning directory "{}"'.format(path))
+        shutil.rmtree(path)
+    mkdir(path)
+
+
 def parse_distance(value):
     """
     Removes commas, and analyzes prefixes.
@@ -300,73 +278,6 @@ def common_suffix(seq0, *seqs):
         return i - 1
 
 
-class NonOverlappingSet:
-    """
-    Stores non-overlapping intervals and allows for fast retrieval of overlapping intervals.
-    """
-    def __init__(self, starts, ends):
-        assert len(starts) == len(ends)
-        self._starts = np.array(starts)
-        self._ends = np.array(ends)
-        assert np.all(self._ends[:-1] <= self._starts[1:])
-
-    @classmethod
-    def from_start_end_pairs(cls, pairs):
-        self = cls.__new__(cls)
-        self._starts = np.fromiter(map(operator.itemgetter(0), pairs), np.int32, len(pairs))
-        self._ends = np.fromiter(map(operator.itemgetter(1), pairs), np.int32, len(pairs))
-        assert np.all(self._ends[:-1] <= self._starts[1:])
-        return self
-
-    @classmethod
-    def from_variants(cls, variants):
-        self = cls.__new__(cls)
-        self._starts = np.fromiter(map(operator.attrgetter('start'), variants), np.int32, len(variants))
-        self._ends = self._starts + [len(variant.ref) for variant in variants]
-        assert np.all(self._ends[:-1] <= self._starts[1:])
-        return self
-
-    @classmethod
-    def from_regions(cls, regions):
-        self = cls.__new__(cls)
-        self._starts = np.fromiter(map(operator.attrgetter('start'), regions), np.int32, len(regions))
-        self._ends = np.fromiter(map(operator.attrgetter('end'), regions), np.int32, len(regions))
-        assert len(set(map(operator.attrgetter('chrom_id'), regions))) <= 1
-        assert np.all(self._ends[:-1] <= self._starts[1:])
-        return self
-
-    @classmethod
-    def from_dupl_regions(cls, dupl_regions):
-        regions1 = list(map(operator.attrgetter('region1'), dupl_regions))
-        return cls.from_regions(regions1)
-
-    def select(self, start, end):
-        start_ix = self._ends.searchsorted(start, side='right')
-        end_ix = self._starts.searchsorted(end, side='left')
-        return start_ix, end_ix
-
-    def select_by_pos(self, pos):
-        start_ix = self._ends.searchsorted(pos, side='right')
-        if start_ix == len(self._starts) or pos < self._starts[start_ix]:
-            return None
-        return start_ix
-
-    def is_empty(self, start, end):
-        start_ix, end_ix = self.select(start, end)
-        return start_ix == end_ix
-
-    @property
-    def starts(self):
-        return self._starts
-
-    @property
-    def ends(self):
-        return self._ends
-
-    def __len__(self):
-        return len(self._starts)
-
-
 def str_count(count, word):
     """
     str_count(10, 'word') -> '10 words'
@@ -402,6 +313,8 @@ def tricube_kernel(values):
 LOG10 = np.log(10)
 
 def phred_qual(probs, best_ix, max_value=10000):
+    if len(probs) == 1 and best_ix == 0:
+        return max_value
     oth_prob = logsumexp(np.delete(probs, best_ix))
     if np.isfinite(oth_prob):
         return min(-10 * oth_prob / LOG10, max_value)

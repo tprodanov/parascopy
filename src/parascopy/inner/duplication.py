@@ -1,5 +1,5 @@
 import operator
-from collections import Counter
+from collections import Counter, namedtuple
 import parasail
 import itertools
 
@@ -22,7 +22,7 @@ class TangledRegion:
         self._region1 = region1
 
     def to_str(self, genome):
-        return '%s\t*\t*\t*\t*\ttangled' % self._region1.to_bed(genome)
+        return self._region1.to_bed(genome) + '\t*\t*\t*\t*\ttangled'
 
     def to_str_pretty(self, genome):
         return '{}\t{:,}\t{:,}\ttangled region'.format(
@@ -35,6 +35,9 @@ class TangledRegion:
     @property
     def is_tangled_region(self):
         return True
+
+
+VariantPosition = namedtuple('VariantPosition', 'region strand sequence')
 
 
 class Duplication:
@@ -257,12 +260,13 @@ class Duplication:
         self._padding_seq = padding_seq
 
     def to_str(self, genome):
-        res = '%s\t%s\t%s\t' % (self._region1.to_bed(genome), self.strand_str, self._region2.to_bed(genome))
-        res += ';'.join('%s=%s' % t for t in self._info.items())
+        res = '{}\t{}\t{}\t'.format(self._region1.to_bed(genome), self.strand_str, self._region2.to_bed(genome))
+        res += ';'.join(map('%s=%s'.__mod__, self._info.items()))
         if 'CIGAR' not in self._info and self._full_cigar is not None:
             if self._info:
                 res += ';'
-            res += 'CIGAR=%s' % self._full_cigar
+            res += 'CIGAR='
+            res += str(self._full_cigar)
         return res
 
     def to_str_pretty(self, genome):
@@ -271,13 +275,16 @@ class Duplication:
         res = '{}\t{:,}\t{:,}\t'.format(self._region1.chrom_name(genome), self._region1.start, self._region1.end)
         res += '{}\t'.format(self.strand_str)
         res += '{}\t{:,}\t{:,}\t'.format(self._region2.chrom_name(genome), self._region2.start, self._region2.end)
-        res += '\t'.join('%s: %s' % t for t in self._info.items())
-        res += '\tCIGAR: %s' % self._full_cigar.to_str()
+        res += '\t'.join(map('%s: %s'.__mod__, self._info.items()))
+        res += '\tCIGAR: '
+        res += self._full_cigar.to_str()
         return res
 
-    def align_variant(self, variant, genome, padding, psv_dist, max_psvs):
+    def align_variant(self, variant):
         """
-        Returns dictionary { col_name: value }.
+        Returns VariantPosition(region, strand, sequence).
+        If variant is on a reverse strand, sequence is reverse-complemented relative to the region,
+        meaning that if a variant does not overlap a PSV, sequence will be equal to variant.ref.
         """
         var_ref_len = len(variant.ref)
         start1 = variant.start - self._region1.start
@@ -292,109 +299,105 @@ class Duplication:
 
         seq1 = self._seq1[start1:end1]
         seq2 = self._seq2[start2:end2]
+        dupl_start = self._region2.start + start2 if self._strand else self._region2.end - end2
+        return VariantPosition(
+            Interval(self._region2.chrom_id, dupl_start, dupl_start + len(seq2)), self._strand, seq2)
 
-        if self._strand:
-            # 1-based
-            dupl_pos = self._region2.start + start2 + 1
-            dupl_ref = seq2
-        else:
-            dupl_pos = self._region2.end - end2 + 1
-            dupl_ref = common.rev_comp(seq2)
+        # psvs = []
+        # n_psvs = 0
+        # for diff in self._full_cigar.find_differences():
+        #     if start1 - diff.end1 >= psv_dist:
+        #         continue
+        #     if diff.start1 - end1 >= psv_dist:
+        #         break
+        #     psv_seq1 = self._seq1[diff.start1 : diff.end1]
+        #     psv_seq2 = self._seq2[diff.start2 : diff.end2]
+        #     psvs.append('%d:%s->%s' % (diff.start1 - start1, psv_seq1, psv_seq2))
+        #     n_psvs += 1
+        # if n_psvs > max_psvs:
+        #     return None
 
-        psvs = []
-        n_psvs = 0
-        for diff in self._full_cigar.find_differences():
-            if start1 - diff.end1 >= psv_dist:
-                continue
-            if diff.start1 - end1 >= psv_dist:
-                break
-            psv_seq1 = self._seq1[diff.start1 : diff.end1]
-            psv_seq2 = self._seq2[diff.start2 : diff.end2]
-            psvs.append('%d:%s->%s' % (diff.start1 - start1, psv_seq1, psv_seq2))
-            n_psvs += 1
-        if n_psvs > max_psvs:
-            return None
+        # WINDOW_RADIUS = 3
+        # wseq1 = self._seq1[max(start1 - WINDOW_RADIUS, 0) : start1].lower() + seq1 \
+        #     + self._seq1[end1 : end1 + WINDOW_RADIUS].lower()
+        # wseq2 = self._seq2[max(start2 - WINDOW_RADIUS, 0) : start2].lower() + seq2 \
+        #     + self._seq2[end2 : end2 + WINDOW_RADIUS].lower()
 
-        WINDOW_RADIUS = 3
-        wseq1 = self._seq1[max(start1 - WINDOW_RADIUS, 0) : start1].lower() + seq1 \
-            + self._seq1[end1 : end1 + WINDOW_RADIUS].lower()
-        wseq2 = self._seq2[max(start2 - WINDOW_RADIUS, 0) : start2].lower() + seq2 \
-            + self._seq2[end2 : end2 + WINDOW_RADIUS].lower()
+        # return dict(chrom=variant.chrom, pos=variant.pos, ref=variant.ref, alt=','.join(variant.alts),
+        #     qual='%.1f' % variant.qual, filter=';'.join(map(str, variant.filter)),
+        #     dupl_chrom=self._region2.chrom_name(genome), dupl_pos=dupl_pos, dupl_ref=dupl_ref,
+        #     dupl_strand=self.strand_str, overl_psv='F' if seq1 == seq2 else 'T',
+        #     matches_psv='T' if any(alt == seq2 for alt in variant.alts) else 'F',
+        #     seq_similarity=self._info.get('SS', '*'),
+        #     padding='%d,%d' % padding, psvs=','.join(psvs) if psvs else '*',
+        #     window='%s,%s' % (wseq1, wseq2))
 
-        return dict(chrom=variant.chrom, pos=variant.pos, ref=variant.ref, alt=','.join(variant.alts),
-            qual='%.1f' % variant.qual, filter=';'.join(map(str, variant.filter)),
-            dupl_chrom=self._region2.chrom_name(genome), dupl_pos=dupl_pos, dupl_ref=dupl_ref,
-            dupl_strand=self.strand_str, overl_psv='F' if seq1 == seq2 else 'T',
-            matches_psv='T' if any(alt == seq2 for alt in variant.alts) else 'F',
-            seq_similarity=self._info.get('SS', '*'),
-            padding='%d,%d' % padding, psvs=','.join(psvs) if psvs else '*',
-            window='%s,%s' % (wseq1, wseq2))
+    # @deprecated
+    # def convert_variant(self, variant, genome, header, chrom_seq2, chrom_seq2_shift):
+    #     """
+    #     chrom_seq2 - sequence of the region2.chrom with chrom_seq2_shift.
+    #     It is not reversed even if the duplication has reverse strand.
+    #     """
+    #     ref = variant.ref
+    #     ref_len = len(variant.ref)
+    #     start1 = variant.start - self._region1.start
+    #     end1 = variant.start + ref_len - self._region1.start
+    #     if start1 < 0 or end1 > len(self._region1):
+    #         return None
 
-    def convert_variant(self, variant, genome, header, chrom_seq2, chrom_seq2_shift):
-        """
-        chrom_seq2 - sequence of the region2.chrom with chrom_seq2_shift.
-        It is not reversed even if the duplication has reverse strand.
-        """
-        ref = variant.ref
-        ref_len = len(variant.ref)
-        start1 = variant.start - self._region1.start
-        end1 = variant.start + ref_len - self._region1.start
-        if start1 < 0 or end1 > len(self._region1):
-            return None
+    #     if any(len(alt) != ref_len for alt in variant.alts):
+    #         alt_size_diff = max(len(alt) - ref_len for alt in variant.alts)
+    #         is_indel = True
+    #     else:
+    #         alt_size_diff = 0
+    #         is_indel = False
 
-        if any(len(alt) != ref_len for alt in variant.alts):
-            alt_size_diff = max(len(alt) - ref_len for alt in variant.alts)
-            is_indel = True
-        else:
-            alt_size_diff = 0
-            is_indel = False
+    #     start2, end2 = self._full_cigar.aligned_region(start1, end1, alt_size_diff)
+    #     if not self._strand and (is_indel or start2 == end2):
+    #         remove_prefix = common.common_prefix(ref, *variant.alts)
+    #         prefix_ix = self._region2.end - end2 - 1 - chrom_seq2_shift
+    #         assert prefix_ix >= 0
+    #         new_prefix = chrom_seq2[prefix_ix]
+    #     elif start2 == end2:
+    #         prefix_ix = self._region2.start - start2 - 1 - chrom_seq2_shift
+    #         assert prefix_ix >= 0
+    #         new_prefix = chrom_seq2[prefix_ix]
+    #     else:
+    #         remove_prefix = 0
+    #         new_prefix = ''
 
-        start2, end2 = self._full_cigar.aligned_region(start1, end1, alt_size_diff)
-        if not self._strand and (is_indel or start2 == end2):
-            remove_prefix = common.common_prefix(ref, *variant.alts)
-            prefix_ix = self._region2.end - end2 - 1 - chrom_seq2_shift
-            assert prefix_ix >= 0
-            new_prefix = chrom_seq2[prefix_ix]
-        elif start2 == end2:
-            prefix_ix = self._region2.start - start2 - 1 - chrom_seq2_shift
-            assert prefix_ix >= 0
-            new_prefix = chrom_seq2[prefix_ix]
-        else:
-            remove_prefix = 0
-            new_prefix = ''
+    #     dupl_ref = new_prefix + common.cond_rev_comp(self._seq2[start2 + remove_prefix : end2], strand=self._strand)
+    #     alleles = [dupl_ref]
+    #     old_to_new = []
+    #     for allele in variant.alleles:
+    #         dupl_allele = new_prefix + common.cond_rev_comp(allele[remove_prefix : ], strand=self._strand)
+    #         if dupl_allele == dupl_ref:
+    #             old_to_new.append(0)
+    #         else:
+    #             old_to_new.append(len(alleles))
+    #             alleles.append(dupl_allele)
 
-        dupl_ref = new_prefix + common.cond_rev_comp(self._seq2[start2 + remove_prefix : end2], not self._strand)
-        alleles = [dupl_ref]
-        old_to_new = []
-        for allele in variant.alleles:
-            dupl_allele = new_prefix + common.cond_rev_comp(allele[remove_prefix : ], not self._strand)
-            if dupl_allele == dupl_ref:
-                old_to_new.append(0)
-            else:
-                old_to_new.append(len(alleles))
-                alleles.append(dupl_allele)
+    #     new_variant = header.new_record()
+    #     new_variant.chrom = self._region2.chrom_name(genome)
+    #     if self._strand:
+    #         new_variant.start = self._region2.start + start2 - len(new_prefix)
+    #     else:
+    #         new_variant.start = self._region2.end - end2 - len(new_prefix)
+    #     new_variant.alleles = alleles
+    #     new_variant.qual = variant.qual
 
-        new_variant = header.new_record()
-        new_variant.chrom = self._region2.chrom_name(genome)
-        if self._strand:
-            new_variant.start = self._region2.start + start2 - len(new_prefix)
-        else:
-            new_variant.start = self._region2.end - end2 - len(new_prefix)
-        new_variant.alleles = alleles
-        new_variant.qual = variant.qual
+    #     if all(i == j for i, j in enumerate(old_to_new)):
+    #         old_to_new = None
+    #     variants_.copy_vcf_fields(variant, new_variant, old_to_new)
 
-        if all(i == j for i, j in enumerate(old_to_new)):
-            old_to_new = None
-        variants_.copy_vcf_fields(variant, new_variant, old_to_new)
-
-        if is_indel:
-            move_res = variants_.move_left(new_variant.start, new_variant.ref, new_variant.alts,
-                chrom_seq2, chrom_seq2_shift)
-            if move_res is not None:
-                new_start, new_alleles = move_res
-                new_variant.start = new_start
-                new_variant.alleles = new_alleles
-        return new_variant
+    #     if is_indel:
+    #         move_res = variants_.move_left(new_variant.start, new_variant.ref, new_variant.alts,
+    #             chrom_seq2, chrom_seq2_shift)
+    #         if move_res is not None:
+    #             new_start, new_alleles = move_res
+    #             new_variant.start = new_start
+    #             new_variant.alleles = new_alleles
+    #     return new_variant
 
     def store_stats(self, stats=None):
         if stats is None:
@@ -412,8 +415,8 @@ class Duplication:
         n = len(kmers)
         kmers_counter = Counter(kmers)
         n_unique = len(kmers_counter)
-        self._info['compl'] = '%.3f' % (n_unique / min(n, 4 ** k))
-        self._info['av_mult'] = '%.2f' % (sum(kmers_counter.values()) / n_unique)
+        self._info['compl'] = '{:.3f}'.format(n_unique / min(n, 4 ** k))
+        self._info['av_mult'] = '{:.2f}'.format(sum(kmers_counter.values()) / n_unique)
 
     @property
     def complexity(self):
@@ -666,13 +669,13 @@ class Duplication:
             dupl._full_cigar.init_index()
 
         if self._seq1:
-            dupl._seq2 = common.cond_rev_comp(self._seq1, not self._strand)
-            dupl._seq1 = common.cond_rev_comp(self._seq2, not self._strand)
+            dupl._seq2 = common.cond_rev_comp(self._seq1, strand=self._strand)
+            dupl._seq1 = common.cond_rev_comp(self._seq2, strand=self._strand)
 
         _copy_values(self._info, dupl._info, ['SEP', 'ALENGTH', 'SS', 'NM', 'compl', 'av_mult', 'clip'])
         if 'DIFF' in self._info:
             mism, deletions, insertions = self._info['DIFF'].split(',')
-            dupl._info['DIFF'] = '%s,%s,%s' % (mism, insertions, deletions)
+            dupl._info['DIFF'] = '{},{},{}'.format(mism, insertions, deletions)
         return dupl
 
 
@@ -776,7 +779,7 @@ def _get_regions_and_seqs(segments):
         curr_end2 = segment.region2.end if strand else -segment.region2.start
         if curr_start1 > end1 or curr_start2 > end2:
             for s in segments:
-                common.log('%r   %r' % (s.region1, s.region2))
+                common.log('{!r}   {!r}'.format(s.region1, s.region2))
         assert curr_start1 <= end1 and curr_start2 <= end2
 
         if end1 < curr_end1:
@@ -972,7 +975,7 @@ def combine_segments(segments, aln_fun):
 
     if store_clipping:
         assert left_clip is not None
-        dupl.info['clip'] = '%d,%d' % (left_clip, right_clip)
+        dupl.info['clip'] = '{},{}'.format(left_clip, right_clip)
     return dupl
 
 

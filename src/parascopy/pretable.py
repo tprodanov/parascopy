@@ -319,10 +319,7 @@ def write_header(genome, out, argv):
     out.write('# Info fields:\n')
     out.write('#     - compl: Region1 complexity (number of unique kmers / max possible kmers).\n')
     out.write('#     - av_mult: Average k-mer multiplicity (number of times it appears in region1).\n')
-
-    out.write('# Chromosomes: ')
-    out.write(','.join(map('%s:%d'.__mod__, genome.names_lengths)))
-    out.write('\n')
+    out.write(genome.table_header())
 
 
 def _group_regions(regions, min_len=1e6, max_len=20e6):
@@ -447,7 +444,7 @@ def main(prog_name=None, in_args=None):
         exit(1)
 
     with Genome(args.fasta_ref) as genome, open(args.output, 'wb') as out, \
-            tempfile.TemporaryDirectory(prefix='pretable') as wdir:
+            tempfile.TemporaryDirectory(prefix='parascopy') as wdir:
         common.log('Using temporary directory {}'.format(wdir))
         regions = common.get_regions(args, genome)
         region_groups = _group_regions(regions)

@@ -81,6 +81,12 @@ class Cigar:
     def init_index(self):
         self._index = CigarIndex(self)
 
+    def init_proxy_index(self):
+        """
+        Initializes fake proxy index, that does not do anything, but allows to run functions such as aligned_region().
+        """
+        self._index = ProxyIndex()
+
     def __init_lengths(self):
         self._read_len = 0
         self._ref_len = 0
@@ -171,6 +177,7 @@ class Cigar:
                         if not next_op.consumes_ref():
                             read_end += min(next_len, alt_size_diff)
 
+                    assert read_start is not None
                     return (read_start, read_end)
                 ref_pos += length
 
@@ -588,6 +595,25 @@ class Cigar:
     def __eq__(self, other):
         return self._tuples == other._tuples
 
+    def has_true_clipping(self, base_qualities, max_len=2, low_bq=10):
+        """
+        Suppose a read has C clipped bases and there are B bases with quality <= low_bq (on the same side of the read).
+        Returns True if C > B + max_len (for left OR for right side).
+        """
+        left, right = self.get_clipping()
+        if base_qualities is None:
+            return left > max_len or right > max_len
+
+        if left:
+            low_bq_left = sum(bq <= low_bq for bq in base_qualities[:left])
+            if left > low_bq_left + max_len:
+                return True
+        if right:
+            low_bq_right = sum(bq <= low_bq for bq in base_qualities[-right:])
+            if right > low_bq_right + max_len:
+                return True
+        return False
+
 
 class CigarIndex:
     def __init__(self, cigar, step_size=100):
@@ -633,4 +659,15 @@ class CigarIndex:
         i = np.searchsorted(self._read_positions, read_pos, side='right') - 1
         if i >= 0:
             return (self._cigar_indices[i], self._ref_positions[i], self._read_positions[i])
+        return (0, 0, 0)
+
+
+class ProxyIndex:
+    def __init__(self):
+        pass
+
+    def find_by_ref(self, _ref_pos):
+        return (0, 0, 0)
+
+    def find_by_read(self, read_pos):
         return (0, 0, 0)

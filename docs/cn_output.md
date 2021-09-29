@@ -155,9 +155,9 @@ For each variant there are several `INFO` fields that are equal for all samples:
     * u (unreliable) - *f*-values are unknown or at least one less than 0.8.
 
 Additionally, each sample may have the following `FORMAT` values:
-- `AC`: allelic read depth.
+- `AD`: allelic read depth.
 - `DP`: total read depth.
-    Total read depth may be bigger than `sum(AC)` as there may be reads that do not support any of the PSV alleles,
+    Total read depth may be bigger than `sum(AD)` as there may be reads that do not support any of the PSV alleles,
     this is usually due to low-complexity sequence and not due to new alleles.
 - `GT`: PSV genotype. Genotype `0/0/0/1/1` would mean that sample agCN = 5 and there are three copies with REF allele
     and two copies with ALT allele.

@@ -312,7 +312,7 @@ class CopyNumHmm(HmmModel):
 
     def calculate_emission_matrices(self, depth_matrix, windows, multipliers, mult_weights, bg_depth, error_rate=0.01):
         assert depth_matrix.shape == (self._n_observations, self._n_samples)
-        state_ploidies = self.get_copy_num(np.arange(self._n_hidden)).astype(np.float)
+        state_ploidies = self.get_copy_num(np.arange(self._n_hidden)).astype(np.double)
         assert state_ploidies[0] >= 0.0
         state_ploidies[0] = max(state_ploidies[0], error_rate)
 

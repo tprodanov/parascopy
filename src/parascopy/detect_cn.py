@@ -4,7 +4,6 @@ import pysam
 import operator
 import itertools
 import os
-import shutil
 import csv
 import collections
 import numpy as np
@@ -32,13 +31,6 @@ from .inner import cn_hmm
 from .inner import paralog_cn
 from .inner import model_params as model_params_
 from . import __pkg_name__, __version__, long_version
-
-
-def _create_dir(path, rewrite):
-    if os.path.exists(path) and rewrite:
-        common.log('Cleaning directory "{}"'.format(path))
-        shutil.rmtree(path)
-    common.mkdir(path)
 
 
 def _write_bed_files(interval, duplications, const_regions, genome, directory):
@@ -71,12 +63,12 @@ def _write_bed_files(interval, duplications, const_regions, genome, directory):
                 outp.write('\n')
 
 
-def _update_psv_observations(record, sample_id, psvs, psv_set, psv_observations):
+def _update_psv_observations(record, sample_id, psvs, psv_searcher, psv_observations):
     record_start = record.reference_start
     record_end = record.reference_end
     record_seq = record.query_sequence
 
-    start_ix, end_ix = psv_set.select(record_start, record_end)
+    start_ix, end_ix = psv_searcher.overlap_ixs(record_start, record_end)
     if start_ix == end_ix:
         return
     psv = psvs[start_ix]
@@ -150,7 +142,7 @@ def _count_psv_observations(psvs, samples, psv_observations):
             res[psv_ix][sample_id] = PsvCounts(allele_counts, partial, oth_cov, skip)
             format = psv.samples[sample_id]
             format['DP'] = total_reads
-            format['AC'] = allele_counts
+            format['AD'] = allele_counts
     return res
 
 
@@ -278,7 +270,7 @@ def _write_summary(results, region_name, genome, samples, summary_out):
         summary_out.write('\n')
 
 
-def _transform_duplication(dupl, interval, genome):
+def transform_duplication(dupl, interval, genome):
     dupl.set_cigar_from_info()
     dupl = dupl.sub_duplication(interval)
     dupl.set_sequences(genome=genome)
@@ -309,7 +301,7 @@ def _update_vcf_header(vcf_header, samples):
         'Description="PSV reliability: r (reliable) | s (semi-reliable) | u (unreliable)">')
     vcf_header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
     vcf_header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">')
-    vcf_header.add_line('##FORMAT=<ID=AC,Number=R,Type=Integer,Description="Allele counts">')
+    vcf_header.add_line('##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Read depth for each allele">')
     vcf_header.add_line('##FORMAT=<ID=DP,Number=1,Type=Integer,'
         'Description="Total read count (includes reads that do not support any allele)">')
     vcf_header.add_line('##FORMAT=<ID=psCN,Number=.,Type=String,'
@@ -334,13 +326,13 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         args = model_params.load_args(args)
 
     extra_subdir = os.path.join(subdir, 'extra')
-    _create_dir(extra_subdir, rewrite=True)
+    common.mkdir_clear(extra_subdir, rewrite=True)
     time_log = _TimeLogger(os.path.join(extra_subdir, 'time.log'))
     time_log.log('Analyzing {}'.format(interval.full_name(genome)))
 
     if model_params.is_loaded:
         duplications = model_params.get_duplications(data.table, interval, genome)
-        duplications = [_transform_duplication(dupl, interval, genome) for dupl in duplications]
+        duplications = [transform_duplication(dupl, interval, genome) for dupl in duplications]
         skip_regions = model_params.get_skip_regions(skip_regions, genome)
     else:
         with open(os.path.join(extra_subdir, 'regions.txt'), 'w') as outp:
@@ -365,7 +357,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
 
                 outp.write('Use duplication   %s\n' % dupl.to_str(genome))
                 model_params.add_duplication(len(duplications), dupl)
-                duplications.append(_transform_duplication(dupl, interval, genome))
+                duplications.append(transform_duplication(dupl, interval, genome))
         skip_regions = Interval.combine_overlapping(skip_regions)
         model_params.set_skip_regions(skip_regions)
 
@@ -376,7 +368,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
     window_size = bg_depth.window_size
     const_regions = cn_tools.find_const_regions(duplications, interval, skip_regions, genome,
         min_size=window_size, max_ref_cn=args.max_ref_cn)
-    dupl_hierarchy = cn_tools.DuplHierarchy(psv_records, const_regions, genome, duplications,
+    dupl_hierarchy = cn_tools.DuplHierarchy(interval, psv_records, const_regions, genome, duplications,
         window_size=bg_depth.window_size, max_ref_cn=args.max_ref_cn)
     if model_params.is_loaded:
         msg = model_params.check_dupl_hierarchy(dupl_hierarchy, genome)
@@ -389,7 +381,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
     pooled_bam_path = os.path.join(subdir, 'pooled_reads.bam')
     if not os.path.exists(pooled_bam_path):
         pool_reads.pool_reads_inner(data.bam_files, data.read_groups, pooled_bam_path, interval,
-            duplications, genome, Weights(), args.samtools, verbose=True, time_log=time_log)
+            duplications, genome, Weights(), samtools=args.samtools, verbose=True, time_log=time_log)
 
     extra_files = dict(depth='depth.csv', region_groups='region_groups.txt', windows='windows.bed',
         hmm_states='hmm_states.csv', hmm_params='hmm_params.csv',
@@ -422,7 +414,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         time_log.log('Writing read depth and PSV observations')
         depth_matrix = _create_depth_matrix(dupl_hierarchy.windows, window_counts)
         psv_counts = _count_psv_observations(psv_records, samples, psv_observations)
-        dupl_hierarchy.summarize_region_groups(genome, out.region_groups)
+        dupl_hierarchy.summarize_region_groups(genome, out.region_groups, args.min_windows)
         _write_windows(dupl_hierarchy, genome, out.windows)
         out.flush()
 
@@ -434,30 +426,31 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
                 continue
 
             group_name = region_group.name
-            time_log.log('Group {}: aggregate copy number HMM'.format(group_name))
+            time_log.log('Group {}: Run HMM to find aggregate copy number profiles'.format(group_name))
             common.log('[{}] Region group {}'.format(interval.name, group_name))
             cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
                 min_samples=args.min_samples, agcn_range=args.agcn_range, agcn_jump=args.agcn_jump,
                 min_trans_prob=args.transition_prob * np.log(10), use_multipliers=args.use_multipliers)
             out.flush()
 
-            time_log.log('Group {}: PSV genotype probabilities')
-            variants_.calculate_all_psv_gt_probs(group_extra)
+            time_log.log('Group {}: PSV genotype probabilities'.format(group_name))
+            variants_.calculate_all_psv_gt_probs(group_extra,
+                max_agcn=args.pscn_bound[0], max_genotypes=args.pscn_bound[1])
             if model_params.is_loaded:
                 group_extra.set_from_model_params(model_params, len(samples))
             else:
-                time_log.log('Group {}: reliable PSVs EM'.format(group_name))
+                time_log.log('Group {}: Run EM to find reliable PSVs'.format(group_name))
                 paralog_cn.find_reliable_psvs(group_extra, samples, genome, out, args.min_samples,
                     args.reliable_threshold[1], args.pscn_bound[0])
                 model_params.set_psv_f_values(group_extra, genome)
             group_extra.set_reliable_psvs(*args.reliable_threshold)
 
-            time_log.log('Group {}: sample-PSV genotype probabilities')
+            time_log.log('Group {}: sample-PSV genotype probabilities'.format(group_name))
             variants_.calculate_support_matrix(group_extra)
             group_extra.update_psv_records(args.reliable_threshold)
             time_log.log('Group {}: paralog-specific copy number and gene conversion'.format(group_name))
             results.extend(paralog_cn.estimate_paralog_cn(group_extra, samples, genome, out,
-                paralog_max_copy_num=args.pscn_bound[0], max_genotypes=args.pscn_bound[1]))
+                max_agcn=args.pscn_bound[0], max_genotypes=args.pscn_bound[1]))
             out.flush()
 
     time_log.log('Writing results')
@@ -490,7 +483,7 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params):
         return region_ix, 'Skip'
     data.prepare()
 
-    _create_dir(os.path.join(data.args.output, region.subdir), data.args.rerun == 'full')
+    common.mkdir_clear(os.path.join(data.args.output, region.subdir), data.args.rerun == 'full')
     success_path = os.path.join(data.args.output, region.subdir, 'extra', 'success')
     if os.path.exists(success_path):
         if data.args.rerun == 'none':
@@ -501,10 +494,9 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params):
     common.log('Analyzing region %s' % region.full_name(data.genome))
     try:
         model_params = analyze_region(region, data, samples, bg_depth, model_params)
-        if not model_params.is_loaded:
-            filename = os.path.join(data.args.output, 'model', '{}.gz'.format(region.subdir))
-            with gzip.open(filename, 'wt') as model_out:
-                model_params.write_to(model_out, data.genome)
+        filename = os.path.join(data.args.output, 'model', '{}.gz'.format(region.subdir))
+        with gzip.open(filename, 'wt') as model_out:
+            model_params.write_to(model_out, data.genome)
     except Exception as exc:
         trace = traceback.format_exc().strip().split('\n')
         trace = '\n'.join(' ' * 11 + s for s in trace)
@@ -563,11 +555,7 @@ def _join_summaries(out_dir, regions, successful, genome, filename, tabix):
         common.Process([tabix, '-p', 'bed' if is_bed_file else 'vcf', out_filename]).finish()
 
 
-def run(regions, data, samples, bg_depth, models):
-    if models is None:
-        models = [None] * len(regions)
-
-    out_dir = data.args.output
+def set_regions_subdirs(regions):
     used_names = set()
     for region in regions:
         if region.os_name not in used_names:
@@ -575,12 +563,19 @@ def run(regions, data, samples, bg_depth, models):
         else:
             name = region.to_str(data.genome)
             if name in used_names:
-                common.log('WARN: region %s appears twice, skipping.' % name)
+                common.log('WARN: region {} appears twice, skipping.'.format(name))
                 region.subdir = None
                 continue
         used_names.add(name)
         region.subdir = name
 
+
+def run(regions, data, samples, bg_depth, models):
+    if models is None:
+        models = [None] * len(regions)
+
+    out_dir = data.args.output
+    set_regions_subdirs(regions)
     threads = max(1, min(len(regions), data.args.threads))
     results = []
     if threads == 1:
@@ -609,10 +604,9 @@ def run(regions, data, samples, bg_depth, models):
     assert len(results) == n_regions and all(i == region_ix for i, (region_ix, _) in enumerate(results))
     successful = [exc is None for _, exc in results]
 
-    if models[0] is None:
-        with open(os.path.join(out_dir, 'model', 'list.txt'), 'w') as model_list:
-            for region in itertools.compress(regions, successful):
-                model_list.write('{}.gz\n'.format(region.subdir))
+    with open(os.path.join(out_dir, 'model', 'list.txt'), 'w') as model_list:
+        for region in itertools.compress(regions, successful):
+            model_list.write('{}.gz\n'.format(region.subdir))
     _join_summaries(out_dir, regions, successful, data.genome, 'res.samples.bed.gz', data.args.tabix)
     _join_summaries(out_dir, regions, successful, data.genome, 'res.matrix.bed.gz', data.args.tabix)
     _join_summaries(out_dir, regions, successful, data.genome, 'psvs.vcf.gz', data.args.tabix)
@@ -729,8 +723,8 @@ def _write_command(filename):
                 outp.write(line)
 
 
-def get_regions(args, genome):
-    if args.is_new:
+def get_regions(args, genome, load_models):
+    if not load_models:
         return (common.get_regions(args, genome), None)
 
     loaded_models = model_params_.load_all(args.model, genome)
@@ -741,6 +735,24 @@ def get_regions(args, genome):
         regions.append(region)
     return (regions, loaded_models)
 
+
+def filter_regions(regions, loaded_models, regions_subset):
+    if regions_subset:
+        exclude = regions_subset[0] == '!'
+        regions_subset = set(regions_subset)
+        if exclude:
+            regions_subset.remove('!')
+            ixs = [i for i, r in enumerate(regions) if r.name not in regions_subset]
+        else:
+            ixs = [i for i, r in enumerate(regions) if r.name in regions_subset]
+
+        regions = [regions[i] for i in ixs]
+        if loaded_models:
+            loaded_models = [loaded_models[i] for i in ixs]
+    if not regions:
+        common.log('Failure! No regions provided.')
+        exit(1)
+    return regions, loaded_models
 
 
 class SingleMetavar(argparse.RawTextHelpFormatter):
@@ -769,14 +781,15 @@ def parse_args(prog_name, in_args, is_new):
 
     inp_me = io_args.add_mutually_exclusive_group(required=True)
     inp_me.add_argument('-i', '--input', metavar='<file>', nargs='+',
-        help='Input BAM/CRAM files. All reads should have read groups with sample name.\n'
+        help='Input indexed BAM/CRAM files.\n'
+            'All entries should follow the format "filename[::sample]"\n'
+            'If sample name is not set, all reads in a corresponding file should have a read group (@RG).\n'
             'Mutually exclusive with --input-list.')
     inp_me.add_argument('-I', '--input-list', metavar='<file>',
-        help='A file containing a list of BAM/CRAM files to analyze. Each line should follow\n'
-        'format "path[ sample]". If sample is non-empty, all reads will use this sample name.\n'
-        'If sample is empty, original read groups will be used.\n'
-        'Raises an error if sample is empty and BAM/CRAM file does not have read groups.\n'
-        'Mutually exclusive with --input.\n\n')
+        help='A file containing a list of input BAM/CRAM files.\n'
+            'All lines should follow the format "filename[ sample]"\n'
+            'If sample name is not set, all reads in a corresponding file should have a read group (@RG).\n'
+            'Mutually exclusive with --input.\n\n')
 
     io_args.add_argument('-t', '--table', metavar='<file>', required=True,
         help='Input indexed bed table with information about segmental duplications.')
@@ -844,9 +857,9 @@ def parse_args(prog_name, in_args, is_new):
         par_det_args.add_argument('--pscn-bound', type=int, metavar='<int> [<int>]',
             default=DEFAULT_PSCN_BOUND, nargs='+',
             help=('Do not estimate paralog-specific copy number if any of the statements is true:\n'
-                '- aggregate copy number is higher than <int>[1]      [default: {}],\n'
-                '- total number of genotypes is higher than <int>[2]  [default: {}].\n'
-                'You can specify only the first number of both numbers.').format(*DEFAULT_PSCN_BOUND))
+                '- aggregate copy number is higher than <int>[1]           [default: {}],\n'
+                '- number of possible psCN tuples is higher than <int>[2]  [default: {}].')
+                .format(*DEFAULT_PSCN_BOUND))
 
     exec_args = parser.add_argument_group('Execution parameters')
     exec_args.add_argument('--rerun', choices=('full', 'partial', 'none'), metavar='full|partial|none', default='none',
@@ -896,26 +909,11 @@ def main(prog_name=None, in_args=None, is_new=None):
     common.mkdir(directory)
     _write_command(os.path.join(directory, 'command.txt'))
 
-    regions, loaded_models = get_regions(args, data.genome)
+    regions, loaded_models = get_regions(args, data.genome, load_models=not args.is_new)
     if loaded_models:
         args.min_samples = None
-    else:
-        _create_dir(os.path.join(directory, 'model'), args.rerun == 'full')
-
-    if args.regions_subset:
-        regions_subset = set(args.regions_subset)
-        if args.regions_subset[0] == '!':
-            regions_subset.remove('!')
-            ixs = [i for i, r in enumerate(regions) if r.name not in regions_subset]
-        else:
-            ixs = [i for i, r in enumerate(regions) if r.name in regions_subset]
-
-        regions = [regions[i] for i in ixs]
-        if loaded_models:
-            loaded_models = [loaded_models[i] for i in ixs]
-    if not regions:
-        common.log('Failure! No regions provided.')
-        exit(1)
+    common.mkdir_clear(os.path.join(directory, 'model'), args.rerun == 'full')
+    regions, loaded_models = filter_regions(regions, loaded_models, args.regions_subset)
 
     bam_files, read_groups = pool_reads.load_bam_files(args.input, args.input_list, data.genome, allow_unnamed=False)
     depth_.check_duplicated_samples(bam_files, read_groups)

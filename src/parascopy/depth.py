@@ -141,12 +141,12 @@ class WindowCounts:
             self._low_mapq_reads += 1
 
         base_qualities = read.query_qualities
-        has_clipping = _has_effective_clipping(cigar, base_qualities)
+        has_clipping = cigar.has_true_clipping(base_qualities)
         if look_at_oa:
             orig_aln = read.get_tag('OA').split(',')
             orig_strand = orig_aln[2] == '+'
             orig_cigar = Cigar(orig_aln[3])
-            has_clipping &= _has_effective_clipping(orig_cigar, common.cond_reverse(base_qualities, orig_strand))
+            has_clipping &= orig_cigar.has_true_clipping(common.cond_reverse(base_qualities, strand=orig_strand))
         if has_clipping:
             self._clipped_reads += 1
 
@@ -213,26 +213,6 @@ def get_read_middle(read, cigar):
                 return None if op == Operation.Soft else ref_pos - 1
             read_pos += length
     return None
-
-
-def _has_effective_clipping(cigar, base_qualities, max_len=2, low_bq=10):
-    """
-    Suppose on the left the read has clipping C and there are B basepairs with quality <= low_bq in the clipped tail.
-    Returns True if C > B + max_len (for left OR for right side).
-    """
-    left, right = cigar.get_clipping()
-    if base_qualities is None:
-        return left > max_len or right > max_len
-
-    if left:
-        low_bq_left = sum(bq <= low_bq for bq in base_qualities[:left])
-        if left > low_bq_left + max_len:
-            return True
-    if right:
-        low_bq_right = sum(bq <= low_bq for bq in base_qualities[-right:])
-        if right > low_bq_right + max_len:
-            return True
-    return False
 
 
 class _FetchRegion:
@@ -390,6 +370,8 @@ def _summarize_sample(sample, sample_window_counts, params, windows, out, res):
         depth1[window_ix] = counts.depth_read1
         depth2[window_ix] = counts.depth_read2
     _filter_windows(windows, params, depth1, depth2, keep_window)
+    if not np.any(keep_window):
+        raise ValueError('Sample "{}" does not pass filters for any windows'.format(sample))
 
     for window_ix, counts in enumerate(sample_window_counts):
         out.write('{}\t{}\t'.format(sample, window_ix))
@@ -400,7 +382,7 @@ def _summarize_sample(sample, sample_window_counts, params, windows, out, res):
     gc_windows = [np.where(gc_contents == gc_content)[0] for gc_content in range(101)]
 
     bg_depth = None
-    for read_end, depth_values in enumerate((depth1, depth2), 1):
+    for read_end, depth_values in enumerate((depth1, depth2), start=1):
         mean_loess = loess(gc_contents[keep_window], depth_values[keep_window],
             xout=np.arange(101), frac=params.loess_frac)
         assert np.all(~np.isnan(mean_loess))
@@ -479,7 +461,7 @@ def _try_single_file_depth(*args, **kwargs):
 def all_files_depth(bam_files, read_groups, windows, fetch_regions, genome, threads, params, out_prefix, out_means):
     genome_filename = genome.filename
     if threads <= 1:
-        for bam_file_num, (bam_file, curr_read_groups) in enumerate(zip(bam_files, read_groups), 1):
+        for bam_file_num, (bam_file, curr_read_groups) in enumerate(zip(bam_files, read_groups), start=1):
             for line in _single_file_depth(bam_file_num, bam_file, curr_read_groups, windows,
                     fetch_regions, genome_filename, out_prefix, params):
                 out_means.write(line)
@@ -499,7 +481,7 @@ def all_files_depth(bam_files, read_groups, windows, fetch_regions, genome, thre
         pool.terminate()
 
     pool = multiprocessing.Pool(threads)
-    for bam_file_num, (bam_file, curr_read_groups) in enumerate(zip(bam_files, read_groups), 1):
+    for bam_file_num, (bam_file, curr_read_groups) in enumerate(zip(bam_files, read_groups), start=1):
         pool.apply_async(_try_single_file_depth,args=(bam_file_num, bam_file, curr_read_groups, windows,
             fetch_regions, genome_filename, out_prefix, params),
             callback=callback, error_callback=err_callback)
@@ -671,14 +653,15 @@ def main(prog_name, in_args):
     io_args = parser.add_argument_group('Input/output arguments')
     inp_me = io_args.add_mutually_exclusive_group(required=True)
     inp_me.add_argument('-i', '--input', metavar='<file>', nargs='+',
-        help='Input BAM/CRAM files. All reads should have read groups with sample name.\n'
+        help='Input indexed BAM/CRAM files.\n'
+            'All entries should follow the format "filename[::sample]"\n'
+            'If sample name is not set, all reads in a corresponding file should have a read group (@RG).\n'
             'Mutually exclusive with --input-list.')
     inp_me.add_argument('-I', '--input-list', metavar='<file>',
-        help='A file containing a list of BAM/CRAM files to analyze. Each line should follow\n'
-        'format "path[ sample]". If sample is non-empty, all reads will use this sample name.\n'
-        'If sample is empty, original read groups will be used.\n'
-        'Raises an error if sample is empty and BAM/CRAM file does not have read groups.\n'
-        'Mutually exclusive with --input.\n\n')
+        help='A file containing a list of input BAM/CRAM files.\n'
+            'All lines should follow the format "filename[ sample]"\n'
+            'If sample name is not set, all reads in a corresponding file should have a read group (@RG).\n'
+            'Mutually exclusive with --input.\n\n')
 
     reg_me = io_args.add_mutually_exclusive_group(required=True)
     reg_me.add_argument('-g', '--genome', choices=('hg19', 'hg38'), metavar='hg19|hg38',
@@ -724,7 +707,6 @@ def main(prog_name, in_args):
 
     common.mkdir(args.output)
     genome = Genome(args.fasta_ref)
-    out_prefix = os.path.join(args.output, 'tmp')
 
     bam_files, read_groups = pool_reads.load_bam_files(args.input, args.input_list, genome, allow_unnamed=False)
     check_duplicated_samples(bam_files, read_groups)

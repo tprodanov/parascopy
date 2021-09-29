@@ -10,6 +10,7 @@ from .inner import common
 from .inner.genome import Genome, Interval
 from .inner.duplication import Duplication
 from .inner import variants as variants_
+from .inner import itree
 from . import long_version
 
 
@@ -126,7 +127,7 @@ def create_psv_records(duplications, genome, vcf_header, region, tangled_regions
     if not duplications:
         return []
 
-    tangled_searcher = common.NonOverlappingSet.from_regions(tangled_regions)
+    tangled_searcher = itree.NonOverlTree(tangled_regions, itree.start, itree.end)
     # Contains list of lists.
     # aligned_pos[dupl_i][pos1] = pos2, where either pos1 and pos2 are aligned, or pos2 = None.
     # Both positions are relative to the duplication.
@@ -159,7 +160,8 @@ def create_psv_records(duplications, genome, vcf_header, region, tangled_regions
 
             psv_start = reg1_start + start1
             psv_end = reg1_start + end1
-            if psv_start < region.end and region.start < psv_end and tangled_searcher.is_empty(psv_start, psv_end):
+            if psv_start < region.end and region.start < psv_end and \
+                    tangled_searcher.overlap_size(psv_start, psv_end) == 0:
                 psvs.append(_Psv(psv_start, psv_end, _SecondRegion(start2, end2, i)))
 
         curr_aligned_pos = []

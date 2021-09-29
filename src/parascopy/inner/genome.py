@@ -19,6 +19,11 @@ class ChromNames:
         self._ids = { name: i for i, name in enumerate(names) }
         self._lengths = lengths
 
+    def table_header(self):
+        res = '# Chromosomes: '
+        res += ','.join(map('%s:%d'.__mod__, zip(self._names, self._lengths)))
+        return res + '\n'
+
     @classmethod
     def from_table(cls, table):
         prefix = '# Chromosomes: '
@@ -32,7 +37,17 @@ class ChromNames:
                     names.append(name)
                     lengths.append(int(length))
                 return cls(names, lengths)
-        raise ValueError('Cannot find line with prefix "%s" in the header' % prefix)
+        raise ValueError('Cannot find line with prefix "{}" in the header'.format(prefix))
+
+    def matches_header(self, header):
+        chromosomes = header.split(':', 1)[1].strip().split(',')
+        if len(chromosomes) != len(self._names):
+            return False
+        for i, entry in enumerate(chromosomes):
+            name, length = entry.split(':')
+            if name != self._names[i] or int(length) != self._lengths[i]:
+                return False
+        return True
 
     def chrom_id(self, chrom_name):
         return self._ids[chrom_name]
@@ -57,10 +72,6 @@ class ChromNames:
     @property
     def chrom_lengths(self):
         return self._lengths
-
-    @property
-    def names_lengths(self):
-        return zip(self._names, self._lengths)
 
     @property
     def n_chromosomes(self):
@@ -130,14 +141,19 @@ class Interval:
         Parse interval from string name:start-end, where start-end is 1-based closed interval.
         `genome` should be an object with method `chrom_id(chrom_name)`. This can be `genome.Genome`.
         """
-
         m = re.match(Interval._interval_pattern, string)
         if m is None:
-            raise ValueError('Cannot parse "%s"' % string)
+            raise ValueError('Cannot parse "{}"'.format(string))
         chrom_id = genome.chrom_id(m.group(1))
         start = int(m.group(2).replace(',', '')) - 1
         end = int(m.group(3).replace(',', ''))
         return cls(chrom_id, start, end)
+
+    @classmethod
+    def parse_with_strand(cls, string, genome):
+        interval, strand = string.rsplit(':', 1)
+        assert strand == '+' or strand == '-'
+        return cls.parse(interval, genome), strand == '+'
 
     @property
     def chrom_id(self):
@@ -165,7 +181,7 @@ class Interval:
         """
         Returns string "chr:start-end", where start-end is 1-based inclusive interval.
         """
-        return '%s:%d-%d' % (genome.chrom_name(self._chrom_id), self.start_1, self._end)
+        return '{}:{}-{}'.format(genome.chrom_name(self._chrom_id), self.start_1, self._end)
 
     def to_str_comma(self, genome):
         """
@@ -174,19 +190,16 @@ class Interval:
         return '{}:{:,}-{:,}'.format(genome.chrom_name(self._chrom_id), self.start_1, self._end)
 
     def to_str_path(self, genome):
-        return '%s_%d-%d' % (genome.chrom_name(self._chrom_id), self.start_1, self._end)
+        return '{}_{}-{}'.format(genome.chrom_name(self._chrom_id), self.start_1, self._end)
 
-    def to_range_str(self, genome):
-        """
-        Returns string "chr:start..end", start-end is 0-based (!) semi-inclusive interval.
-        """
-        return '%s:%d..%d' % (genome.chrom_name(self._chrom_id), self._start, self._end)
+    def to_str0(self, genome):
+        return '{}:{}..{}'.format(genome.chrom_name(self._chrom_id), self._start, self._end)
 
     def to_bed(self, genome):
         """
         Returns string "chr\tstart\tend", where start-end is 0-based semi-exclusive interval.
         """
-        return '%s\t%d\t%d' % (genome.chrom_name(self._chrom_id), self._start, self._end)
+        return '{}\t{}\t{}'.format(genome.chrom_name(self._chrom_id), self._start, self._end)
 
     def get_sequence(self, genome, strand=True):
         """
@@ -246,8 +259,8 @@ class Interval:
         """
         chrom_len = genome.chrom_len(self._chrom_id)
         if self._start >= chrom_len:
-            raise ValueError('Interval %s is out of bounds: chromosome length is %d'
-                % (self.to_str(genome), chrom_len))
+            raise ValueError('Interval {} is out of bounds: chromosome length is {}'
+                .format(self.to_str(genome), chrom_len))
         self._end = min(chrom_len, self._end)
 
     def start_distance(self, other):
@@ -342,7 +355,7 @@ class NamedInterval(Interval):
 
     def full_name(self, genome):
         if self._name_provided:
-            return '%s (%s)' % (super().to_str_comma(genome), self._name)
+            return '{} ({})'.format(super().to_str_comma(genome), self._name)
         return self._name
 
     @classmethod
