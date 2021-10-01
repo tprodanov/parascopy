@@ -90,10 +90,10 @@ See output file format [here](docs/cn_output.md).
 Precomputed data
 ----------------
 
-For hg38 you can use the following precomputed data:
+You can use the following precomputed duplications tables (generated at version 1.2.2):
 - Precomputed homology tables:
-    [hg19 (25 Mb)](dl.dropboxusercontent.com/s/skxti7w2sx6xmu6/hg19.tar)
-    and [hg38 (40 Mb)](https://dl.dropboxusercontent.com/s/d7al17hnuvnpwrl/hg38.tar).
+    [hg19 (25 Mb)](dl.dropboxusercontent.com/s/46un0ez0gmmtl1d/hg19.tar)
+    and [hg38 (40 Mb)](https://dl.dropboxusercontent.com/s/bskoejwhh6id3na/hg38.tar).
 - Precomputed model parameters for five superpopulations:
     [hg38 (11 Mb)](https://dl.dropboxusercontent.com/s/2td926g2jql3nsf/models.tar.gz).
 
