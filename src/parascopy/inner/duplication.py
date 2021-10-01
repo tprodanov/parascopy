@@ -36,6 +36,9 @@ class TangledRegion:
     def is_tangled_region(self):
         return True
 
+    def __repr__(self):
+        return '{!r} (tangled)'.format(self._region1)
+
 
 VariantPosition = namedtuple('VariantPosition', 'region strand sequence')
 
@@ -279,6 +282,9 @@ class Duplication:
         res += '\tCIGAR: '
         res += self._full_cigar.to_str()
         return res
+
+    def __repr__(self):
+        return '{!r} {} {!r}'.format(self._region1, self.strand_str, self._region2)
 
     def align_variant(self, variant):
         """

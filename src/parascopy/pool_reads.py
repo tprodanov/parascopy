@@ -280,14 +280,17 @@ def load_bam_files(input, input_list, genome, allow_unnamed=False):
     else:
         list_dir = os.path.dirname(input_list)
         with open(input_list) as inp:
-            for line in inp:
-                line = line.strip().split(maxsplit=1)
-                if len(line) == 1:
-                    filename = line[0]
-                    sample = None
-                else:
-                    filename, sample = line
-                filenames.append((os.path.join(list_dir, filename), sample))
+            try:
+                for line in inp:
+                    line = line.strip().split(maxsplit=1)
+                    if len(line) == 1:
+                        filename = line[0]
+                        sample = None
+                    else:
+                        filename, sample = line
+                    filenames.append((os.path.join(list_dir, filename), sample))
+            except UnicodeDecodeError:
+                raise ValueError('Cannot read input list -I {0}, perhaps you want to use -i {0}?'.format(input_list))
 
     bam_files = []
     read_groups = []

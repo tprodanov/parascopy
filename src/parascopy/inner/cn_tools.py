@@ -483,7 +483,7 @@ class DuplHierarchy:
                 out.write('    {}\n'.format(subregion.regions2_str(genome, use_comma=True, sep='\n    ')))
             out.write('    ====\n')
 
-            if total_windows >= min_windows * 1.5 and windows_in_hmm == 0:
+            if min_windows > 1 and total_windows >= min_windows * 1.5 and windows_in_hmm == 0:
                 common.log('WARN: [{}  {}] cannot use any windows for the agCN HMM (out of total {} windows)'
                     .format(self.interval.name, region_group.name, total_windows))
 

@@ -71,6 +71,7 @@ class _Graph:
         self._out_edges = []
         self._in_edges = []
         self._tangled_nodes = None
+        self._removed_edges = set()
 
     def add_node(self, value):
         """
@@ -92,6 +93,7 @@ class _Graph:
         for node_c in self._out_edges[node_b]:
             self._in_edges[node_c].remove(node_b)
 
+        assert self._tangled_nodes is None
         self._out_edges.pop()
         self._in_edges.pop()
 
@@ -102,22 +104,26 @@ class _Graph:
         self._out_edges[node_a].add(node_b)
         self._in_edges[node_b].add(node_a)
 
-    def remove_edge(self, node_a, node_b):
+    def try_remove_edge(self, node_a, node_b):
         try:
             self._out_edges[node_a].remove(node_b)
             self._in_edges[node_b].remove(node_a)
         except KeyError:
             pass
 
+    def remove_edge_record(self, node_a, node_b):
+        self._out_edges[node_a].remove(node_b)
+        self._in_edges[node_b].remove(node_a)
+        self._removed_edges.add((node_a, node_b))
+
     def clear(self):
         self._nodes.clear()
         self._out_edges.clear()
         self._in_edges.clear()
 
-    def write_dot(self, outp, genome, colored_nodes=None, removed_edges=None):
+    def write_dot(self, outp, genome, colored_nodes=None):
         """
         colored_nodes: list of bools.
-        removed_edges: iterator over pairs (from, in).
         """
         outp.write('Digraph {\n')
         for node_a, dupl in enumerate(self._nodes):
@@ -136,13 +142,10 @@ class _Graph:
                     len(dupl.region1), dupl.strand_str, prop))
 
             for node_b in out_edges:
-                if removed_edges and (node_a, node_b) in removed_edges:
-                    continue
-                outp.write('    {} -> {}\n'.format(node_a, node_b))
-
-        for node_a, node_b in removed_edges or ():
-            # Use curve to create ")", icurve to create "(", and finally none to add some space.
-            outp.write('    {} -> {} [color=red;arrowhead=noneicurvecurve;arrowsize=1.5]\n'.format(node_a, node_b))
+                prop = ''
+                if (node_a, node_b) in self._removed_edges:
+                    prop = ' [color=red;arrowhead=noneicurvecurve;arrowsize=1.5]'
+                outp.write('    {} -> {}{}\n'.format(node_a, node_b, prop))
         outp.write('}\n')
 
     def transitive_reduction(self):
@@ -157,9 +160,9 @@ class _Graph:
                 to_remove.extend(out_a & out_b)
 
             for node_c in to_remove:
-                self.remove_edge(node_a, node_c)
+                self.try_remove_edge(node_a, node_c)
 
-    def _prune_multiple_input_edges(self, curr_node, removed_edges):
+    def _prune_multiple_input_edges(self, curr_node):
         curr_dupl = self._nodes[curr_node]
         curr_region1 = curr_dupl.region1
 
@@ -175,10 +178,9 @@ class _Graph:
         if 0 < len(best) < len(prev_dupls):
             for i, node_id in enumerate(prev_nodes):
                 if i not in best:
-                    self.remove_edge(node_id, curr_node)
-                    removed_edges.add((node_id, curr_node))
+                    self.remove_edge_record(node_id, curr_node)
 
-    def _prune_multiple_output_edges(self, curr_node, removed_edges):
+    def _prune_multiple_output_edges(self, curr_node):
         curr_dupl = self._nodes[curr_node]
         curr_region1 = curr_dupl.region1
 
@@ -194,21 +196,24 @@ class _Graph:
         if 0 < len(best) < len(next_dupls):
             for i, node_id in enumerate(next_nodes):
                 if i not in best:
-                    self.remove_edge(curr_node, node_id)
-                    removed_edges.add((curr_node, node_id))
+                    self.remove_edge_record(curr_node, node_id)
 
     def remove_redundant(self):
         """
         For nodes with several input or output edges, tries to remove some of them.
-        Returns set of tuples (in_node, out_node) representing removed edges.
         """
-        removed_edges = set()
         for curr_node in range(len(self._nodes)):
             if len(self._in_edges[curr_node]) > 1:
-                self._prune_multiple_input_edges(curr_node, removed_edges)
+                self._prune_multiple_input_edges(curr_node)
             if len(self._out_edges[curr_node]) > 1:
-                self._prune_multiple_output_edges(curr_node, removed_edges)
-        return removed_edges
+                self._prune_multiple_output_edges(curr_node)
+
+    def remove_tangled_edges(self):
+        for curr in np.where(self._tangled_nodes)[0]:
+            for prev in tuple(self._in_edges[curr]):
+                self.remove_edge_record(prev, curr)
+            for next in tuple(self._out_edges[curr]):
+                self.remove_edge_record(curr, next)
 
     def __len__(self):
         return len(self._nodes)
@@ -219,20 +224,21 @@ class _Graph:
     def has_multidegree_nodes(self):
         return any(len(edges) > 1 for edges in self._in_edges) or any(len(edges) > 1 for edges in self._out_edges)
 
-    def find_self_overlapping(self, skip_nodes):
-        res = np.zeros(len(self), dtype=np.bool)
+    def find_self_overlapping(self):
+        total = 0
         for i, dupl in enumerate(self._nodes):
             # Do we care about strand?
-            if not skip_nodes[i] and dupl.region1.intersects(dupl.region2):
-                res[i] = True
-        return res
+            if not self._tangled_nodes[i] and dupl.region1.intersects(dupl.region2):
+                self._tangled_nodes[i] = True
+                total += 1
+        return total
 
     def _region_from_path(self, path):
         start_region = self.get_value(path[0]).region1
         end_region = self.get_value(path[-1]).region1
         return Interval(start_region.chrom_id, start_region.start, end_region.end)
 
-    def find_bounding_regions(self, paths, tangled_nodes, removed_edges):
+    def find_bounding_regions(self, paths, node_in_path):
         # Get path from node id.
         path_rev = [None] * len(self)
         for i, path in enumerate(paths):
@@ -243,8 +249,10 @@ class _Graph:
         for i, path in enumerate(paths):
             start = path[0]
             for prev in self._in_edges[start]:
-                if tangled_nodes[prev]:
+                if not node_in_path[prev]:
                     continue
+                assert not self._tangled_nodes[prev]
+
                 # There is an edge between two paths.
                 prev_i = path_rev[prev]
                 prev_path = paths[prev_i]
@@ -261,22 +269,21 @@ class _Graph:
                 split_point = (start_region.start + prev_region.end) // 2
                 bounding_regions[prev_i] = bounding_regions[prev_i].with_min_end(split_point)
                 bounding_regions[i] = bounding_regions[i].with_max_start(split_point)
-                removed_edges.add((prev, start))
+                self._removed_edges.add((prev, start))
 
             # Do not need to check path[-1] -> next, because it will be checked in the start of another path.
         return bounding_regions
 
-    def find_simple_paths(self, min_nodes, skip_nodes):
+    def find_simple_paths(self, min_nodes):
         """
         Finds straight lines in the graph (all nodes with one in- and out-edge).
         The path should represent a full connected component or contain at least `min_nodes`.
 
-        Nodes from `skip_nodes` cannot be a part of a simple path.
-
         Returns iterator over lists with node indices.
         """
         for start_id, start_in_edges in enumerate(self._in_edges):
-            if skip_nodes[start_id]:
+            if self._tangled_nodes[start_id]:
+                assert not start_in_edges and not self._out_edges[start_id]
                 continue
 
             if len(start_in_edges) == 1:
@@ -288,7 +295,7 @@ class _Graph:
             curr_id = start_id
             while len(self._out_edges[curr_id]) == 1:
                 next_id = next(iter(self._out_edges[curr_id]))
-                if len(self._in_edges[next_id]) != 1 or skip_nodes[next_id]:
+                if len(self._in_edges[next_id]) != 1:
                     break
                 curr_id = next_id
                 path.append(curr_id)
@@ -302,6 +309,11 @@ class _Graph:
         for i, dupl in enumerate(self._nodes):
             if dupl.is_tangled_region or tangled_predicate(dupl, genome):
                 self._tangled_nodes[i] = True
+
+    def extend_tangled_regions(self, node_in_path, tangled_regions):
+        ixs = np.where(self._tangled_nodes | ~node_in_path)[0]
+        for i in ixs:
+            tangled_regions.append(self._nodes[i].region1)
 
     @property
     def tangled_nodes(self):
@@ -375,30 +387,29 @@ def _save_component(graph, chrom_names, component_id, graph_dir):
     Returns sorted list of combined duplications.
     """
     aln_fun = Weights().create_aln_fun()
+    n_self_overl = graph.find_self_overlapping()
+    graph.remove_tangled_edges()
     graph.transitive_reduction()
     if graph.has_multidegree_nodes():
-        removed_edges = graph.remove_redundant()
-    else:
-        removed_edges = set()
-
-    self_overl = graph.find_self_overlapping(graph.tangled_nodes)
-    n_self_overl = sum(self_overl)
+        graph.remove_redundant()
 
     MIN_NODES = 4
-    paths = list(graph.find_simple_paths(MIN_NODES, skip_nodes=np.logical_or(self_overl, graph.tangled_nodes)))
-    tangled_nodes = np.ones(len(graph), dtype=np.bool)
+    paths = list(graph.find_simple_paths(MIN_NODES))
+    total_nodes = len(graph)
+    node_in_path = np.zeros(total_nodes, dtype=np.bool)
     for node_id in itertools.chain(*paths):
-        tangled_nodes[node_id] = False
-    n_tangled_nodes = sum(tangled_nodes)
-    bounding_regions = graph.find_bounding_regions(paths, tangled_nodes, removed_edges)
+        node_in_path[node_id] = True
+    n_in_path = sum(node_in_path)
+    bounding_regions = graph.find_bounding_regions(paths, node_in_path)
 
     if graph_dir:
-        if n_tangled_nodes - n_self_overl:
-            common.log('    Component {}: {} tangled nodes'.format(component_id, n_tangled_nodes - n_self_overl))
+        n_tangled = total_nodes - n_in_path - n_self_overl
+        if n_tangled:
+            common.log('    Component {}: {} tangled nodes'.format(component_id, n_tangled))
         if n_self_overl:
             common.log('    Component {}: {} self-overlapping nodes'.format(component_id, n_self_overl))
         with open(os.path.join(graph_dir, '{:05d}.dot'.format(component_id)), 'w') as graph_out:
-            graph.write_dot(graph_out, chrom_names, tangled_nodes, removed_edges)
+            graph.write_dot(graph_out, chrom_names)
 
     combined = []
     tangled_regions = []
@@ -409,11 +420,10 @@ def _save_component(graph, chrom_names, component_id, graph_dir):
         comb_dupl.estimate_complexity()
         combined.append(comb_dupl)
 
-    if n_tangled_nodes:
-        tangled_regions.extend(graph.get_value(node_id).region1 for node_id in np.where(tangled_nodes)[0])
-        tangled_regions = Interval.combine_overlapping(tangled_regions, max_dist=100)
-        for region in tangled_regions:
-            combined.append(TangledRegion(region))
+    graph.extend_tangled_regions(node_in_path, tangled_regions)
+    tangled_regions = Interval.combine_overlapping(tangled_regions, max_dist=100)
+    for region in tangled_regions:
+        combined.append(TangledRegion(region))
     combined.sort(key=operator.attrgetter('region1'))
     return combined
 
