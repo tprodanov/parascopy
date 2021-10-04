@@ -408,44 +408,39 @@ def _summarize_sample(sample, sample_window_counts, params, windows, out, res):
             res.append(line)
 
 
-def _single_file_depth(bam_file_num, bam_file, read_groups, windows, fetch_regions, genome_filename,
-        out_prefix, params):
+def _single_file_depth(bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params):
     """
     bam_file: either str or pysam.AlignmentFile.
     Returns dictionary { sample: [_Window] }.
     """
     need_close = False
-    if isinstance(bam_file, str):
-        bam_file = pysam.AlignmentFile(bam_file, reference_filename=genome_filename, require_index=True)
-        need_close = True
-    common.log('    Calculating depth for file {:3}: {}'.format(bam_file_num, bam_file.filename.decode()))
+    common.log('    Calculating background depth for file {:3}: {}'.format(bam_wrapper.index + 1, bam_wrapper.filename))
+    with bam_wrapper.open_bam_file(genome_filename) as bam_file:
+        n_windows = len(windows)
+        read_groups = bam_wrapper.read_groups()
+        samples = list(set(map(operator.itemgetter(1), read_groups.values())))
+        window_counts = { sample: [WindowCounts() for _ in range(n_windows)] for sample in samples }
 
-    n_windows = len(windows)
-    samples = list(set(map(operator.itemgetter(1), read_groups.values())))
-    window_counts = { sample: [WindowCounts() for _ in range(n_windows)] for sample in samples }
+        for region in fetch_regions:
+            start_ix = region.start_ix
+            n_windows = region.n_windows
+            read_iter = region.fetch_from(bam_file)
 
-    for region in fetch_regions:
-        start_ix = region.start_ix
-        n_windows = region.n_windows
-        read_iter = region.fetch_from(bam_file)
+            for read in read_iter:
+                if read.flag & 3844:
+                    continue
+                cigar = Cigar.from_pysam_tuples(read.cigartuples)
+                window_ix = region.get_window_ix(read, cigar)
+                if window_ix is None:
+                    continue
 
-        for read in read_iter:
-            if read.flag & 3844:
-                continue
-            cigar = Cigar.from_pysam_tuples(read.cigartuples)
-            window_ix = region.get_window_ix(read, cigar)
-            if window_ix is None:
-                continue
+                sample = read_groups[read.get_tag('RG') if read.has_tag('RG') else None][1]
+                window_counts[sample][start_ix + window_ix].add_read(read, cigar)
 
-            sample = read_groups[read.get_tag('RG') if read.has_tag('RG') else None][1]
-            window_counts[sample][start_ix + window_ix].add_read(read, cigar)
-
-    res = []
-    for sample in samples:
-        with open('{}.{}.csv'.format(out_prefix, sample), 'w') as out:
-            _summarize_sample(sample, window_counts[sample], params, windows, out, res)
-    if need_close:
-        bam_file.close()
+        res = []
+        for sample in samples:
+            with open('{}.{}.csv'.format(out_prefix, sample), 'w') as out:
+                _summarize_sample(sample, window_counts[sample], params, windows, out, res)
     return res
 
 
@@ -458,12 +453,10 @@ def _try_single_file_depth(*args, **kwargs):
         raise
 
 
-def all_files_depth(bam_files, read_groups, windows, fetch_regions, genome, threads, params, out_prefix, out_means):
-    genome_filename = genome.filename
+def all_files_depth(bam_wrappers, windows, fetch_regions, genome_filename, threads, params, out_prefix, out_means):
     if threads <= 1:
-        for bam_file_num, (bam_file, curr_read_groups) in enumerate(zip(bam_files, read_groups), start=1):
-            for line in _single_file_depth(bam_file_num, bam_file, curr_read_groups, windows,
-                    fetch_regions, genome_filename, out_prefix, params):
+        for bam_wrapper in bam_wrappers:
+            for line in _single_file_depth(bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params):
                 out_means.write(line)
             out_means.flush()
         return
@@ -481,14 +474,13 @@ def all_files_depth(bam_files, read_groups, windows, fetch_regions, genome, thre
         pool.terminate()
 
     pool = multiprocessing.Pool(threads)
-    for bam_file_num, (bam_file, curr_read_groups) in enumerate(zip(bam_files, read_groups), start=1):
-        pool.apply_async(_try_single_file_depth,args=(bam_file_num, bam_file, curr_read_groups, windows,
-            fetch_regions, genome_filename, out_prefix, params),
-            callback=callback, error_callback=err_callback)
+    for bam_wrapper in bam_wrappers:
+        pool.apply_async(_try_single_file_depth, callback=callback, error_callback=err_callback,
+            args=(bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params))
     pool.close()
     pool.join()
 
-    if len(successes) != len(bam_files):
+    if len(successes) != len(bam_wrappers):
         raise RuntimeError('One of the threads failed')
 
 
@@ -615,25 +607,25 @@ class Depth:
         return self._params.gc_bounds
 
 
-def check_duplicated_samples(bam_files, read_groups):
+def check_duplicated_samples(bam_wrappers):
     samples = {}
-    for i, (bam_file, curr_read_groups) in enumerate(zip(bam_files, read_groups)):
-        for rg, sample in curr_read_groups.items():
+    for i, bam_wrapper in enumerate(bam_wrappers):
+        for rg, sample in bam_wrapper.read_groups().items():
             if sample in samples and samples[sample] != i:
-                prev_bam = bam_files[samples[sample]]
+                confl_filename = bam_wrappers[samples[sample]].filename
                 common.log('ERROR: Sample {} appears in two input files: {} and {}'
-                    .format(sample, prev_bam.filename.decode(), bam_file.filename.decode()))
+                    .format(sample, confl_filename, bam_wrapper.filename))
                 exit(1)
             samples[sample] = i
 
 
-def _concat_files(read_groups, prefix, out):
+def _concat_files(bam_wrappers, prefix, out):
     out.write('# {}\n'.format(' '.join(sys.argv)).encode())
     out.write(b'sample\twindow_ix\tdepth1\tdepth2\tlow_mapq\tclipped\tunpaired\tuse\n')
 
     all_samples = set()
-    for curr_read_groups in read_groups:
-        all_samples.update(map(operator.itemgetter(1), curr_read_groups.values()))
+    for bam_wrapper in bam_wrappers:
+        all_samples.update(map(operator.itemgetter(1), bam_wrapper.read_groups().values()))
     all_samples = sorted(all_samples)
 
     for sample in all_samples:
@@ -708,16 +700,12 @@ def main(prog_name, in_args):
     common.mkdir(args.output)
     genome = Genome(args.fasta_ref)
 
-    bam_files, read_groups = pool_reads.load_bam_files(args.input, args.input_list, genome, allow_unnamed=False)
-    check_duplicated_samples(bam_files, read_groups)
+    bam_wrappers = pool_reads.load_bam_files(args.input, args.input_list, genome, allow_unnamed=False)
+    check_duplicated_samples(bam_wrappers)
 
-    threads = max(1, min(len(bam_files), args.threads, os.cpu_count()))
+    threads = max(1, min(len(bam_wrappers), args.threads, os.cpu_count()))
     if threads > 1:
         common.log('Using {} threads'.format(threads))
-        for i in range(len(bam_files)):
-            bam_file = bam_files[i]
-            bam_files[i] = bam_file.filename.decode()
-            bam_file.close()
         import multiprocessing
     else:
         common.log('Using 1 thread')
@@ -738,20 +726,20 @@ def main(prog_name, in_args):
 
     window_size = len(windows[0])
     fetch_regions = _get_fetch_regions(windows, genome, window_size)
-    common.log('{} continous regions'.format(len(fetch_regions)))
+    genome.close()
+    common.log('{} continuous regions'.format(len(fetch_regions)))
 
     with open(os.path.join(args.output, 'depth.csv'), 'w') as out_means:
         common.log('Start calculating coverage')
         params = Params.from_args(args, window_size)
         _write_means_header(out_means, windows, args, bounds)
         prefix = os.path.join(args.output, 'tmp')
-        all_files_depth(bam_files, read_groups, windows, fetch_regions, genome, threads, params, prefix, out_means)
+        all_files_depth(bam_wrappers, windows, fetch_regions, args.fasta_ref, threads, params, prefix, out_means)
 
     with open(os.path.join(args.output, 'window_depth.csv'), 'wb') as out_depth:
         common.log('Merging output files')
-        _concat_files(read_groups, prefix, out_depth)
+        _concat_files(bam_wrappers, prefix, out_depth)
 
-    genome.close()
     common.log('Success')
 
 

@@ -380,7 +380,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
     _write_bed_files(interval, duplications, const_regions, genome, subdir)
     pooled_bam_path = os.path.join(subdir, 'pooled_reads.bam')
     if not os.path.exists(pooled_bam_path):
-        pool_reads.pool_reads_inner(data.bam_files, data.read_groups, pooled_bam_path, interval,
+        pool_reads.pool_reads_inner(data.bam_wrappers, pooled_bam_path, interval,
             duplications, genome, Weights(), samtools=args.samtools, verbose=True, time_log=time_log)
 
     extra_files = dict(depth='depth.csv', region_groups='region_groups.txt', windows='windows.bed',
@@ -400,8 +400,10 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         cn_hmm.write_headers(out, samples)
         paralog_cn.write_headers(out, samples, args)
 
-        read_groups_dict = { read_group: samples.id(sample) for read_group, sample
-            in itertools.chain(*map(dict.values, data.read_groups)) }
+        read_groups_dict = {}
+        for bam_wrapper in data.bam_wrappers:
+            for read_group, sample in bam_wrapper.read_groups().values():
+                read_groups_dict[read_group] = samples.id(sample)
         with pysam.AlignmentFile(pooled_bam_path, require_index=True) as bam_file:
             time_log.log('Calculating aggregate read depth')
             common.log('[{}] Calculating aggregate read depth'.format(interval.name))
@@ -632,17 +634,14 @@ def run(regions, data, samples, bg_depth, models):
 
 
 class _DataStructures:
-    def __init__(self, args, bam_filenames=None, read_groups=None):
+    def __init__(self, args):
         self._args = args
         self._loaded_times = 0
 
         self._exclude_dupl = None
         self._genome = None
         self._table = None
-
-        self._bam_filenames = bam_filenames
-        self._bam_files = None
-        self._read_groups = read_groups
+        self._bam_wrappers = None
 
     @property
     def args(self):
@@ -657,12 +656,8 @@ class _DataStructures:
         return self._table
 
     @property
-    def bam_files(self):
-        return self._bam_files
-
-    @property
-    def read_groups(self):
-        return self._read_groups
+    def bam_wrappers(self):
+        return self._bam_wrappers
 
     @property
     def exclude_dupl(self):
@@ -680,28 +675,19 @@ class _DataStructures:
         self._genome = Genome(self._args.fasta_ref)
         self._table = pysam.TabixFile(self._args.table, parser=pysam.asTuple())
 
-        if self._bam_filenames and not self._bam_files:
-            self._bam_files = \
-                [pysam.AlignmentFile(filename, reference_filename=self._args.fasta_ref, require_index=True)
-                for filename in self._bam_filenames]
-
     def close(self):
         self._loaded_times -= 1
         if self._loaded_times == 0:
             self._genome.close()
             self._table.close()
 
-            if self._bam_files:
-                for bam_file in self._bam_files:
-                    bam_file.close()
-
-    def set_bam_files(self, bam_files, read_groups):
-        self._bam_files = list(bam_files)
-        self._bam_filenames = list(map(operator.attrgetter('filename'), self._bam_files))
-        self._read_groups = list(read_groups)
+    def set_bam_wrappers(self, bam_wrappers):
+        self._bam_wrappers = bam_wrappers
 
     def copy(self):
-        return _DataStructures(self._args, self._bam_filenames, self._read_groups)
+        res = _DataStructures(self._args)
+        res.set_bam_wrappers(self._bam_wrappers)
+        return res
 
 
 def _write_command(filename):
@@ -915,13 +901,12 @@ def main(prog_name=None, in_args=None, is_new=None):
     common.mkdir_clear(os.path.join(directory, 'model'), args.rerun == 'full')
     regions, loaded_models = filter_regions(regions, loaded_models, args.regions_subset)
 
-    bam_files, read_groups = pool_reads.load_bam_files(args.input, args.input_list, data.genome, allow_unnamed=False)
-    depth_.check_duplicated_samples(bam_files, read_groups)
+    bam_wrappers = pool_reads.load_bam_files(args.input, args.input_list, data.genome, allow_unnamed=False)
+    data.set_bam_wrappers(bam_wrappers)
+    depth_.check_duplicated_samples(bam_wrappers)
 
-    samples = set(map(operator.itemgetter(1), itertools.chain(*map(dict.values, read_groups))))
-    samples = bam_file_.Samples(samples)
+    samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
     bg_depth = depth_.Depth(args.depth, samples)
-    data.set_bam_files(bam_files, read_groups)
 
     run(regions, data, samples, bg_depth, loaded_models)
     data.close()

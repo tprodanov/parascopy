@@ -63,6 +63,14 @@ class Samples:
         self._samples = sorted(samples)
         self._sample_ids = { sample: id for id, sample in enumerate(self._samples) }
 
+    @classmethod
+    def from_bam_wrappers(cls, bam_wrappers):
+        samples = set()
+        for bam_wrapper in bam_wrappers:
+            for _, sample in bam_wrapper.read_groups().values():
+                samples.add(sample)
+        return cls(samples)
+
     def __contains__(self, sample_name):
         return sample_name in self._sample_ids
 
