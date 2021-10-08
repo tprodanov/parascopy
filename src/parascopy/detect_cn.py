@@ -390,8 +390,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
     if not model_params.is_loaded:
         extra_files.update(dict(
             psv_f_values='em_f_values.csv', interm_psv_f_values='em_interm_f_values.csv',
-            em_likelihoods='em_likelihoods.csv', em_sample_psv_gts='em_sample_psv_gts.csv',
-            em_sample_gts='em_sample_gts.csv',
+            em_likelihoods='em_likelihoods.csv', em_sample_gts='em_sample_gts.csv',
             use_psv_sample='em_use_psv_sample.csv', psv_filtering='em_psv_filtering.txt',
         ))
 

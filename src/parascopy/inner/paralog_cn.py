@@ -440,7 +440,6 @@ def write_headers(out, samples, args):
     out.checked_write('em_likelihoods',
         'region_group\tcluster\titeration\ttime\tlikelihood\tn_reliable\treliable_info\n')
     out.checked_write('em_sample_gts', 'region_group\tcluster\titeration\tgenotype\tprior\t' + samples_str)
-    out.checked_write('em_sample_psv_gts', 'region_group\tpsv\t' + samples_str)
 
     out.checked_write('paralog_cn', 'region_group\tsample\tregion1\tgenotypes\tmarginal_probs\n')
     out.checked_write('gene_conversion',

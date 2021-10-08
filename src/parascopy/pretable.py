@@ -86,10 +86,10 @@ def _aln_to_dupl(record, curr_region, curr_region_seq, min_aln_len, min_seq_sim,
         return (None, _Reason.TooShort)
 
     left_clip, right_clip, cigar = cigar.remove_clipping()
-    if not cigar[0][1].consumes_read() or not cigar[-1][1].consumes_read():
-        common.log('ERROR: Self-alignment of %r produces invalid CIGAR: %s.' % (curr_region, cigar.to_str()))
+    if not cigar[0][1].consumes_both():
+        common.log('ERROR: BWA alignment of {!r} produces invalid CIGAR: "{}".'.format(curr_region, cigar.to_str()))
         # For some reason this line does not work without calling str(.)
-        common.log('ERROR (cont): BWA alignment: %s' % str(record))
+        common.log('ERROR (cont): BWA alignment: "{}"'.format(record))
         return (None, _Reason.Invalid)
 
     if strand:
@@ -109,7 +109,7 @@ def _aln_to_dupl(record, curr_region, curr_region_seq, min_aln_len, min_seq_sim,
     dupl.set_full_cigar(ext_cigar)
     dupl.store_stats(aln_stats)
     dupl.estimate_complexity()
-    dupl.info['clip'] = '%d,%d' % (left_clip, right_clip)
+    dupl.info['clip'] = '{},{}'.format(left_clip, right_clip)
     return (dupl, _Reason.Good)
 
 
@@ -148,7 +148,7 @@ def _write_genome_reads(region_seqs, read_len, step, min_aln_len, outp):
             # Because there could be unexpected letters (not only N).
             if curr_seq.count('A') + curr_seq.count('C') + curr_seq.count('G') + curr_seq.count('T') != len(curr_seq):
                 continue
-            outp.write('>%d-%d\n%s\n' % (seq_i, i, curr_seq))
+            outp.write('>{}-{}\n{}\n'.format(seq_i, i, curr_seq))
             count += 1
     return count
 
@@ -159,7 +159,7 @@ def _run_bwa(in_path, out_path, genome, args):
         genome.filename, in_path, '-o', out_path,
         '-k', args.seed_len,
         '-t', args.threads,
-        '-D', '%.3f' % (args.min_aln_len / args.read_len),
+        '-D', '{:.3f}'.format(args.min_aln_len / args.read_len),
         '-a',
     ]
     bwa_process = common.Process(command)
@@ -361,14 +361,14 @@ def _sort_output(in_path, out, args, genome, bgzip_output):
     if sort_returncode != 0:
         if sort_err is None:
             sort_err = sort_process.stderr.read()
-        common.log('ERROR: Command "%s" finished with non-zero code %s' % (' '.join(sort_command), sort_returncode))
-        common.log('Stderr:\n%s' % sort_err.decode()[:1000].strip())
+        common.log('ERROR: Command "{}" finished with non-zero code {}'.format(' '.join(sort_command), sort_returncode))
+        common.log('Stderr:\n{}'.format(sort_err.decode()[:1000].strip()))
         raise RuntimeError('Bedtools finished with non-zero code')
 
     if bgzip_output and bgzip_process.returncode:
-        common.log('ERROR: Command "%s" finished with non-zero code %s'
-            % (' '.join(bgzip_command), bgzip_process.returncode))
-        common.log('Stderr:\n%s' % bgzip_err.decode()[:1000].strip())
+        common.log('ERROR: Command "{}" finished with non-zero code {}'.format(
+            ' '.join(bgzip_command), bgzip_process.returncode))
+        common.log('Stderr:\n{}'.format(bgzip_err.decode()[:1000].strip()))
         raise RuntimeError('Bgzip finished with non-zero code')
 
 
@@ -437,10 +437,10 @@ def main(prog_name=None, in_args=None):
 
     common.check_executable(args.bwa, args.tabix, args.bgzip)
     args.threads = max(1, args.threads)
-    common.log('Using %d threads' % args.threads)
+    common.log('Using {} threads'.format(args.threads))
 
     if not args.force and os.path.exists(args.output):
-        sys.stderr.write('Output file "%s" exists, please use -F/--force to overwrite.\n' % args.output)
+        sys.stderr.write('Output file "{}" exists, please use -F/--force to overwrite.\n'.format(args.output))
         exit(1)
 
     with Genome(args.fasta_ref) as genome, open(args.output, 'wb') as out, \
@@ -472,7 +472,6 @@ def main(prog_name=None, in_args=None):
     if args.output.endswith('.gz'):
         common.log('Indexing output with tabix')
         common.Process([args.tabix, '-p', 'bed', args.output]).finish()
-
     common.log('Success')
 
 
