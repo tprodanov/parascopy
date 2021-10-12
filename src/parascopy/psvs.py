@@ -246,13 +246,12 @@ def main(prog_name=None, in_args=None):
     io_args.add_argument('-o', '--output', metavar='<file>', required=True,
         help='Output vcf[.gz] file.')
 
-    reg_args = parser.add_argument_group('Region arguments (required, mutually exclusive)')
-    reg_me = reg_args.add_mutually_exclusive_group(required=True)
-    reg_me.add_argument('-r', '--regions', nargs='+', metavar='<region>',
+    reg_args = parser.add_argument_group('Region arguments (optional)')
+    reg_args.add_argument('-r', '--regions', nargs='+', metavar='<region>',
         help='Region(s) in format "chr" or "chr:start-end").\n'
             'Start and end are 1-based inclusive. Commas are ignored.')
-    reg_me.add_argument('-R', '--regions-file', metavar='<file>',
-        help='Input bed[.gz] file containing regions (tab-separated, 0-based semi-exclusive).')
+    reg_args.add_argument('-R', '--regions-file', nargs='+', metavar='<file>',
+        help='Input bed[.gz] file(s) containing regions (tab-separated, 0-based semi-exclusive).')
 
     filt_args = parser.add_argument_group('Duplications filtering arguments')
     filt_args.add_argument('-e', '--exclude', metavar='<expr>', default='length < 500',
@@ -264,7 +263,7 @@ def main(prog_name=None, in_args=None):
     args = parser.parse_args(in_args)
 
     with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.input, parser=pysam.asTuple()) as table:
-        regions = common.get_regions(args, genome)
+        regions = Interval.combine_overlapping(common.get_regions(args, genome))
         chrom_ids = sorted(set(map(operator.attrgetter('chrom_id'), regions)))
         vcf_header = create_vcf_header(genome, chrom_ids, sys.argv)
         records = []

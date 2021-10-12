@@ -313,7 +313,7 @@ def _update_vcf_header(vcf_header, samples):
 
 
 def analyze_region(interval, data, samples, bg_depth, model_params):
-    subdir = os.path.join(data.args.output, interval.subdir)
+    subdir = os.path.join(data.args.output, interval.os_name)
     duplications = []
     skip_regions = []
     genome = data.genome
@@ -339,15 +339,15 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
             for tup in data.table.fetch(interval.chrom_name(genome), interval.start, interval.end):
                 dupl = duplication_.Duplication.from_tuple(tup, genome)
                 if dupl.is_tangled_region:
-                    outp.write('Skip tangled region  %s\n' % dupl.region1.to_str(genome))
+                    outp.write('Skip tangled region  {}\n'.format(dupl.region1.to_str(genome)))
                     skip_regions.append(dupl.region1)
                     continue
                 if exclude_dupl(dupl, genome):
-                    outp.write('Skip duplication  %s\n' % dupl.to_str(genome))
+                    outp.write('Skip duplication  {}\n'.format(dupl.to_str(genome)))
                     continue
                 if int(dupl.info['ALENGTH']) < args.short:
-                    outp.write('Skip duplication  %s\n' % dupl.to_str(genome))
-                    outp.write('    Do not analyze region %s\n' % dupl.region1.to_str(genome))
+                    outp.write('Skip duplication  {}\n'.format(dupl.to_str(genome)))
+                    outp.write('    Do not analyze region {}\n'.format(dupl.region1.to_str(genome)))
                     skip_regions.append(dupl.region1)
                     continue
                 if dupl.region1.out_of_bounds(genome) or dupl.region2.out_of_bounds(genome):
@@ -355,7 +355,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
                         interval.name, dupl.region1.to_str(genome), dupl.region2.to_str(genome)))
                     continue
 
-                outp.write('Use duplication   %s\n' % dupl.to_str(genome))
+                outp.write('Use duplication   %s\n'.format(dupl.to_str(genome)))
                 model_params.add_duplication(len(duplications), dupl)
                 duplications.append(transform_duplication(dupl, interval, genome))
         skip_regions = Interval.combine_overlapping(skip_regions)
@@ -479,30 +479,30 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params):
 
     if exc is None, region finished successfully.
     """
-    if region.subdir is None:
-        common.log('Skipping region %s' % region.to_str(data.genome))
+    if region.os_name is None:
+        common.log('ERROR: Cannot create directory for region {}, os_name is None'.format(region.full_name(data.genome)))
         return region_ix, 'Skip'
     data.prepare()
 
-    common.mkdir_clear(os.path.join(data.args.output, region.subdir), data.args.rerun == 'full')
-    success_path = os.path.join(data.args.output, region.subdir, 'extra', 'success')
+    common.mkdir_clear(os.path.join(data.args.output, region.os_name), data.args.rerun == 'full')
+    success_path = os.path.join(data.args.output, region.os_name, 'extra', 'success')
     if os.path.exists(success_path):
         if data.args.rerun == 'none':
-            common.log('Skipping region %s' % region.full_name(data.genome))
+            common.log('Skipping region {}'.format(region.full_name(data.genome)))
             return region_ix, None
         os.remove(success_path)
 
-    common.log('Analyzing region %s' % region.full_name(data.genome))
+    common.log('Analyzing region {}'.format(region.full_name(data.genome)))
     try:
         model_params = analyze_region(region, data, samples, bg_depth, model_params)
-        filename = os.path.join(data.args.output, 'model', '{}.gz'.format(region.subdir))
+        filename = os.path.join(data.args.output, 'model', '{}.gz'.format(region.os_name))
         with gzip.open(filename, 'wt') as model_out:
             model_params.write_to(model_out, data.genome)
     except Exception as exc:
         trace = traceback.format_exc().strip().split('\n')
         trace = '\n'.join(' ' * 11 + s for s in trace)
-        common.log('Error in analyzing region %s:\n%s' % (region.full_name(data.genome), trace))
-        exc_str = '%s: %s' % (type(exc).__name__, exc)
+        common.log('Error in analyzing region {}:\n{}'.format(region.full_name(data.genome), trace))
+        exc_str = '{}: {}'.format(type(exc).__name__, exc)
         return region_ix, exc_str
     finally:
         data.close()
@@ -527,7 +527,7 @@ def _join_summaries(out_dir, regions, successful, genome, filename, tabix):
     for region, success in zip(regions, successful):
         if not success:
             continue
-        with common.open_possible_gzip(os.path.join(out_dir, region.subdir, filename)) as inp:
+        with common.open_possible_gzip(os.path.join(out_dir, region.os_name, filename)) as inp:
             for line in inp:
                 if line.startswith('#'):
                     if write_header:
@@ -556,30 +556,15 @@ def _join_summaries(out_dir, regions, successful, genome, filename, tabix):
         common.Process([tabix, '-p', 'bed' if is_bed_file else 'vcf', out_filename]).finish()
 
 
-def set_regions_subdirs(regions):
-    used_names = set()
-    for region in regions:
-        if region.os_name not in used_names:
-            name = region.os_name
-        else:
-            name = region.to_str(data.genome)
-            if name in used_names:
-                common.log('WARN: region {} appears twice, skipping.'.format(name))
-                region.subdir = None
-                continue
-        used_names.add(name)
-        region.subdir = name
-
-
 def run(regions, data, samples, bg_depth, models):
     if models is None:
         models = [None] * len(regions)
 
     out_dir = data.args.output
-    set_regions_subdirs(regions)
     threads = max(1, min(len(regions), data.args.threads))
     results = []
     if threads == 1:
+        common.log('Using 1 thread')
         for region_ix, (region, model_params) in enumerate(zip(regions, models)):
             results.append(single_region(region_ix, region, data, samples, bg_depth, model_params))
 
@@ -591,7 +576,7 @@ def run(regions, data, samples, bg_depth, models):
             common.log('Thread finished with an exception:\n{}'.format(exc))
             os._exit(1)
 
-        common.log('Using %d threads' % threads)
+        common.log('Using {} threads'.format(threads))
         pool = multiprocessing.Pool(threads)
         for region_ix, (region, model_params) in enumerate(zip(regions, models)):
             pool.apply_async(single_region,
@@ -607,7 +592,7 @@ def run(regions, data, samples, bg_depth, models):
 
     with open(os.path.join(out_dir, 'model', 'list.txt'), 'w') as model_list:
         for region in itertools.compress(regions, successful):
-            model_list.write('{}.gz\n'.format(region.subdir))
+            model_list.write('{}.gz\n'.format(region.os_name))
     _join_summaries(out_dir, regions, successful, data.genome, 'res.samples.bed.gz', data.args.tabix)
     _join_summaries(out_dir, regions, successful, data.genome, 'res.matrix.bed.gz', data.args.tabix)
     _join_summaries(out_dir, regions, successful, data.genome, 'psvs.vcf.gz', data.args.tabix)
@@ -619,7 +604,7 @@ def run(regions, data, samples, bg_depth, models):
         i = 0
         for region, (_, exc) in zip(regions, results):
             if exc is not None:
-                common.log('    %s: %s' % (region.full_name(data.genome), exc))
+                common.log('    {}: {}'.format(region.full_name(data.genome), exc))
                 i += 1
                 if i >= 10:
                     break
@@ -629,7 +614,7 @@ def run(regions, data, samples, bg_depth, models):
     if n_successes == 0:
         common.log('Failure! No regions were analyzed successfully.')
     else:
-        common.log('Success [%d regions out of %d]' % (n_successes, n_regions))
+        common.log('Success [{} regions out of {}]'.format(n_successes, n_regions))
 
 
 class _DataStructures:
@@ -713,11 +698,14 @@ def get_regions(args, genome, load_models):
         return (common.get_regions(args, genome), None)
 
     loaded_models = model_params_.load_all(args.model, genome)
+    model_names = {}
     regions = []
     for model_params in loaded_models:
         main_entry = model_params.main_entry
-        region = NamedInterval.from_region(main_entry.region1, main_entry.info['name'])
-        regions.append(region)
+        name = main_entry.info['main']
+        if name in model_names:
+            raise ValueError('Provided several models with the same name ({})'.format(name))
+        regions.append(NamedInterval.from_region(main_entry.region1, genome, name))
     return (regions, loaded_models)
 
 
@@ -788,15 +776,14 @@ def parse_args(prog_name, in_args, is_new):
 
     reg_args = parser.add_argument_group('Region arguments')
     if is_new:
-        reg_me = reg_args.add_mutually_exclusive_group(required=True)
-        reg_me.add_argument('-r', '--regions', nargs='+', metavar='<region> [<region> ...]',
+        reg_args.add_argument('-r', '--regions', nargs='+', metavar='<region> [<region> ...]',
             help='Region(s) in format "chr" or "chr:start-end".\n'
                 'Start and end are 1-based inclusive. Commas are ignored.\n'
-                'Mutually exclusive with --regions-file.')
-        reg_me.add_argument('-R', '--regions-file', metavar='<file>',
-            help='Input bed[.gz] file containing regions (tab-separated, 0-based semi-exclusive).\n'
-                'Optional fourth column will be used as a region name.\n'
-                'Mutually exclusive with --regions.')
+                'Optionally, you can provide region name using the format "region::name"\n'
+                'For example "-r chr5:70,925,087-70,953,015::SMN1".')
+        reg_args.add_argument('-R', '--regions-file', nargs='+', metavar='<file> [<file> ...]',
+            help='Input bed[.gz] file(s) containing regions (tab-separated, 0-based semi-exclusive).\n'
+                'Optional fourth column will be used as a region name.')
     reg_args.add_argument('--regions-subset', nargs='+', metavar='<str> [<str> ...]',
         help='Additionally filter input regions: only use regions with names that are in this list.\n'
             'If the first argument is "!", only use regions not in this list.')

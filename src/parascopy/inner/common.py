@@ -143,24 +143,16 @@ def open_vcf(filename, mode='r', can_be_none=False, **kwargs):
     return pysam.VariantFile(filename, mode=mode, **kwargs)
 
 
-def get_regions(args, genome, sort=True):
+def get_regions(args, genome, only_unique=True, full_genome_if_empty=False):
     """
     Returns a list `[NamedInterval]`.
     """
     intervals = []
-    if args.regions:
-        for region in args.regions:
-            if ':' in region:
-                interval = genome_.NamedInterval.parse(region, genome)
-            else:
-                chrom_id = genome.chrom_id(region)
-                end = genome.chrom_len(chrom_id)
-                interval = genome_.NamedInterval(chrom_id, 0, end, genome)
-            interval.trim(genome)
-            intervals.append(interval)
+    for region in args.regions or ():
+        intervals.append(genome_.NamedInterval.parse(region, genome))
 
-    elif args.regions_file:
-        with open_possible_gzip(args.regions_file) as inp:
+    for filename in args.regions_file or ():
+        with open_possible_gzip(filename) as inp:
             for line in inp:
                 if line.startswith('#'):
                     continue
@@ -174,12 +166,30 @@ def get_regions(args, genome, sort=True):
                 interval.trim(genome)
                 intervals.append(interval)
 
-    else:
+    if only_unique:
+        os_names = set()
+        intervals.sort()
+        unfilt_intervals = intervals
+        intervals = []
+
+        for i in range(len(unfilt_intervals)):
+            interval = unfilt_intervals[i]
+            if interval.os_name in os_names:
+                log('ERROR: Region name "{}" ({}) appears twice! Ignore second entry.'
+                    .format(interval.os_name, interval.full_name(genome)))
+                continue
+            os_names.add(interval.os_name)
+
+            if i and unfilt_intervals[i - 1] == interval:
+                log('ERROR: Region {} appears twice! Ignore second entry.'.format(interval.full_name(genome)))
+                continue
+            intervals.append(interval)
+
+    if not intervals:
+        if not full_genome_if_empty:
+            raise ValueError('No regions provided! Please specify -r <region> [<region> ...] or -R <file> [<file> ...]')
         for chrom_id, length in enumerate(genome.chrom_lengths):
             intervals.append(genome_.NamedInterval(chrom_id, 0, length, genome, name=genome.chrom_name(chrom_id)))
-
-    if sort:
-        intervals.sort()
     return intervals
 
 
@@ -206,20 +216,22 @@ def _fetch_regions_wo_duplicates(obj, regions, genome, start_attr):
         prev_chrom_id = region.chrom_id
 
 
-def fetch_iterator(obj, args, genome, no_duplicates=True, start_attr=False):
+def fetch_iterator(obj, args, genome, start_attr=False, only_unique=True, full_genome_if_empty=True):
     """
     Returns sorted iterator over pysam object with that has a `fetch` method.
     Looks at `args.regions` and `args.regions_file`. If both are `None`, returns `obj.fetch()`.
 
-    If no_duplicates is True, all duplicates will be removed. However, for that it is necessary to be able to get
+    If only_unique is True, all duplicates will be removed. However, for that it is necessary to be able to get
     the start position of each entry. If start_attr is True, it is able to use `entry.start`, otherwise,
     it is possible to call `int(entry[1])`.
     """
     if not args.regions and not args.regions_file:
-        return obj.fetch()
+        if full_genome_if_empty:
+            return obj.fetch()
+        raise ValueError('No regions provided! Please specify -r <region> [<region> ...] or -R <file> [<file> ...]')
 
-    regions = get_regions(args, genome, sort=True)
-    if not no_duplicates:
+    regions = genome_.Interval.combine_overlapping(get_regions(args, genome, only_unique=False))
+    if not only_unique:
         return itertools.chain(*(obj.fetch(region.chrom_name(genome), region.start, region.end) for region in regions))
     return _fetch_regions_wo_duplicates(obj, regions, genome, start_attr)
 

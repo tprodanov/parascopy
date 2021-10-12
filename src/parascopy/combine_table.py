@@ -542,13 +542,12 @@ def main(prog_name=None, in_args=None):
     io_args.add_argument('-g', '--graph', metavar='<file>',
         help='Optional: output directory with duplication graphs.')
 
-    reg_args = parser.add_argument_group('Region arguments (optional, mutually exclusive)')
-    reg_me = reg_args.add_mutually_exclusive_group()
-    reg_me.add_argument('-r', '--regions', nargs='+', metavar='<region>',
+    reg_args = parser.add_argument_group('Region arguments (optional)')
+    reg_args.add_argument('-r', '--regions', nargs='+', metavar='<region>',
         help='Region(s) in format "chr" or "chr:start-end").\n'
             'Start and end are 1-based inclusive. Commas are ignored.')
-    reg_me.add_argument('-R', '--regions-file', metavar='<file>',
-        help='Input bed[.gz] file containing regions (tab-separated, 0-based semi-exclusive).')
+    reg_args.add_argument('-R', '--regions-file', nargs='+', metavar='<file>',
+        help='Input bed[.gz] file(s) containing regions (tab-separated, 0-based semi-exclusive).')
 
     filt_args = parser.add_argument_group('Duplications filtering arguments')
     filt_args.add_argument('-e', '--exclude', metavar='<expr>',

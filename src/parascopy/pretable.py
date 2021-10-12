@@ -323,6 +323,7 @@ def write_header(genome, out, argv):
 
 
 def _group_regions(regions, min_len=1e6, max_len=20e6):
+    regions = Interval.combine_overlapping(regions)
     res = []
     small_group = []
     small_group_len = 0
@@ -385,13 +386,12 @@ def main(prog_name=None, in_args=None):
     io_args.add_argument('-o', '--output', metavar='<file>', required=True,
         help='Output bed[.gz] file.')
 
-    reg_args = parser.add_argument_group('Region arguments (optional, mutually exclusive)')
-    reg_me = reg_args.add_mutually_exclusive_group(required=False)
-    reg_me.add_argument('-r', '--regions', nargs='+', metavar='<region>',
+    reg_args = parser.add_argument_group('Region arguments (optional)')
+    reg_args.add_argument('-r', '--regions', nargs='+', metavar='<region>',
         help='Region(s) in format "chr" or "chr:start-end").\n'
             'Start and end are 1-based inclusive. Commas are ignored.')
-    reg_me.add_argument('-R', '--regions-file', metavar='<file>',
-        help='Input bed[.gz] file containing regions (tab-separated, 0-based semi-exclusive).')
+    reg_args.add_argument('-R', '--regions-file', nargs='+', metavar='<file>',
+        help='Input bed[.gz] file(s) containing regions (tab-separated, 0-based semi-exclusive).')
 
     filt_args = parser.add_argument_group('Filtering arguments')
     filt_args.add_argument('--min-aln-len', type=int, metavar='<int>', default=250,
@@ -446,7 +446,7 @@ def main(prog_name=None, in_args=None):
     with Genome(args.fasta_ref) as genome, open(args.output, 'wb') as out, \
             tempfile.TemporaryDirectory(prefix='parascopy') as wdir:
         common.log('Using temporary directory {}'.format(wdir))
-        regions = common.get_regions(args, genome)
+        regions = common.get_regions(args, genome, only_unique=False, full_genome_if_empty=True)
         region_groups = _group_regions(regions)
         n_groups = len(region_groups)
         common.log('Analyzing {:,} regions split into {:,} groups'.format(len(regions), n_groups))

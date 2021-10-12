@@ -334,9 +334,8 @@ class NamedInterval(Interval):
             self._os_name = re.sub(r'[^0-9a-zA-Z_:-]', '_', name)
 
     @classmethod
-    def from_region(cls, region, name):
-        assert name is not None
-        return cls(region.chrom_id, region.start, region.end, None, name)
+    def from_region(cls, region, genome, name):
+        return cls(region.chrom_id, region.start, region.end, genome, name)
 
     @property
     def name_provided(self):
@@ -360,8 +359,21 @@ class NamedInterval(Interval):
 
     @classmethod
     def parse(cls, string, genome):
-        interval = Interval.parse(string, genome)
-        return cls(interval.chrom_id, interval.start, interval.end, genome)
+        if '::' in string:
+            s_interval, name = string.split('::', 1)
+        else:
+            s_interval = string
+            name = None
+
+        if ':' in s_interval:
+            interval = Interval.parse(s_interval, genome)
+            interval.trim(genome)
+        else:
+            chrom_id = genome.chrom_id(s_interval)
+            interval = Interval(chrom_id, 0, genome.chrom_len(chrom_id))
+            if name is None:
+                name = s_interval
+        return cls.from_region(interval, genome, name)
 
 
 _nucleotides = 'ACGT'
