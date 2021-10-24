@@ -23,6 +23,11 @@ class NonOverlTree:
         start_ix, end_ix = self.overlap_ixs(start, end)
         return itertools.islice(self._objects, int(start_ix), int(end_ix))
 
+    def contained_ixs(self, start, end):
+        start_ix = self._starts.searchsorted(start, side='left')
+        end_ix = self._ends.searchsorted(end, side='right')
+        return start_ix, end_ix
+
 
 def start(obj):
     return obj.start

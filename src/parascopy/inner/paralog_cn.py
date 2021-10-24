@@ -550,7 +550,7 @@ def find_reliable_psvs(region_group_extra, samples, genome, out, min_samples,
     region_group_extra.set_f_values(psv_f_values)
 
 
-def _single_sample_e_step(sample_id, psv_infos, reliable_psv_ixs):
+def _single_sample_e_step(sample_id, sample_cn, psv_infos, reliable_psv_ixs):
     """
     Returns sample genotype probabilities.
     """
@@ -558,6 +558,7 @@ def _single_sample_e_step(sample_id, psv_infos, reliable_psv_ixs):
     res = np.zeros(n_sample_genotypes)
     for psv_ix in reliable_psv_ixs:
         psv_info = psv_infos[psv_ix]
+        assert sample_cn == psv_info.sample_cns[sample_id]
         res += psv_info.support_matrix[sample_id]
     return res
 
@@ -686,7 +687,7 @@ def _create_sample_results_from_agcn(sample_id, region_group_extra):
         entry.info['n_windows'] = region_group_extra.group_windows_searcher.overlap_size(reg_start, reg_end)
         entry.info['hmm_windows'] = region_group_extra.hmm_windows_searcher.overlap_size(reg_start, reg_end)
 
-        psv_start_ix, psv_end_ix = region_group_extra.psv_searcher.overlap_ixs(reg_start, reg_end)
+        psv_start_ix, psv_end_ix = region_group_extra.psv_searcher.contained_ixs(reg_start, reg_end)
         entry.info['n_psvs'] = psv_end_ix - psv_start_ix
         entry.info['rel_psvs'] = np.sum(region_group_extra.psv_is_reliable[psv_start_ix : psv_end_ix])
 
@@ -745,20 +746,19 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
             continue
         psv_ixs = []
         for subresults in curr_results:
-            for psv_ix in range(*psv_searcher.overlap_ixs(subresults.region1.start, subresults.region1.end)):
+            for psv_ix in range(*psv_searcher.contained_ixs(subresults.region1.start, subresults.region1.end)):
                 if psv_infos[psv_ix].psv_gt_probs[sample_id] is not None:
                     psv_ixs.append(psv_ix)
+        sample_cn = curr_results[0].pred_cn
+        if sample_cn == 0:
+            continue
         psv_ixs = np.array(psv_ixs)
         if len(psv_ixs) == 0:
             _add_paralog_filter(curr_results, Filter.NoPSVs)
             continue
-
         reliable_psv_ixs = psv_ixs[region_group_extra.psv_is_reliable[psv_ixs]]
         if len(reliable_psv_ixs) == 0:
             _add_paralog_filter(curr_results, Filter.NoReliable)
-            continue
-        sample_cn = curr_results[0].pred_cn
-        if sample_cn == 0:
             continue
         sample_genotypes = variants_.all_gt_counts(n_copies, sample_cn)
         if len(sample_genotypes) > max_genotypes:
@@ -766,7 +766,7 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
             continue
 
         # ===== Run E-step once again to calculate psCN =====
-        sample_gt_probs = _single_sample_e_step(sample_id, psv_infos, reliable_psv_ixs)
+        sample_gt_probs = _single_sample_e_step(sample_id, sample_cn, psv_infos, reliable_psv_ixs)
         assert len(sample_gt_probs) == len(sample_genotypes)
         marginal_probs, paralog_cn, paralog_qual = calculate_marginal_probs(sample_genotypes, sample_gt_probs,
             n_copies, sample_cn)
@@ -951,9 +951,13 @@ class ResultEntry:
             '{:.2f}'.format(self.sample_const_region.qual))
 
     def paralog_to_str(self):
-        if self.paralog_cn is None and self.n_copies == 1:
-            self.paralog_cn = (self.sample_const_region.pred_cn_str,)
-            self.paralog_qual = (self.sample_const_region.qual,)
+        if self.paralog_cn is None:
+            if self.n_copies == 1:
+                self.paralog_cn = (self.sample_const_region.pred_cn_str,)
+                self.paralog_qual = (self.sample_const_region.qual,)
+            elif self.pred_cn == 0:
+                self.paralog_cn = (0,) * self.n_copies
+                self.paralog_qual = (self.sample_const_region.qual,) * self.n_copies
         paralog_filter = self.paralog_filter.to_str(self.paralog_cn is not None)
 
         if self.paralog_cn is None:

@@ -179,6 +179,7 @@ def _all_f_combinations(n_copies, cn):
 @lru_cache(maxsize=None)
 class _PrecomputedData:
     def __init__(self, alleles, cn):
+        assert cn > 0
         self.n_copies = len(alleles)
         self.n_alleles = max(alleles) + 1
         self.cn = cn
@@ -260,10 +261,10 @@ def calculate_all_psv_gt_probs(region_group_extra, max_agcn, max_genotypes):
             reg_start = sample_const_region.region1.start
             reg_end = sample_const_region.region1.end
             sample_cn = sample_const_region.pred_cn
-            if sample_cn > max_agcn:
+            if sample_cn == 0 or sample_cn > max_agcn:
                 continue
 
-            psv_start_ix, psv_end_ix = psv_searcher.overlap_ixs(reg_start, reg_end)
+            psv_start_ix, psv_end_ix = psv_searcher.contained_ixs(reg_start, reg_end)
             _fill_psv_gts(sample_id, sample_cn, psv_infos, psv_counts, psv_start_ix, psv_end_ix, max_genotypes)
 
 
