@@ -259,11 +259,11 @@ def _get_fetch_regions(windows, genome, window_size, max_distance=100):
 
 
 class Params:
-    def __init__(self):
+    def __init__(self, window_filtering_mult=1):
         self.window_size = None
-        self.low_mapq_perc = 0.1
-        self.clipped_ratio = 0.1
-        self.unpaired_ratio = 0.1
+        self.low_mapq_ratio = 0.1 * window_filtering_mult
+        self.clipped_ratio = 0.1 * window_filtering_mult
+        self.unpaired_ratio = 0.1 * window_filtering_mult
         self.neighbours = 1
         self.neighbours_dist = None
         self.loess_frac = None
@@ -271,6 +271,20 @@ class Params:
 
     def set_neighbours_dist(self):
         self.neighbours_dist = self.window_size * self.neighbours - self.window_size // 2
+
+    def describe(self):
+        s =  'Read depth parameters:\n'
+        s += '    Use window size {} bp.\n'.format(self.window_size)
+        s += '    Window is irregular in a sample if there are more than:\n'
+        s += '    -  {:.1f}% reads with low mapping quality,\n'.format(self.low_mapq_ratio * 100)
+        s += '    -  {:.1f}% reads with clipping,\n'.format(self.clipped_ratio * 100)
+        s += '    -  {:.1f}% reads without pair.\n'.format(self.unpaired_ratio * 100)
+        s += '    Remove {} window(s) on both sides of an irregular window.\n'.format(self.neighbours)
+        if self.loess_frac is not None:
+            s += '    Using LOESS fraction = {:.1f}.\n'.format(self.loess_frac)
+        if self.gc_bounds is not None:
+            s += '    Use windows with GC-content in [{}..{}].\n'.format(*self.gc_bounds)
+        return s
 
     @classmethod
     def from_args(cls, args, window_size):
@@ -503,7 +517,7 @@ def _write_means_header(out_means, windows, args, bounds):
 
 
 class Depth:
-    def __init__(self, filename, samples):
+    def __init__(self, filename, samples, window_filtering_mult=1):
         """
         Input file needs to contain:
             - lines
@@ -517,7 +531,7 @@ class Depth:
         """
         if os.path.isdir(filename):
             filename = os.path.join(filename, 'depth.csv')
-        self._params = Params()
+        self._params = Params(window_filtering_mult)
 
         req_fields = 'sample gc_content read_end nbinom_n nbinom_p'.split()
         with common.open_possible_gzip(filename) as inp:
@@ -531,11 +545,11 @@ class Depth:
                     if 'window size' in key:
                         self._params.window_size = int(value)
                     elif 'MAPQ' in key:
-                        self._params.low_mapq_ratio = float(value) / 100
+                        self._params.low_mapq_ratio = float(value) / 100 * window_filtering_mult
                     elif 'clipped' in key:
-                        self._params.clipped_ratio = float(value) / 100
+                        self._params.clipped_ratio = float(value) / 100 * window_filtering_mult
                     elif 'unpaired' in key:
-                        self._params.unpaired_ratio = float(value) / 100
+                        self._params.unpaired_ratio = float(value) / 100 * window_filtering_mult
                     elif 'neighbour' in key:
                         self._params.neighbours = int(value)
                     elif 'GC-content range' in key:
@@ -605,6 +619,9 @@ class Depth:
     @property
     def gc_bounds(self):
         return self._params.gc_bounds
+
+    def describe_params(self):
+        return self._params.describe()
 
 
 def check_duplicated_samples(bam_wrappers):
@@ -732,6 +749,7 @@ def main(prog_name, in_args):
     with open(os.path.join(args.output, 'depth.csv'), 'w') as out_means:
         common.log('Start calculating coverage')
         params = Params.from_args(args, window_size)
+        common.log(params.describe() + '    ============')
         _write_means_header(out_means, windows, args, bounds)
         prefix = os.path.join(args.output, 'tmp')
         all_files_depth(bam_wrappers, windows, fetch_regions, args.fasta_ref, threads, params, prefix, out_means)

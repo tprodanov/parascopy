@@ -87,7 +87,7 @@ class Window(DuplRegion):
         super().__init__(ix, region1, regions2)
         self._gc_content = gc_content
         self._const_region_ix = const_region_ix
-        self.in_viterbi = True
+        self.in_hmm = True
         self.multiplier = None
         self._middles2 = middles2
 
@@ -338,7 +338,7 @@ def _extend_windows(windows, const_region, interval_start, interval_seq, duplica
         gc_content = int(common.gc_content(interval_seq[window_start - interval_start : window_end - interval_start]))
         window = Window(len(windows), subregion1, subregions2, middles2, gc_content, const_region.ix)
         if big_difference:
-            window.in_viterbi = False
+            window.in_hmm = False
         windows.append(window)
 
 
@@ -473,7 +473,7 @@ class DuplHierarchy:
             out.write('    PSVs:    {}\n'.format(len(region_group.psv_ixs)))
 
             total_windows = len(region_group.window_ixs)
-            windows_in_hmm = sum(self._windows[i].in_viterbi for i in region_group.window_ixs)
+            windows_in_hmm = sum(self._windows[i].in_hmm for i in region_group.window_ixs)
             out.write('    Windows: {} (suitable for HMM: {})\n'.format(total_windows, windows_in_hmm))
             out.write('    Constant regions: {}\n'.format(len(region_group.region_ixs)))
             for region_ix in region_group.region_ixs:
@@ -484,7 +484,8 @@ class DuplHierarchy:
             out.write('    ====\n')
 
             if min_windows > 1 and total_windows >= min_windows * 1.5 and windows_in_hmm == 0:
-                common.log('WARN: [{}  {}] cannot use any windows for the agCN HMM (out of total {} windows)'
+                common.log(('WARN: [{}  {}] cannot use any windows for the agCN HMM (out of total {} windows).\n' +
+                    '           If there are many messages like this, consider setting --window-filtering > 1')
                     .format(self.interval.name, region_group.name, total_windows))
 
 
@@ -545,7 +546,7 @@ class RegionGroupExtra:
         self._region_group = region_group
         windows = dupl_hierarchy.windows
         self._group_windows = [windows[i] for i in region_group.window_ixs]
-        self._hmm_windows = [window for window in self._group_windows if window.in_viterbi]
+        self._hmm_windows = [window for window in self._group_windows if window.in_hmm]
         self._windows_searcher = itree.NonOverlTree(self._group_windows, itree.region1_start, itree.region1_end)
         self._hmm_windows_searcher = itree.NonOverlTree(self._hmm_windows, itree.region1_start, itree.region1_end)
 

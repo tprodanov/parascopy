@@ -148,7 +148,7 @@ def _count_psv_observations(psvs, samples, psv_observations):
 
 def _filter_windows(window_counts, bg_depth, dupl_hierarchy, min_windows, perc_samples):
     """
-    Set in_viterbi attribute for windows.
+    Set in_hmm attribute for windows.
     """
     if not window_counts:
         return
@@ -163,25 +163,25 @@ def _filter_windows(window_counts, bg_depth, dupl_hierarchy, min_windows, perc_s
 
     for window, window_counts_row in zip(windows, window_counts):
         if not bg_depth.gc_content_defined(window.gc_content):
-            window.in_viterbi = False
+            window.in_hmm = False
             continue
 
         failed_count = n_samples - sum(map(bg_depth.window_passes, window_counts_row))
         if failed_count <= max_failed_count:
             continue
 
-        window.in_viterbi = False
+        window.in_hmm = False
         window_ix = window.ix
         for oth_ix in range(max(0, window_ix - neighbours), min(n_windows, window_ix + neighbours + 1)):
             if oth_ix != window_ix and window.region1.distance(windows[oth_ix].region1) < neighbours_dist:
-                windows[oth_ix].in_viterbi = False
+                windows[oth_ix].in_hmm = False
 
     for region_group in dupl_hierarchy.region_groups:
         group_windows = [windows[i] for i in region_group.window_ixs]
-        n_windows = sum(map(operator.attrgetter('in_viterbi'), group_windows))
+        n_windows = sum(map(operator.attrgetter('in_hmm'), group_windows))
         if n_windows < min_windows:
             for window in group_windows:
-                window.in_viterbi = False
+                window.in_hmm = False
 
 
 def _calculate_pooled_depth(bam_file, samples, bg_depth, read_groups_dict, dupl_hierarchy, outp):
@@ -245,18 +245,18 @@ def _create_depth_matrix(windows, window_counts):
     depth_matrix = np.full((n_windows, n_samples), np.iinfo(np.int16).min, dtype=np.int16)
 
     for window_ix, window in enumerate(windows):
-        if window.in_viterbi:
+        if window.in_hmm:
             for sample_id, counts in enumerate(window_counts[window_ix]):
                 depth_matrix[window_ix, sample_id] = counts.depth_read1
     return depth_matrix
 
 
 def _write_windows(dupl_hierarchy, genome, outp):
-    outp.write('#chrom\tstart\tend\tcopy_num\tgc_content\twindow_ix\tregion_ix\tregion_group\tin_viterbi\tregions2\n')
+    outp.write('#chrom\tstart\tend\tcopy_num\tgc_content\twindow_ix\tregion_ix\tregion_group\tin_hmm\tregions2\n')
     for window in dupl_hierarchy.windows:
         outp.write(window.region1.to_bed(genome))
         outp.write('\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(window.cn, window.gc_content, window.ix,
-            window.const_region_ix, dupl_hierarchy.window_group_name(window), 'T' if window.in_viterbi else 'F',
+            window.const_region_ix, dupl_hierarchy.window_group_name(window), 'T' if window.in_hmm else 'F',
             window.regions2_str(genome, sep=' ')))
 
 
@@ -418,6 +418,11 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         dupl_hierarchy.summarize_region_groups(genome, out.region_groups, args.min_windows)
         _write_windows(dupl_hierarchy, genome, out.windows)
         out.flush()
+
+        if args.skip_cn:
+            assert args.min_windows > 0
+            for window in dupl_hierarchy.windows:
+                window.in_hmm = False
 
         for region_group in dupl_hierarchy.region_groups:
             if not region_group.window_ixs:
@@ -702,7 +707,7 @@ def get_regions(args, genome, load_models):
     regions = []
     for model_params in loaded_models:
         main_entry = model_params.main_entry
-        name = main_entry.info['main']
+        name = main_entry.info['name']
         if name in model_names:
             raise ValueError('Provided several models with the same name ({})'.format(name))
         regions.append(NamedInterval.from_region(main_entry.region1, genome, name))
@@ -807,6 +812,10 @@ def parse_args(prog_name, in_args, is_new):
         aggr_det_args.add_argument('--min-windows', type=int, metavar='<int>', default=10,
             help='Predict aggregate and paralog copy number only in regions with at\n'
                 'least <int> windows [default: %(default)s].')
+        aggr_det_args.add_argument('--window-filtering', type=float, metavar='<float>', default=1,
+            help='Modify window filtering: by default window filtering is the same as in the background\n'
+                'read depth calculation [default: %(default)s].\n'
+                'Values < 1 - stricter filtering, > 1 - more liberal filtering.')
         aggr_det_args.add_argument('--agcn-range', type=int, metavar='<int> <int>', nargs=2, default=(5, 7),
             help='Detect aggregate copy number in a range around the reference copy number [default: 5 7].\n'
                 'For example, for a duplication with copy number 8 copy numbers 3-15 can\n'
@@ -839,6 +848,9 @@ def parse_args(prog_name, in_args, is_new):
             '    full:    complete rerun,\n'
             '    partial: use pooled reads from a previous run,\n'
             '    none:    skip successfully finished loci [default].')
+    exec_args.add_argument('--skip-cn', action='store_true',
+        help='Do not calculate agCN and psCN profiles. If this option is set, Parascopy still\n'
+            'calculates read depth for duplicated windows and PSV-allelic read depth.')
     exec_args.add_argument('-@', '--threads', type=int, metavar='<int>', default=4,
         help='Number of available threads [default: %(default)s].')
     exec_args.add_argument('--samtools', metavar='<path>|none', default='samtools',
@@ -892,7 +904,11 @@ def main(prog_name=None, in_args=None, is_new=None):
     depth_.check_duplicated_samples(bam_wrappers)
 
     samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
-    bg_depth = depth_.Depth(args.depth, samples)
+    if loaded_models:
+        bg_depth = depth_.Depth(args.depth, samples)
+    else:
+        bg_depth = depth_.Depth(args.depth, samples, window_filtering_mult=args.window_filtering)
+        common.log(bg_depth.describe_params() + '    ============')
 
     run(regions, data, samples, bg_depth, loaded_models)
     data.close()

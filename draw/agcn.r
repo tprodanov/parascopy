@@ -180,7 +180,7 @@ windows$middle <- (windows$start + windows$end) / 2
 depth <- load('depth') %>% select(window_ix, sample, depth1, norm_cn1)
 depth <- filter(depth, window_ix >= min_window & window_ix <= max_window)
 depth <- left_join(depth,
-                   select(windows, window_ix, region_ix, region_group, in_viterbi),
+                   select(windows, window_ix, region_ix, region_group, in_hmm),
                    by='window_ix')
 
 MAX_HIGHLIGHTED <- 5
@@ -235,12 +235,12 @@ hmm_params <- group_by(hmm_params, window_ix) %>% slice_tail(n = 1) %>% ungroup(
 
 # ------ Draw normalized read depth for good windows ------
 
-depth_v <- filter(depth, in_viterbi)
+depth_v <- filter(depth, in_hmm)
 depth_v$corr_cn1 <- depth_v$norm_cn1 /
   hmm_params[match(depth_v$window_ix, hmm_params$window_ix),]$multiplier
 depth_v <- left_join(depth_v, select(hmm_states_last, 'sample', 'window_ix', 'pred_cn'),
                      by=c('sample', 'window_ix'))
-windows_v <- filter(windows, in_viterbi)
+windows_v <- filter(windows, in_hmm)
 
 depth_v.av <- aggregate.average(depth_v, windows_v, c('norm_cn1', 'corr_cn1', 'pred_cn'),
                                 n=args$window, rolling=args$rolling)

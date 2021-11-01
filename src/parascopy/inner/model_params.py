@@ -280,7 +280,7 @@ class ModelParams:
             entry.info['ix'] = window.ix
             entry.info['const_region'] = window.const_region_ix
             entry.info['gc_content'] = '{:.0f}'.format(window.gc_content)
-            entry.info['in_viterbi'] = 'T' if window.in_viterbi else 'F'
+            entry.info['in_hmm'] = 'T' if window.in_hmm else 'F'
             self.add_entry(entry)
 
         for const_region in dupl_hierarchy.const_regions:
@@ -308,7 +308,7 @@ class ModelParams:
                     or int(entry.info['gc_content']) != window.gc_content:
                 return 'Window {} {} does not match with corresponding window in the model parameters:\n{}' \
                     .format(window.ix, window.region1.to_str(genome), dupl_region_mism)
-            window.in_viterbi = entry.info['in_viterbi'] == 'T'
+            window.in_hmm = entry.info['in_hmm'] == 'T'
 
         region_entries = self.entries[EntryType.ConstRegion]
         if len(region_entries) != len(dupl_hierarchy.const_regions):
