@@ -6,16 +6,16 @@ suppressMessages(library(tidyverse))
 suppressMessages(library(ggplot2))
 
 process_args <- function(args) {
-  input <<- trimws(args$input, which='right', whitespace='/')
-  outp <- trimws(args$output, which='right', whitespace='/')
+  input <<- normalizePath(args$input)
+  outp <- normalizePath(args$output)
   highlight_samples <<- args$samples
 
-  if (is.null(args$gene)) {
-    gene <<- basename(input)
+  if (is.null(args$locus)) {
+    locus <<- basename(input)
   } else {
-    gene <<- args$gene
+    locus <<- args$locus
   }
-  output <<- sprintf('%s%s%s.', outp, ifelse(dir.exists(outp), '/', ''), gene)
+  output <<- sprintf('%s%s%s.', outp, ifelse(dir.exists(outp), '/', ''), locus)
 
   if (!file.exists(file.path(input, 'depth.csv'))) {
     input <<- file.path(input, 'extra')
@@ -23,10 +23,6 @@ process_args <- function(args) {
 
   n_highlight <<- length(highlight_samples)
   has_highlight <<- n_highlight > 0
-  highlight_msg <- ifelse(has_highlight,
-                          sprintf(' Highlight %d samples.', n_highlight), '')
-  cat(sprintf('[%s] Drawing aggregate copy number to "%s*.png".%s\n',
-              gene, output, highlight_msg))
 }
 
 load <- function(name, comment.char='#', ...) {
@@ -42,7 +38,7 @@ fmt_pos <- function(x) {
   sprintf('%s kb', format(x / 1e3, big.mark=',', digits=0, scientific=F))
 }
 
-# --- Aggregation ---
+# ------ Aggregation ------
 
 non_overl_aggr <- function(vec, fun, n) {
   l <- length(vec)
@@ -123,16 +119,16 @@ aggregate.average <- function(df, windows, columns, n=10, rolling=F) {
 # ------ Argument parser ------
 
 parser <- ArgumentParser(description='Draw aggregate copy number.',
-      usage='%(prog)s -i <dir> -o <dir>|<prefix> [args]')
+      usage='%(prog)s -i <dir> -o <dir>|<prefix> [arguments]')
 io_args <- parser$add_argument_group('Input/output files')
 io_args$add_argument('-i', '--input', type='character', required=T, metavar='<path>',
-    help='Input directory for a specific gene.')
+    help='Input directory for a specific locus.')
 io_args$add_argument('-o', '--output', type='character', required=T, metavar='<path>',
     help='Output directory or prefix.')
 
 opt_args <- parser$add_argument_group('Optional arguments')
-opt_args$add_argument('-g', '--gene', type='character', metavar='<name>', required=F,
-    help='Gene name [default: basename(input)].')
+opt_args$add_argument('-l', '--locus', type='character', metavar='<name>', required=F,
+    help='Locus name [default: basename(input)].')
 opt_args$add_argument('-s', '--samples', type='character', nargs='*', metavar='<sample>',
     help=paste('Highlight provided samples. If there are at most 5 samples, ',
                'all samples are highlighted by default.'))
@@ -150,23 +146,29 @@ args <- parser$parse_args()
 
 process_args(args)
 
+cat(sprintf('[%s] Drawing aggregate copy number to "%s*.png".%s\n', locus, output,
+    ifelse(has_highlight, sprintf(' Highlight %d samples.', n_highlight), '')))
+
 # ------ Additional modifications ------
 
-use_title <- !args$no_title
 alpha <- args$alpha
 color_breaks <- waiver()
 colors <- suppressWarnings(RColorBrewer::brewer.pal(Inf, 'Dark2'))
-gene_annotation <- list()
+locus_annotation <- list()
 
-if (use_title) {
-  title <- ggtitle
-} else {
+if (args$no_title) {
   title <- function(...) geom_blank()
+} else {
+  title <- ggtitle
 }
 
 # ------ Draw raw normalized read depth (all windows) ------
 
 windows <- load('windows.bed', comment.char='') %>% rename(chrom = X.chrom)
+if ('in_viterbi' %in% colnames(windows)) {
+  windows <- rename(windows, in_hmm = in_viterbi)
+}
+
 if (is.null(args$positions)) {
   min_window <- 0
   max_window <- max(windows$window_ix)
@@ -206,10 +208,10 @@ ggplot(depth.av) +
               data=filter(depth.av, sample %in% highlight_samples)),
          scale_color_discrete('Sample'))
     } else { list() } } +
-  gene_annotation +
+  locus_annotation +
   scale_x_continuous(x_label, labels=fmt_pos) +
   scale_y_continuous('Normalized read depth', breaks=0:40) +
-  title(sprintf('%s: all windows, no multipliers', gene)) +
+  title(sprintf('%s: all windows, no multipliers', locus)) +
   theme_bw()
 ggsave(sprintf('%sa_norm_depth_all.png', output), width=8, height=5)
 
@@ -259,10 +261,10 @@ ggplot(depth_v.av) +
       curr_geom(aes(middle, norm_cn1, color=sample), size=1, data=highl_depth_v.av),
       scale_color_discrete('Sample'))
   } else { list() } } +
-  gene_annotation +
+  locus_annotation +
   scale_x_continuous(x_label, labels=fmt_pos) +
   scale_y_continuous('Normalized read depth', breaks=0:40) +
-  title(sprintf('%s: good windows, no multipliers', gene)) +
+  title(sprintf('%s: good windows, no multipliers', locus)) +
   theme_bw()
 ggsave(sprintf('%sb_norm_depth_good.png', output), width=8, height=5)
 
@@ -274,10 +276,10 @@ ggplot(depth_v.av) +
       curr_geom(aes(middle, corr_cn1, color=sample), size=1, data=highl_depth_v.av),
       scale_color_discrete('Sample'))
   } else { list() } } +
-  gene_annotation +
+  locus_annotation +
   scale_x_continuous(x_label, labels=fmt_pos) +
   scale_y_continuous('Corrected normalized read depth', breaks=0:40) +
-  title(sprintf('%s: good windows, use multipliers', gene)) +
+  title(sprintf('%s: good windows, use multipliers', locus)) +
   theme_bw()
 ggsave(sprintf('%sc_corr_depth.png', output), width=8, height=5)
 
@@ -292,12 +294,12 @@ ggplot(depth_v.av) +
   curr_geom(aes(middle, copy_num), color='gray30', size=2, data=windows_v.av) +
   curr_geom(aes(middle, corr_cn1, group=sample,
                 color=factor(round(pred_cn))), alpha=min(1, alpha * 2)) +
-  gene_annotation +
+  locus_annotation +
   scale_x_continuous(x_label, labels=fmt_pos) +
   scale_y_continuous('Normalized read depth', breaks=0:40) +
   scale_color_manual('CN estimate',
                      values=colors, breaks=color_breaks) +
-  title(sprintf('%s: good windows, use multipliers', gene)) +
+  title(sprintf('%s: good windows, use multipliers', locus)) +
   guides(color = guide_legend(override.aes = list(alpha=1, size=2.5))) +
   theme_bw()
 ggsave(sprintf('%sd_corr_depth_color.png', output), width=8, height=5)
@@ -323,7 +325,7 @@ if (any(hmm_states_first$iteration != 'v')) {
   sample_counts <- filter(hmm_states_first, ix %in% text_pos) %>%
     aggregate(sample ~ middle + ix + pred_cn_round, ., length)
   ggplot(hmm_states_first) +
-    gene_annotation +
+    locus_annotation +
     geom_line(aes(middle, copy_num), data=windows_v, size=4, color='gray70') +
     geom_line(aes(middle, pred_cn, group=sample), color='blue', alpha=alpha) +
     { if (n_highlight > 0) {
@@ -343,7 +345,7 @@ if (any(hmm_states_first$iteration != 'v')) {
 sample_counts <- filter(hmm_states_last, ix %in% text_pos) %>%
   aggregate(sample ~ middle + ix + pred_cn, ., length)
 ggplot(hmm_states_last) +
-  gene_annotation +
+  locus_annotation +
   geom_line(aes(middle, copy_num), data=windows_v, size=4, color='gray70') +
   geom_line(aes(middle, pred_cn, group=sample), color='blue', alpha=alpha) +
   { if (n_highlight > 0) {

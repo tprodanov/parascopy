@@ -13,6 +13,7 @@ Table of contents
 * [Citing Parascopy](#citing-parascopy)
 * [Installation](#installation)
 * [General usage](#general-usage)
+* [Visualizing output](#visualizing-output)
 * [Output files](#output-files)
 * [Precomputed data](#precomputed-data)
 * [Known issues](#known-issues)
@@ -81,6 +82,15 @@ parascopy cn-using out1/model -I input2.list -t table.bed.gz -f genome.fa -d dep
 ```
 
 See `parascopy help` or `parascopy <command> --help` for more information.
+
+Visualizing output
+------------------
+
+It is possible to visualize agCN and psCN detection process, for that you need to clone this repository and run scripts
+in `draw` directory. The scripts are written in `R` language and require a number of `R` packages:
+```r
+install.packages(c('argparse', 'tidyverse', 'ggplot2', 'ComplexHeatmap', 'viridis', 'circlize', 'ggthemes', 'RColorBrewer'))
+```
 
 Output files
 ------------
