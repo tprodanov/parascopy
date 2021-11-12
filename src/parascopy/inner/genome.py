@@ -5,18 +5,13 @@ import sys
 from . import common
 
 
-class OnlyChromNames:
-    def __init__(self, names):
-        self._names = names
-
-    def chrom_name(self, chrom_id):
-        return self._names[chrom_id]
-
-
 class ChromNames:
     def __init__(self, names, lengths):
         self._names = names
         self._ids = { name: i for i, name in enumerate(names) }
+        if len(self._names) != len(self._ids):
+            dupl_name = next(name for i, name in enumerate(self._names) if self._ids[name] != i)
+            raise ValueError('Genome has duplicated chromosome names, for example chromosome "{}"'.format(dupl_name))
         self._lengths = lengths
 
     def table_header(self):
@@ -87,8 +82,14 @@ class ChromNames:
     def generate_bam_header(self):
         return '\n'.join(map('@SQ\tSN:%s\tLN:%d'.__mod__, zip(self._names, self._lengths)))
 
-    def chrom_interval(self, chrom_id):
+    def chrom_interval(self, chrom_id, named=True):
+        if named:
+            return NamedInterval(chrom_id, 0, self._lengths[chrom_id], name=self._names[chrom_id])
         return Interval(chrom_id, 0, self._lengths[chrom_id])
+
+    def all_chrom_intervals(self, named=True):
+        for chrom_id in range(self.n_chromosomes):
+            yield self.chrom_interval(chrom_id, named=named)
 
 
 class Genome(ChromNames):
@@ -113,8 +114,88 @@ class Genome(ChromNames):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def only_chrom_names(self):
-        return OnlyChromNames(self._fasta_file.references)
+    def to_chrom_names(self):
+        return ChromNames(list(self._names), list(self._lengths))
+
+    @property
+    def is_merged(self):
+        return False
+
+
+class GenomeMerge(ChromNames):
+    def __init__(self, genome1, genome2):
+        assert isinstance(genome1, Genome) and isinstance(genome2, Genome)
+        self._genome1 = genome1
+        self._genome2 = genome2
+        self._fasta1 = genome1._fasta_file
+        self._fasta2 = genome2._fasta_file
+        super().__init__([], [])
+
+        for genome in (genome1, genome2):
+            for name, length in zip(genome.chrom_names, genome.chrom_lengths):
+                new_chrom_id = self._ids.get(name)
+                if new_chrom_id is None:
+                    self._ids[name] = len(self._names)
+                    self._names.append(name)
+                    self._lengths.append(length)
+                elif length != self._lengths[new_chrom_id]:
+                    raise ValueError('Cannot merge genomes: chromosome "{}" has different lengths: {} and {}'
+                        .format(name, length, self._lengths[new_chrom_id]))
+
+        self._genome1_has_chrom = tuple(map(genome1.has_chrom, self._names))
+        self._genome2_has_chrom = tuple(map(genome2.has_chrom, self._names))
+
+    @staticmethod
+    def from_filenames(*filenames):
+        if len(filenames) < 1 or len(filenames) > 2:
+            raise ValueError('Cannot create GenomeMerge from {} filenames'.format(len(filenames)))
+        if len(filenames) == 1 or filenames[1] is None:
+            return Genome(filenames[0])
+        return GenomeMerge(Genome(filenames[0]), Genome(filenames[1]))
+
+    @property
+    def filename(self):
+        return None
+
+    def fetch_interval(self, interval):
+        chrom_id = interval.chrom_id
+        name = self._names[chrom_id]
+
+        seq1 = self._fasta1.fetch(name, interval.start, interval.end).upper() \
+            if self._genome1_has_chrom[chrom_id] else None
+        seq2 = self._fasta2.fetch(name, interval.start, interval.end).upper() \
+            if self._genome2_has_chrom[chrom_id] else None
+        if seq1 and seq2 and seq1 != seq2:
+            raise ValueError('Region "{}" is present in both input genomes, but contains different sequences'
+                .format(interval.to_str_comma(self)))
+        res = seq1 or seq2
+        assert res is not None
+        return res
+
+    def to_chrom_names(self):
+        return ChromNames(list(self._names), list(self._lengths))
+
+    def close(self):
+        self.genome1.close()
+        self.genome2.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    @property
+    def is_merged(self):
+        return True
+
+    @property
+    def genome1(self):
+        return self._genome1
+
+    @property
+    def genome2(self):
+        return self._genome2
 
 
 class Interval:

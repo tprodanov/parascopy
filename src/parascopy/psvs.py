@@ -237,7 +237,7 @@ def main(prog_name=None, in_args=None):
     parser = argparse.ArgumentParser(
         description='Output PSVs (paralogous-sequence variants) between homologous regions.',
         formatter_class=argparse.RawTextHelpFormatter, add_help=False,
-        usage='{} -i <table> -f <fasta> (-r <region> | -R <bed>) -o <vcf> [args]'.format(prog_name))
+        usage='{} -i <table> -f <fasta> (-r <region> | -R <bed>) -o <vcf> [arguments]'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
     io_args.add_argument('-i', '--input', metavar='<file>', required=True,
         help='Input indexed bed.gz homology table.')

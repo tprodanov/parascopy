@@ -242,7 +242,7 @@ class Cigar:
                     left += length
             else:
                 new_tuples.append((length, op))
-        return left, right, Cigar.from_tuples(new_tuples, lengths_from=self)
+        return left, right, Cigar.from_tuples(new_tuples)
 
     def get_clipping(self):
         left_len, left_op = self._tuples[0]

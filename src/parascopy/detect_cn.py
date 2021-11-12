@@ -733,21 +733,16 @@ def filter_regions(regions, loaded_models, regions_subset):
     return regions, loaded_models
 
 
-class SingleMetavar(argparse.RawTextHelpFormatter):
-    def _format_args(self, action, default_metavar):
-        return self._metavar_formatter(action, default_metavar)(1)[0]
-
-
 def parse_args(prog_name, in_args, is_new):
     assert prog_name is not None
     usage = ('{prog} {model}(-i <bam> [...] | -I <bam-list>) -t <table> -f <fasta> '
-        '{regions}-d <bg-depth> -o <dir> [args]').format(prog=prog_name, model='' if is_new else '<model> ',
+        '{regions}-d <bg-depth> -o <dir> [arguments]').format(prog=prog_name, model='' if is_new else '<model> ',
         regions='(-r <region> [...] | -R <bed>) ' if is_new else '')
 
     DEFAULT_PSCN_BOUND = (8, 500)
     parser = argparse.ArgumentParser(
         description='Find aggregate and paralog-specific copy number for given unique and duplicated regions.',
-        formatter_class=SingleMetavar, add_help=False, usage=usage)
+        formatter_class=common.SingleMetavar, add_help=False, usage=usage)
     io_args = parser.add_argument_group('Input/output arguments')
     if not is_new:
         io_args.add_argument('model', metavar='<model>', nargs='+',
@@ -815,7 +810,7 @@ def parse_args(prog_name, in_args, is_new):
         aggr_det_args.add_argument('--window-filtering', type=float, metavar='<float>', default=1,
             help='Modify window filtering: by default window filtering is the same as in the background\n'
                 'read depth calculation [default: %(default)s].\n'
-                'Values < 1 - stricter filtering, > 1 - more liberal filtering.')
+                'Values < 1 - discard more windows, > 1 - keep more windows.')
         aggr_det_args.add_argument('--agcn-range', type=int, metavar='<int> <int>', nargs=2, default=(5, 7),
             help='Detect aggregate copy number in a range around the reference copy number [default: 5 7].\n'
                 'For example, for a duplication with copy number 8 copy numbers 3-15 can\n'

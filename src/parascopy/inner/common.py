@@ -12,8 +12,10 @@ from Bio import bgzf
 import pysam
 import shutil
 from scipy.special import logsumexp
+import argparse
 
-from . import genome as genome_
+from .genome import Interval, NamedInterval
+from . import errors
 
 
 _rev_comp = {'A':'T', 'T':'A', 'C':'G', 'G':'C','a':'T', 't':'A', 'c':'G', 'g':'C', 'N':'N', 'n':'N' }
@@ -143,13 +145,13 @@ def open_vcf(filename, mode='r', can_be_none=False, **kwargs):
     return pysam.VariantFile(filename, mode=mode, **kwargs)
 
 
-def get_regions(args, genome, only_unique=True, full_genome_if_empty=False):
+def get_regions(args, genome, only_unique=True):
     """
     Returns a list `[NamedInterval]`.
     """
     intervals = []
     for region in args.regions or ():
-        intervals.append(genome_.NamedInterval.parse(region, genome))
+        intervals.append(NamedInterval.parse(region, genome))
 
     for filename in args.regions_file or ():
         with open_possible_gzip(filename) as inp:
@@ -162,7 +164,7 @@ def get_regions(args, genome, only_unique=True, full_genome_if_empty=False):
                 start = int(line[1])
                 end = int(line[2])
                 name = line[3] if len(line) > 3 else None
-                interval = genome_.NamedInterval(chrom_id, start, end, genome, name)
+                interval = NamedInterval(chrom_id, start, end, genome, name)
                 interval.trim(genome)
                 intervals.append(interval)
 
@@ -186,10 +188,8 @@ def get_regions(args, genome, only_unique=True, full_genome_if_empty=False):
             intervals.append(interval)
 
     if not intervals:
-        if not full_genome_if_empty:
-            raise ValueError('No regions provided! Please specify -r <region> [<region> ...] or -R <file> [<file> ...]')
-        for chrom_id, length in enumerate(genome.chrom_lengths):
-            intervals.append(genome_.NamedInterval(chrom_id, 0, length, genome, name=genome.chrom_name(chrom_id)))
+        raise errors.EmptyResult(
+            'No regions provided! Please specify -r <region> [<region> ...] or -R <file> [<file> ...]')
     return intervals
 
 
@@ -230,7 +230,7 @@ def fetch_iterator(obj, args, genome, start_attr=False, only_unique=True, full_g
             return obj.fetch()
         raise ValueError('No regions provided! Please specify -r <region> [<region> ...] or -R <file> [<file> ...]')
 
-    regions = genome_.Interval.combine_overlapping(get_regions(args, genome, only_unique=False))
+    regions = Interval.combine_overlapping(get_regions(args, genome, only_unique=False))
     if not only_unique:
         return itertools.chain(*(obj.fetch(region.chrom_name(genome), region.start, region.end) for region in regions))
     return _fetch_regions_wo_duplicates(obj, regions, genome, start_attr)
@@ -331,3 +331,26 @@ def phred_qual(probs, best_ix, max_value=10000):
     if np.isfinite(oth_prob):
         return min(-10 * oth_prob / LOG10, max_value)
     return max_value
+
+
+class SingleMetavar(argparse.RawTextHelpFormatter):
+    def _format_args(self, action, default_metavar):
+        return self._metavar_formatter(action, default_metavar)(1)[0]
+
+
+def extended_nargs(min_values=1, max_values=2):
+    class RequiredLength(argparse.Action):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if self.nargs not in ('+', '*'):
+                raise ValueError('Cannot create extended_nargs::RequiredLength - nargs must be "+" or "*", not "{}"'
+                    .format(self.nargs))
+
+        def __call__(self, parser, args, values, option_string=None):
+            n_val = len(values)
+            if n_val < min_values or n_val > max_values:
+                msg = 'argument {} requires between {} and {} arguments (observed {})'.format(
+                    '/'.join(self.option_strings), min_values, max_values, n_val)
+                raise argparse.ArgumentTypeError(msg)
+            setattr(args, self.dest, values)
+    return RequiredLength

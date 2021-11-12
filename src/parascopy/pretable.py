@@ -13,8 +13,10 @@ import subprocess
 import enum
 import multiprocessing
 import functools
+import traceback
 
 from .inner import common
+from .inner import errors
 from .inner.genome import Genome, Interval
 from .inner.cigar import Cigar
 from .inner.duplication import Duplication, TangledRegion
@@ -127,20 +129,29 @@ class _FakeRecord:
         assert tag == 'MD'
         return self.md_tag
 
+    def __str__(self):
+        return '{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(self.query_name, '-+'[self.is_reverse], self.reference_id,
+            self.reference_start, self.reference_end, Cigar.from_pysam_tuples(self.cigartuples), self.md_tag)
+
 
 def _aln_to_dupl_wrapper(record, regions, region_seqs,
         step_size, read_len, min_aln_len, min_seq_sim, keep_partial_self_aln):
-    region_ix, read_ix = map(int, record.query_name.split('-'))
-    region = regions[region_ix]
-    shift = step_size * read_ix
-    curr_seq = region_seqs[region_ix][shift : shift + read_len]
-    curr_region = Interval(region.chrom_id, region.start + shift, region.start + shift + len(curr_seq))
+    try:
+        region_ix, read_ix = map(int, record.query_name.split('-'))
+        region = regions[region_ix]
+        shift = step_size * read_ix
+        curr_seq = region_seqs[region_ix][shift : shift + read_len]
+        curr_region = Interval(region.chrom_id, region.start + shift, region.start + shift + len(curr_seq))
 
-    dupl_res = _aln_to_dupl(record, curr_region, curr_seq, min_aln_len, min_seq_sim, keep_partial_self_aln)
+        dupl_res = _aln_to_dupl(record, curr_region, curr_seq, min_aln_len, min_seq_sim, keep_partial_self_aln)
+    except Exception:
+        fmt_exc = traceback.format_exc()
+        common.log('ERROR:\n{}'.format(fmt_exc))
+        return None
     return (region_ix, read_ix), dupl_res
 
 
-def _write_genome_reads(region_seqs, read_len, step, min_aln_len, outp):
+def _write_artificial_reads(region_seqs, read_len, step, min_aln_len, outp):
     count = 0
     for seq_i, seq in enumerate(region_seqs):
         for i, start in enumerate(range(0, len(seq) - min_aln_len + 1, step)):
@@ -153,10 +164,10 @@ def _write_genome_reads(region_seqs, read_len, step, min_aln_len, outp):
     return count
 
 
-def _run_bwa(in_path, out_path, genome, args):
+def _run_bwa(in_path, out_path, bwa_reference, args):
     command = [
         args.bwa, 'mem',
-        genome.filename, in_path, '-o', out_path,
+        bwa_reference, in_path, '-o', out_path,
         '-k', args.seed_len,
         '-t', args.threads,
         '-D', '{:.3f}'.format(args.min_aln_len / args.read_len),
@@ -208,7 +219,7 @@ def _filter_high_copy_num(duplications, tangled_regions, max_homologies, min_aln
     return filtered_dupls
 
 
-def _analyze_hits(regions, region_seqs, aln_file, genome, args):
+def _analyze_hits(regions, region_seqs, aln_file, args):
     fn = functools.partial(_aln_to_dupl_wrapper,
         regions=regions, region_seqs=region_seqs, step_size=args.step_size, read_len=args.read_len,
         min_aln_len=args.min_aln_len, min_seq_sim=args.min_seq_sim, keep_partial_self_aln=args.keep_self_alns)
@@ -219,13 +230,23 @@ def _analyze_hits(regions, region_seqs, aln_file, genome, args):
     else:
         pool = multiprocessing.Pool(threads)
         fake_records = map(_FakeRecord, aln_file)
-        results = pool.map(fn, fake_records)
+
+        results = []
+        for result in pool.imap_unordered(fn, fake_records, chunksize=1000):
+            if result is None:
+                pool.terminate()
+                os._exit(1)
+            results.append(result)
         pool.terminate()
+        pool.join()
 
     tangled_regions = []
     stats = _Stats()
     grouped_results = collections.defaultdict(list)
-    for key, (dupl, reason) in results:
+    for result in results:
+        if result is None:
+            os._exit(1)
+        key, (dupl, reason) = result
         stats.update(reason)
         if reason.is_tangled():
             # dupl is really an Interval here.
@@ -286,24 +307,20 @@ def _remove_subalignments(duplications):
 
 
 def align_to_genome(regions, genome, args, wdir, outp):
-    """
-    Self-align segment to the genome using BWA.
-    Returns list of duplications if `out` is `None`, otherwise writes to `out` and does not return anything.
-    """
     region_seqs = [region.get_sequence(genome) for region in regions]
-
     common.log('    Writing artificial reads')
     reads_path = os.path.join(wdir, 'reads.fa')
     with open(reads_path, 'w') as reads_outp:
-        n_reads = _write_genome_reads(region_seqs, args.read_len, args.step_size, args.min_aln_len, reads_outp)
+        n_reads = _write_artificial_reads(region_seqs, args.read_len, args.step_size, args.min_aln_len, reads_outp)
 
     common.log('    Running BWA on {:,} artificial reads'.format(n_reads))
     aln_path = os.path.join(wdir, 'reads.sam')
-    _run_bwa(reads_path, aln_path, genome, args)
+    _run_bwa(reads_path, aln_path, genome.filename, args)
 
     common.log('    Analyzing BWA hits')
     with pysam.AlignmentFile(aln_path) as aln_file:
-        duplications = _analyze_hits(regions, region_seqs, aln_file, genome, args)
+        aln_file = (record for record in aln_file if not record.is_unmapped)
+        duplications = _analyze_hits(regions, region_seqs, aln_file, args)
 
     for dupl in duplications:
         outp.write(dupl.to_str(genome))
@@ -344,7 +361,7 @@ def _group_regions(regions, min_len=1e6, max_len=20e6):
     return res
 
 
-def _sort_output(in_path, out, args, genome, bgzip_output):
+def _sort_output(in_path, out, args, genome, bgzip_output, wdir):
     sort_command = [args.bedtools, 'sort', '-i', in_path, '-faidx', genome.filename + '.fai', '-header']
     sort_process = subprocess.Popen(sort_command,
         stdout=subprocess.PIPE if bgzip_output else out, stderr=subprocess.PIPE)
@@ -440,13 +457,17 @@ def main(prog_name=None, in_args=None):
     common.log('Using {} threads'.format(args.threads))
 
     if not args.force and os.path.exists(args.output):
-        sys.stderr.write('Output file "{}" exists, please use -F/--force to overwrite.\n'.format(args.output))
+        sys.stderr.write('Output file "{}" exists, please use --force to overwrite.\n'.format(args.output))
         exit(1)
 
     with Genome(args.fasta_ref) as genome, open(args.output, 'wb') as out, \
             tempfile.TemporaryDirectory(prefix='parascopy') as wdir:
         common.log('Using temporary directory {}'.format(wdir))
-        regions = common.get_regions(args, genome, only_unique=False, full_genome_if_empty=True)
+        try:
+            regions = common.get_regions(args, genome, only_unique=False)
+        except errors.EmptyResult:
+            regions = list(genome.all_chrom_intervals(named=False))
+
         region_groups = _group_regions(regions)
         n_groups = len(region_groups)
         common.log('Analyzing {:,} regions split into {:,} groups'.format(len(regions), n_groups))
@@ -467,7 +488,7 @@ def main(prog_name=None, in_args=None):
                 align_to_genome(regions, genome, args, wdir, temp_outp)
 
         common.log('Sorting output file')
-        _sort_output(temp_path, out, args, genome, args.output.endswith('.gz'))
+        _sort_output(temp_path, out, args, genome, args.output.endswith('.gz'), wdir)
 
     if args.output.endswith('.gz'):
         common.log('Indexing output with tabix')
@@ -476,11 +497,4 @@ def main(prog_name=None, in_args=None):
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        sys.stderr.write('Keyboard interrupt\n')
-        exit(1)
-    except Exception:
-        sys.stderr.write('Panic due to an error:\n===========\n')
-        raise
+    main()

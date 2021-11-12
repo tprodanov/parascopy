@@ -8,6 +8,7 @@ import os
 import numpy as np
 import itertools
 import multiprocessing
+import traceback
 
 from . import pretable
 from .view import parse_expression
@@ -429,7 +430,13 @@ def _save_component(graph, chrom_names, component_id, graph_dir):
 
 
 def _save_component_wrapper(tup):
-    return _save_component(*tup)
+    try:
+        return _save_component(*tup)
+    except:
+        common.log('CATCH')
+        fmt_exc = traceback.format_exc()
+        common.log('ERROR:\n{}'.format(fmt_exc))
+        return None
 
 
 def _iterate_components(duplications, tangled_predicate, chrom_names, graph_dir):
@@ -506,6 +513,8 @@ def combine(duplications, tangled_predicate, chrom_names, graph_dir, threads):
         res = pool.imap(_save_component_wrapper, components_iter, chunksize=1)
 
     for dupl_group in res:
+        if dupl_group is None:
+            os._exit(1)
         for dupl in dupl_group:
             yield dupl
 
@@ -530,12 +539,12 @@ def main(prog_name=None, in_args=None):
     parser = argparse.ArgumentParser(
         description='Convert homology pre-table into homology table.\n'
             'This command combines overlapping homologous regions into longer duplications.',
-        formatter_class=argparse.RawTextHelpFormatter, add_help=False,
+        formatter_class=common.SingleMetavar, add_help=False,
         usage='{} -i <pretable> -f <fasta> -o <table> [arguments]'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
     io_args.add_argument('-i', '--input', metavar='<file>', required=True,
         help='Input indexed bed.gz homology pre-table.')
-    io_args.add_argument('-f', '--fasta-ref', metavar='<file>', required=True,
+    io_args.add_argument('-f', '--fasta-ref', metavar='<file> [<file>]', required=True,
         help='Input reference fasta file.')
     io_args.add_argument('-o', '--output', metavar='<file>', required=True,
         help='Output table bed[.gz] file with homology table.')
@@ -578,13 +587,12 @@ def main(prog_name=None, in_args=None):
         common.mkdir(args.graph)
 
     tangled_predicate = parse_expression(args.tangled)
-    with pysam.TabixFile(args.input, parser=pysam.asTuple()) as table, \
-            Genome(args.fasta_ref) as genome, \
+    with pysam.TabixFile(args.input, parser=pysam.asTuple()) as table, Genome(args.fasta_ref) as genome, \
             common.open_possible_gzip(args.output, 'w', bgzip=True) as outp:
         pretable.write_header(genome, outp, sys.argv)
         duplications = _duplications_iterator(table, args, genome)
 
-        chrom_names = genome.only_chrom_names()
+        chrom_names = genome.to_chrom_names()
         i = 0
         for dupl in combine(duplications, tangled_predicate, chrom_names, args.graph, args.threads):
             i += 1

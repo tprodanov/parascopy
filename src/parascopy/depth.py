@@ -657,7 +657,7 @@ def main(prog_name, in_args):
     parser = argparse.ArgumentParser(
         description='Calculate read depth and variance in given genomic windows.',
         formatter_class=argparse.RawTextHelpFormatter, add_help=False,
-        usage='{} (-i <bam> [...] | -I <bam-list>) (-g hg19|hg38 | -b <bed>) -f <fasta> -o <dir> [args]'
+        usage='{} (-i <bam> [...] | -I <bam-list>) (-g hg19|hg38 | -b <bed>) -f <fasta> -o <dir> [arguments]'
             .format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
     inp_me = io_args.add_mutually_exclusive_group(required=True)

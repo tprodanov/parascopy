@@ -72,7 +72,7 @@ def main(prog_name=None, in_args=None):
     parser = argparse.ArgumentParser(
         description='View and filter homology table.',
         formatter_class=argparse.RawTextHelpFormatter, add_help=False,
-        usage='{} <table> [-o <table>] [args]'.format(prog_name))
+        usage='{} <table> [-o <table>] [arguments]'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
     io_args.add_argument('input', metavar='<file>',
         help='Input indexed bed.gz homology table.')
