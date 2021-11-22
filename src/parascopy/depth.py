@@ -652,6 +652,14 @@ def _concat_files(bam_wrappers, prefix, out):
         os.remove(filename)
 
 
+def _write_readme(out_dir):
+    with open(os.path.join(out_dir, 'README'), 'w') as out:
+        out.write('Output file "depth.csv" contains background read depth estimation binned according to GC-content.\n')
+        out.write('Output files "windows.bed.gz" and "window_depth.csv.gz" store read depth '
+            'for each window and each sample.\n')
+        out.write('These files are not important for downstream analysis and can be removed.\n')
+
+
 def main(prog_name, in_args):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
@@ -736,7 +744,7 @@ def main(prog_name, in_args):
         bed_data = gzip.decompress(bed_data)
         bed_lines = bed_data.decode().split('\n')
 
-    with open(os.path.join(args.output, 'windows.bed'), 'w') as out:
+    with gzip.open(os.path.join(args.output, 'windows.bed.gz'), 'wt') as out:
         out.write('#chrom\tstart\tend\tgc_content\n')
         windows = _load_windows(bed_lines, genome, out)
     bounds = _summarize_windows(windows, args.tail_windows)
@@ -746,6 +754,7 @@ def main(prog_name, in_args):
     genome.close()
     common.log('{} continuous regions'.format(len(fetch_regions)))
 
+    _write_readme(args.output)
     with open(os.path.join(args.output, 'depth.csv'), 'w') as out_means:
         common.log('Start calculating coverage')
         params = Params.from_args(args, window_size)
@@ -754,7 +763,7 @@ def main(prog_name, in_args):
         prefix = os.path.join(args.output, 'tmp')
         all_files_depth(bam_wrappers, windows, fetch_regions, args.fasta_ref, threads, params, prefix, out_means)
 
-    with open(os.path.join(args.output, 'window_depth.csv'), 'wb') as out_depth:
+    with gzip.open(os.path.join(args.output, 'window_depth.csv.gz'), 'wb') as out_depth:
         common.log('Merging output files')
         _concat_files(bam_wrappers, prefix, out_depth)
 

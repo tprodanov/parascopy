@@ -126,10 +126,6 @@ class Entry:
     def regions2(self):
         return self._regions2
 
-    @property
-    def info(self):
-        return self._info
-
     def to_str(self, genome):
         res = '{}\t{}\t'.format(self._ty, self._region1.to_str(genome))
         if self._regions2:
@@ -171,7 +167,7 @@ class Entry:
                     key, value = entry.split('=', 1)
                     if re.match(Entry._float_regex, value):
                         value = (int if value.isdigit() else float)(value)
-                    self.info[key] = value
+                    self._info[key] = value
             return self
 
         except (IndexError, ValueError):
@@ -180,50 +176,60 @@ class Entry:
     def __lt__(self, other):
         return (self._region1.start, self._ty.value) < (other._region1.start, other._ty.value)
 
+    def __getitem__(self, keys):
+        if isinstance(keys, str):
+            keys = (keys,)
+        for key in keys:
+            assert isinstance(key, str)
+            if key in self._info:
+                return self._info[key]
+        raise KeyError('None of the keys "{}" are in the main entry "{}"'.format('", "'.join(keys), self._info))
+
+    def __setitem__(self, key, val):
+        assert isinstance(key, str)
+        self._info[key] = val
+
+    def info_items(self):
+        return self._info.items()
+
 
 class ModelParams:
     def __init__(self, main_interval, n_samples, is_loaded):
         self.entries = defaultdict(list)
         if main_interval is not None:
             main_entry = Entry(EntryType.Main, main_interval)
-            main_entry.info['name'] = main_interval.name
-            main_entry.info['version'] = __version__
-            main_entry.info['n_samples'] = n_samples
+            main_entry['name'] = main_interval.name
+            main_entry['version'] = __version__
+            main_entry['n_samples'] = n_samples
             self.add_entry(main_entry)
         self._is_loaded = is_loaded
         self._hmm_entries = None
         self._psv_dict = None
 
     def save_args(self, args):
-        info = self.main_entry.info
-        info['max_ref_cn'] = args.max_ref_cn
-        info['agcn_range'] = '{},{}'.format(*args.agcn_range)
-        info['agcn_jump'] = args.agcn_jump
+        main_entry = self.main_entry
+        main_entry['max_ref_cn'] = args.max_ref_cn
+        main_entry['agcn_range'] = '{},{}'.format(*args.agcn_range)
+        main_entry['agcn_jump'] = args.agcn_jump
 
         assert args.reliable_threshold[0] <= args.reliable_threshold[1]
-        info['reliable_threshold'] = '{:.5g},{:.5g}'.format(*args.reliable_threshold)
-        info['pscn_bound'] = '{},{}'.format(*args.pscn_bound)
-        info['transition_prob'] = '{:.5g}'.format(args.transition_prob)
+        main_entry['reliable_threshold'] = '{:.5g},{:.5g}'.format(*args.reliable_threshold)
+        main_entry['pscn_bound'] = '{},{}'.format(*args.pscn_bound)
+        main_entry['transition_prob'] = '{:.5g}'.format(args.transition_prob)
 
     def load_args(self, args):
-        info = self.main_entry.info
-
-        def get(*keys):
-            for key in keys:
-                if key in info:
-                    return info[key]
-            raise KeyError('None of the keys "{}" are in the main entry "{}"'.format('", "'.join(keys), info))
+        main_entry = self.main_entry
 
         args = copy.copy(args)
         args.min_windows = 1
         args.min_samples = None
-        args.agcn_range = tuple(map(int, get('agcn_range', 'copy_num_range').split(',')))
-        args.max_ref_cn = int(get('max_ref_cn', 'max_copy_num'))
-        args.agcn_jump = int(get('agcn_jump', 'copy_num_jump'))
+        args.agcn_range = tuple(map(int, main_entry[('agcn_range', 'copy_num_range')].split(',')))
+        args.max_ref_cn = int(main_entry[('max_ref_cn', 'max_copy_num')])
+        args.agcn_jump = int(main_entry[('agcn_jump', 'copy_num_jump')])
 
-        args.reliable_threshold = tuple(map(float, info['reliable_threshold'].split(',')))
-        args.pscn_bound = tuple(map(int, get('pscn_bound', 'copy_num_bound').split(',')))
-        args.transition_prob = float(info['transition_prob'])
+        args.reliable_threshold = tuple(map(float, main_entry['reliable_threshold'].split(',')))
+        args.pscn_bound = tuple(map(int, main_entry[('pscn_bound', 'copy_num_bound')].split(',')))
+        args.transition_prob = float(main_entry['transition_prob'])
         return args
 
     @property
@@ -236,7 +242,7 @@ class ModelParams:
     def add_duplication(self, ix, dupl):
         regions2 = ((dupl.region2, dupl.strand),)
         entry = Entry(EntryType.Duplication, dupl.region1, regions2)
-        entry.info['ix'] = ix
+        entry['ix'] = ix
         self.add_entry(entry)
 
     def get_duplications(self, table, interval, genome):
@@ -254,7 +260,7 @@ class ModelParams:
                     continue
                 if dupl.strand != strand2 or dupl.region2 != region2:
                     continue
-                ix = int(entry.info['ix'])
+                ix = int(entry['ix'])
                 if len(duplications) <= ix:
                     duplications.extend((None,) * (ix - len(duplications) + 1))
                 duplications[ix] = dupl
@@ -277,22 +283,22 @@ class ModelParams:
         assert not self._is_loaded
         for window in dupl_hierarchy.windows:
             entry = Entry(EntryType.Window, window.region1, window.regions2)
-            entry.info['ix'] = window.ix
-            entry.info['const_region'] = window.const_region_ix
-            entry.info['gc_content'] = '{:.0f}'.format(window.gc_content)
-            entry.info['in_hmm'] = 'T' if window.in_hmm else 'F'
+            entry['ix'] = window.ix
+            entry['const_region'] = window.const_region_ix
+            entry['gc_content'] = '{:.0f}'.format(window.gc_content)
+            entry['in_hmm'] = 'T' if window.in_hmm else 'F'
             self.add_entry(entry)
 
         for const_region in dupl_hierarchy.const_regions:
             entry = Entry(EntryType.ConstRegion, const_region.region1, const_region.regions2)
-            entry.info['ix'] = const_region.ix
-            entry.info['group'] = const_region.group_name or '*'
-            entry.info['skip'] = 'T' if const_region.skip else 'F'
+            entry['ix'] = const_region.ix
+            entry['group'] = const_region.group_name or '*'
+            entry['skip'] = 'T' if const_region.skip else 'F'
             self.add_entry(entry)
 
         for region_group in dupl_hierarchy.region_groups:
             entry = Entry(EntryType.RegionGroup, region_group.region1, region_group.regions2)
-            entry.info['name'] = region_group.name
+            entry['name'] = region_group.name
             self.add_entry(entry)
 
     def check_dupl_hierarchy(self, dupl_hierarchy, genome):
@@ -304,11 +310,11 @@ class ModelParams:
             window = dupl_hierarchy.windows[i]
             dupl_region_mism = entry.dupl_region_mismatch(window, genome)
             if window.ix != i or dupl_region_mism \
-                    or int(entry.info['const_region']) != window.const_region_ix \
-                    or int(entry.info['gc_content']) != window.gc_content:
+                    or int(entry['const_region']) != window.const_region_ix \
+                    or int(entry['gc_content']) != window.gc_content:
                 return 'Window {} {} does not match with corresponding window in the model parameters:\n{}' \
                     .format(window.ix, window.region1.to_str(genome), dupl_region_mism)
-            window.in_hmm = entry.info['in_hmm'] == 'T'
+            window.in_hmm = entry[('in_hmm', 'in_viterbi')] == 'T'
 
         region_entries = self.entries[EntryType.ConstRegion]
         if len(region_entries) != len(dupl_hierarchy.const_regions):
@@ -316,12 +322,12 @@ class ModelParams:
                 len(dupl_hierarchy.const_regions), len(region_enties))
         for i, entry in enumerate(region_entries):
             const_region = dupl_hierarchy.const_regions[i]
-            entry_skip = entry.info['skip'] == 'T'
-            entry_group = entry.info['group']
+            entry_skip = entry['skip'] == 'T'
+            entry_group = entry['group']
             if entry_group == '*':
                 entry_group = None
             dupl_region_mism = entry.dupl_region_mismatch(const_region, genome)
-            if const_region.ix != int(entry.info['ix']) or const_region.group_name != entry_group \
+            if const_region.ix != int(entry['ix']) or const_region.group_name != entry_group \
                     or const_region.skip != entry_skip or dupl_region_mism:
                 return 'Constant region {} {} does not match with corresponding const region in the model parameters:\n{}' \
                     .format(const_region.ix, const_region.region1.to_str(genome), dupl_region_mism)
@@ -332,10 +338,10 @@ class ModelParams:
                 len(dupl_hierarchy.region_groups), len(group_entries))
         for entry in group_entries:
             try:
-                region_group = dupl_hierarchy.get_group(entry.info['name'])
+                region_group = dupl_hierarchy.get_group(entry['name'])
             except KeyError:
                 return 'Model parameters has unmatched group {} {}' \
-                    .format(entry.info['name'], entry.region1.to_str(genome))
+                    .format(entry['name'], entry.region1.to_str(genome))
             dupl_region_mism = entry.dupl_region_mismatch(region_group, genome)
             if dupl_region_mism:
                 return 'Region group {} {} does not match with corresponding region group in the model parameters:\n{}' \
@@ -348,33 +354,33 @@ class ModelParams:
 
         for i, window_ix in enumerate(window_ixs):
             entry = windows_entries[window_ix]
-            assert entry.info['ix'] == window_ix
-            entry.info['mult'] = '{:.8f}'.format(multipliers[i])
+            assert entry['ix'] == window_ix
+            entry['mult'] = '{:.8f}'.format(multipliers[i])
             if i < jumps_len:
-                entry.info['jumps'] = ','.join(map('{:.8f}'.format, -jump_probs[i]))
+                entry['jumps'] = ','.join(map('{:.8f}'.format, -jump_probs[i]))
 
         paths_entry = Entry(EntryType.HmmPaths, region_group.region1)
-        paths_entry.info['group'] = region_group.name
+        paths_entry['group'] = region_group.name
         min_cn = model.get_copy_num(0)
         max_cn = model.get_copy_num(model.n_hidden - 1)
-        paths_entry.info['copy_nums'] = '{},{}'.format(min_cn, max_cn)
-        paths_entry.info['initial'] = ','.join(map('{:.8f}'.format, -model.initial))
+        paths_entry['copy_nums'] = '{},{}'.format(min_cn, max_cn)
+        paths_entry['initial'] = ','.join(map('{:.8f}'.format, -model.initial))
 
         for path in paths.values():
             path_str = ','.join('{}-{}-{}'.format(segment.start_ix, segment.end_ix, segment.cn) for segment in path)
-            paths_entry.info['_' + path.name] = '{:.8f},{}'.format(path.weight, path_str)
+            paths_entry['_' + path.name] = '{:.8f},{}'.format(path.weight, path_str)
         self.add_entry(paths_entry)
 
     def get_hmm_entry(self, group_name):
         if self._hmm_entries is None:
             self._hmm_entries = {}
             for entry in self.entries[EntryType.HmmPaths]:
-                self._hmm_entries[entry.info['group']] = entry
+                self._hmm_entries[entry['group']] = entry
         return self._hmm_entries[group_name]
 
     def get_hmm_paths(self, group_name):
         entry = self.get_hmm_entry(group_name)
-        for key, value in entry.info.items():
+        for key, value in entry.info_items():
             if key.startswith('_'):
                 yield key[1:], value
 
@@ -386,26 +392,26 @@ class ModelParams:
         window_entries = self.entries[EntryType.Window]
         for i, window_ix in enumerate(window_ixs):
             entry = window_entries[window_ix]
-            assert entry.info['ix'] == window_ix
-            multipliers[i] = float(entry.info['mult'])
+            assert entry['ix'] == window_ix
+            multipliers[i] = float(entry['mult'])
             if i < n_observations - 1:
-                jump_probs[i] = -np.array(list(map(float, entry.info['jumps'].split(','))))
+                jump_probs[i] = -np.array(list(map(float, entry['jumps'].split(','))))
         return multipliers, jump_probs
 
     def set_psv_f_values(self, group_extra, genome):
         group_name = group_extra.region_group.name
         for i, psv in enumerate(group_extra.psvs):
             entry = Entry(EntryType.PSV, SinglePosition.from_variant(psv, genome))
-            entry.info['group'] = group_name
+            entry['group'] = group_name
             if group_extra.has_f_values:
                 psv_info = group_extra.psv_infos[i]
-                entry.info['in_em'] = 'T' if psv_info.in_em else 'F'
-                entry.info['info'] = '{:.8f}'.format(psv_info.info_content)
-                entry.info['fval'] = ','.join(map('{:.8f}'.format, group_extra.psv_f_values[i]))
+                entry['in_em'] = 'T' if psv_info.in_em else 'F'
+                entry['info'] = '{:.8f}'.format(psv_info.info_content)
+                entry['fval'] = ','.join(map('{:.8f}'.format, group_extra.psv_f_values[i]))
             else:
-                entry.info['in_em'] = 'F'
-                entry.info['info'] = '*'
-                entry.info['fval'] = '*'
+                entry['in_em'] = 'F'
+                entry['info'] = '*'
+                entry['fval'] = '*'
             self.add_entry(entry)
 
     def write_to(self, out, genome):
@@ -428,9 +434,9 @@ class ModelParams:
 
     def mismatch_warning(self):
         main_entry = self.main_entry
-        version = main_entry.info['version']
+        version = main_entry['version']
         msg = 'Error: Model parameters for region {} ({}) does not match current run ({}).\n'.format(
-            main_entry.info['name'], version, __version__)
+            main_entry['name'], version, __version__)
         msg += '    Possible explanations:\n'
         if version != __version__:
             msg += '        - Version mismatch,\n'
@@ -467,11 +473,11 @@ class ModelParams:
             except (KeyError, IndexError):
                 raise RuntimeError('Cannot find PSV {}:{} in model parameters'
                     .format(psv_info.chrom, psv_info.start + 1))
-            if psv_entry.info['info'] == '*':
+            if psv_entry['info'] == '*':
                 continue
-            psv_info.in_em = psv_entry.info['in_em'] == 'T'
-            psv_info.info_content = float(psv_entry.info['info'])
-            psv_f_values[psv_info.psv_ix] = list(map(float, psv_entry.info['fval'].split(',')))
+            psv_info.in_em = psv_entry['in_em'] == 'T'
+            psv_info.info_content = float(psv_entry['info'])
+            psv_f_values[psv_info.psv_ix] = list(map(float, psv_entry['fval'].split(',')))
 
         if not any(psv_info.in_em for psv_info in psv_infos):
             return None

@@ -147,7 +147,7 @@ def all_gt_counts(n_alleles, ploidy):
 def genotype_likelihoods(ploidy, allele_counts, error_prob=0.001, gt_counts=None):
     """
     Returns two lists of the same size: [gt_counts: tuple of ints], [likelihood: float].
-    Returned likelihoods are not normalized and should be normalized next.
+    Returned likelihoods are normalized.
 
     allele_counts stores counts of reads that cover each allele, and other_count shows number of reads that
     do not correspond to any allele.
@@ -164,6 +164,7 @@ def genotype_likelihoods(ploidy, allele_counts, error_prob=0.001, gt_counts=None
         probs = np.maximum(gt, error_prob * ploidy)
         probs /= sum(probs)
         likelihoods[i] = multinomial.logpmf(allele_counts, total_reads, probs)
+    likelihoods -= logsumexp(likelihoods)
     return gt_counts, likelihoods
 
 
@@ -238,7 +239,6 @@ def _fill_psv_gts(sample_id, sample_cn, psv_infos, psv_counts, psv_start_ix, psv
             continue
         psv_genotypes = precomp_data.psv_genotypes
         _, probs = genotype_likelihoods(sample_cn, counts.allele_counts, gt_counts=psv_genotypes)
-        probs -= logsumexp(probs)
         psv_info.psv_gt_probs[sample_id] = probs
         psv_info.sample_cns[sample_id] = sample_cn
 
@@ -582,11 +582,17 @@ class VariantReadObservations:
         self.psv_observations.append(new_psv_obs)
         return new_psv_obs
 
-    def init_vcf_records(self, genome, vcf_header):
+    def init_vcf_records(self, genome, vcf_headers):
         alleles = self.variant.alleles
         self.new_vcf_records = []
         self.new_vcf_allele_corresp = []
-        for i, pos in enumerate(self.variant_positions):
+
+        for vcf_i, pos_i in itertools.product(range(2), range(len(self.variant_positions))):
+            if vcf_i == 0 and pos_i > 0:
+                continue
+            vcf_header = vcf_headers[vcf_i]
+            pos = self.variant_positions[pos_i]
+
             record = vcf_header.new_record()
             record.chrom = pos.region.chrom_name(genome)
             record.start = pos.region.start
@@ -607,7 +613,7 @@ class VariantReadObservations:
 
             pos2_str = []
             for j, pos2 in enumerate(self.variant_positions):
-                if i == j:
+                if pos_i == j:
                     continue
                 pos2_str.append('{}:{}:{}'.format(pos2.region.chrom_name(genome), pos2.region.start_1,
                     '+' if pos.strand == pos2.strand else '-'))
@@ -619,7 +625,7 @@ class VariantReadObservations:
             self.new_vcf_allele_corresp.append(old_to_new)
 
     def update_vcf_records(self, var_gts, genome):
-        GT_THRESHOLD = np.log(0.55)
+        PHRED_THRESHOLD = 3
 
         n_alleles = len(self.variant.alleles)
         sample_id = var_gts.sample_id
@@ -630,25 +636,62 @@ class VariantReadObservations:
         for i, record in enumerate(self.new_vcf_records):
             old_to_new = self.new_vcf_allele_corresp[i]
             rec_fmt = record.samples[sample_id]
-            rec_fmt['PGT'] = '/'.join(str(old_to_new[allele_ix]) for allele_ix in var_gts.pooled_genotype)
+            pooled_gt, pooled_gt_qual = var_gts.pooled_genotype_quality()
+            if pooled_gt is not None:
+                if i == 0:
+                    rec_fmt['GT'] = tuple(old_to_new[allele_ix] for allele_ix in pooled_gt)
+                    rec_fmt['GQ'] = pooled_gt_qual
+                else:
+                    rec_fmt['PGT'] = '/'.join(str(old_to_new[allele_ix]) for allele_ix in pooled_gt)
+                    rec_fmt['PGQ'] = pooled_gt_qual
+
             rec_fmt['DP'] = int(read_depth)
             curr_allele_counts = [0] * len(record.alleles)
             for j, count in zip(old_to_new, allele_counts):
                 curr_allele_counts[j] = int(count)
             rec_fmt['AD'] = curr_allele_counts
-            if var_gts.filter:
-                rec_fmt['GTfilter'] = var_gts.filter.to_tuple()
+            gt_filter = var_gts.filter
 
-            if var_gts.paralog_genotypes is not None:
-                ext_copy_i = var_gts.var_pos_to_ext_pos[i]
-                best_gt_ix = np.argmax(var_gts.paralog_gt_probs)
-                gt_prob = var_gts.paralog_gt_probs[best_gt_ix]
-                best_gt = var_gts.paralog_genotypes[best_gt_ix]
-                if gt_prob >= GT_THRESHOLD:
-                    rec_fmt['GT'] = tuple(old_to_new[allele_ix] for allele_ix in best_gt.genotype[ext_copy_i])
-                    rec_fmt['GQ'] = int(common.phred_qual(var_gts.paralog_gt_probs, best_gt_ix))
-                    if len(var_gts.ext_pos_to_var_pos[ext_copy_i]) > 1:
-                        rec_fmt['shared_pos2'] = var_gts.var_get_shared_pos2(ext_copy_i, record.info['pos2'], genome)
+            if i == 0:
+                if gt_filter:
+                    rec_fmt['GTfilter'] = gt_filter.to_tuple()
+                continue
+
+            ext_copy_i = var_gts.var_pos_to_ext_pos and var_gts.var_pos_to_ext_pos[i - 1]
+            paralog_gt, paralog_gt_qual = var_gts.paralog_genotype_quality(ext_copy_i)
+            if paralog_gt is not None and paralog_gt_qual >= PHRED_THRESHOLD:
+                out_gt = None
+                # Either paralog-specific CN is known, or there is only one allele present.
+                if len(var_gts.ext_pos_to_var_pos[ext_copy_i]) == 1:
+                    out_gt = tuple(old_to_new[allele_ix] for allele_ix in paralog_gt)
+                elif len(set(paralog_gt)) == 1:
+                    out_gt = (old_to_new[paralog_gt[0]],) * 2
+                    gt_filter = gt_filter.copy()
+                    gt_filter.add(Filter.Unknown_psCN)
+                if out_gt is not None:
+                    rec_fmt['GT'] = out_gt
+                    rec_fmt['GQ'] = paralog_gt_qual
+
+            if gt_filter:
+                rec_fmt['GTfilter'] = gt_filter.to_tuple()
+
+    def write_all_gt_probs(self, var_gts, sample_name, out):
+        variant = var_gts.variant_obs.variant
+        out.write('{}\t{}\t'.format(variant.pos, sample_name))
+
+        if var_gts.paralog_genotypes is None:
+            out.write('*\t')
+        else:
+            out.write(' '.join('{}={:.3g}'.format(paralog_gt.genotype_str, abs(paralog_gt.probability / common.LOG10))
+                for paralog_gt in var_gts.paralog_genotypes))
+            out.write('\t')
+
+        if var_gts.pooled_genotypes is None:
+            out.write('*\n')
+        else:
+            out.write(' '.join('{}={:.3g}'.format(pooled_gt.genotype_str, abs(pooled_gt.probability / common.LOG10))
+                for pooled_gt in var_gts.pooled_genotypes))
+            out.write('\n')
 
     def set_use_samples(self, max_other_obs_frac=0.1, min_read_depth=10):
         n_samples = len(self.observations)
@@ -674,31 +717,33 @@ class VariantReadObservations:
             read_positions[read_hash].add(self.variant, allele_obs)
 
     @staticmethod
-    def create_vcf_header(genome, argv, samples):
-        vcf_header = pysam.VariantHeader()
-        vcf_header.add_line('##command="%s"' % ' '.join(argv))
-        for name, length in zip(genome.chrom_names, genome.chrom_lengths):
-            vcf_header.add_line('##contig=<ID={},length={}>'.format(name, length))
+    def create_vcf_headers(genome, argv, samples):
+        vcf_headers = []
+        for i in range(2):
+            # First pooled, second un-pooled.
+            vcf_header = pysam.VariantHeader()
+            vcf_header.add_line('##command="{}"'.format(' '.join(argv)))
+            for name, length in zip(genome.chrom_names, genome.chrom_lengths):
+                vcf_header.add_line('##contig=<ID={},length={}>'.format(name, length))
 
-        vcf_header.add_line('##INFO=<ID=pos2,Number=.,Type=String,Description="Second positions of the variant. '
-            'Format: chrom:pos:strand">')
-        vcf_header.add_line('##INFO=<ID=overlPSV,Number=1,Type=Character,'
-            'Description="Variants overlaps a PSV. Possible values: T/F">')
-        vcf_header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
-        vcf_header.add_line('##FORMAT=<ID=shared_pos2,Number=.,Type=Integer,'
-            'Description="Genotype (GT) is shared with these variant positions (0-based indices from pos2 field).'
-            'This happens if several positions are indistinguishable in a sample '
-            'and the genotype is calculated jointly for several duplication copies">')
-        vcf_header.add_line('##FORMAT=<ID=GTfilter,Number=1,Type=String,Description="GT filter">')
-        vcf_header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="The Phred-scaled Genotype Quality">')
-        vcf_header.add_line('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">')
-        vcf_header.add_line('##FORMAT=<ID=AD,Number=R,Type=Integer,'
-            'Description="Number of observation for each allele">')
-        vcf_header.add_line('##FORMAT=<ID=PGT,Number=1,Type=String,Description="Pooled Genotype">')
-
-        for sample in samples:
-            vcf_header.add_sample(sample)
-        return vcf_header
+            vcf_header.add_line('##INFO=<ID=pos2,Number=.,Type=String,Description="Second positions of the variant. '
+                'Format: chrom:pos:strand">')
+            vcf_header.add_line('##INFO=<ID=overlPSV,Number=1,Type=Character,'
+                'Description="Variants overlaps a PSV. Possible values: T/F">')
+            vcf_header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
+            vcf_header.add_line('##FORMAT=<ID=GTfilter,Number=.,Type=String,Description="GT filter">')
+            vcf_header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="The Phred-scaled Genotype Quality">')
+            vcf_header.add_line('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">')
+            vcf_header.add_line('##FORMAT=<ID=AD,Number=R,Type=Integer,'
+                'Description="Number of observation for each allele">')
+            if i == 1:
+                vcf_header.add_line('##FORMAT=<ID=PGT,Number=1,Type=String,Description="Pooled Genotype">')
+                vcf_header.add_line('##FORMAT=<ID=PGQ,Number=1,Type=Float,'
+                    'Description="The Phred-scaled Pooled Genotype Quality">')
+            for sample in samples:
+                vcf_header.add_sample(sample)
+            vcf_headers.append(vcf_header)
+        return tuple(vcf_headers)
 
 
 def _next_or_none(iter):
@@ -771,18 +816,34 @@ def add_psv_variants(all_read_allele_obs, psv_records, genome):
     return psv_read_allele_obs
 
 
-def write_vcf_file(output, vcf_header, all_read_allele_obs, genome, tabix):
-    records = []
-    for variant in all_read_allele_obs:
-        records.extend(variant.new_vcf_records)
-    records.sort(key=lambda record: (genome.chrom_id(record.chrom), record.start))
+def vcf_record_key(genome):
+    def inner(record):
+        return genome.chrom_id(record.chrom), record.start
+    return inner
 
-    gzip = output.endswith('.gz')
-    with pysam.VariantFile(output, 'wz' if gzip else 'w', header=vcf_header) as vcf_file:
+
+def open_and_write_vcf(filename, header, records, tabix):
+    gzip = filename.endswith('.gz')
+    with pysam.VariantFile(filename, 'wz' if gzip else 'w', header=header) as vcf_file:
         for record in records:
             vcf_file.write(record)
-    if gzip and tabix != 'none':
-        common.Process([tabix, '-p', 'vcf', output]).finish()
+    if gzip and tabix is not None and tabix != 'none':
+        common.Process([tabix, '-p', 'vcf', filename]).finish()
+
+
+def write_vcf_file(filenames, vcf_headers, all_read_allele_obs, genome, tabix):
+    pooled_records = []
+    records = []
+    for variant in all_read_allele_obs:
+        pooled_records.append(variant.new_vcf_records[0])
+        records.extend(variant.new_vcf_records[1:])
+
+    record_key = vcf_record_key(genome)
+    pooled_records.sort(key=record_key)
+    records.sort(key=record_key)
+
+    open_and_write_vcf(filenames.out_pooled_vcf, vcf_headers[0], pooled_records, tabix)
+    open_and_write_vcf(filenames.out_vcf, vcf_headers[1], records, tabix)
 
 
 class DuplPositionFinder:
@@ -1046,7 +1107,13 @@ class MultiCopyGT:
     ALLELE_MATCH_PROB = 0.99
     ALLELE_ERROR_PROB = 1 - ALLELE_MATCH_PROB
 
-    def __init__(self, gt, pscn):
+    def __init__(self, gt, pscn, pooled_gt=None):
+        if pooled_gt is None:
+            self.pooled_genotype = tuple(sorted(gt))
+        else:
+            assert isinstance(pooled_gt, tuple)
+            self.pooled_genotype = pooled_gt
+
         self.genotype = []
         shift = 0
         for i, cn in enumerate(pscn):
@@ -1076,23 +1143,56 @@ class MultiCopyGT:
 
     @classmethod
     def create_all(cls, pooled_gt, pscn):
+        pooled_gt = tuple(sorted(pooled_gt))
         if len(set(pooled_gt)) == 1:
-            yield MultiCopyGT(pooled_gt, pscn)
+            yield MultiCopyGT(pooled_gt, pscn, pooled_gt)
             return
 
         used_genotypes = set()
         for gt in set(itertools.permutations(pooled_gt)):
-            new = MultiCopyGT(gt, pscn)
+            new = MultiCopyGT(gt, pscn, pooled_gt)
             if new.genotype not in used_genotypes:
                 used_genotypes.add(new.genotype)
                 yield new
 
 
 class VariantGenotypePred:
+    class GtProb:
+        def __init__(self, gt, prob, is_pooled=True):
+            self.genotype = gt
+            if gt is None:
+                self.genotype_str = 'other'
+            elif is_pooled:
+                self.genotype_str = '/'.join(map(str, gt))
+            else:
+                self.genotype_str = str(gt)
+            self.probability = prob
+
+        @property
+        def is_undefined(self):
+            return self.genotype is None
+
+        def __lt__(self, other):
+            return (self.is_undefined, -self.probability).__lt__((other.is_undefined, -other.probability))
+
+        @staticmethod
+        def phred_of_first(all_probs):
+            MAX_PHRED = 10000
+            n = 0 if all_probs is None else len(all_probs)
+            if n == 0:
+                return (None, 0)
+
+            best_gt = all_probs[0].genotype
+            if n == 1:
+                return (best_gt, MAX_PHRED)
+            oth_prob = logsumexp([all_probs[i].probability for i in range(1, n)])
+            phred = min(np.floor(-10 * oth_prob / common.LOG10), MAX_PHRED) if np.isfinite(oth_prob) else MAX_PHRED
+            return (best_gt, phred)
+
+
     def __init__(self, variant_obs):
         self.variant_obs = variant_obs
         self.sample_id = None
-        self.pooled_genotype = None
         self.filter = Filters()
 
         self.cn_estimate = None
@@ -1110,33 +1210,110 @@ class VariantGenotypePred:
         # List of tuples of indices: [(index, ...)], inverse of var_pos_to_ext_pos.
         self.ext_pos_to_var_pos = None
 
+        self.pooled_genotypes = None
         self.paralog_genotypes = None
-        self.paralog_gt_probs = None
 
     def init_genotypes(self, sample_id, sample, cn_profiles):
         self.sample_id = sample_id
-        # TODO: If there is no pooled genotype?
-        self.pooled_genotype = self.variant_obs.variant.samples[sample]['GT']
 
-        if not self.variant_obs.use_samples[sample_id]:
-            self.filter.add(Filter.UnclearObs)
-            return self
-
-        any_cn_estimates = False
         for var_pos in self.variant_obs.variant_positions:
             cn_estimates = list(cn_profiles.cn_estimates(sample_id, var_pos.region))
             if cn_estimates:
-                any_cn_estimates = True
                 self._match_var_pos_to_cn_estimates(cn_estimates)
                 break
-        if not any_cn_estimates:
+        else:
+            # No CN estimates found.
             self.filter.add(Filter.Unknown_agCN)
-            return self
+
+        self._init_pooled_genotypes(sample)
+        if not self.cn_estimate:
+            return
+
+        if not self.variant_obs.use_samples[sample_id]:
+            self.filter.add(Filter.UnclearObs)
+            return
 
         if self.ext_pos_cn is not None:
-            self.paralog_genotypes = list(MultiCopyGT.create_all(self.pooled_genotype, self.ext_pos_cn))
-            self._init_gt_priors()
-        return self
+            self.paralog_genotypes = []
+            for pooled_gt in self.pooled_genotypes:
+                if pooled_gt.is_undefined:
+                    # self.paralog_genotypes.append(VariantGenotypePred.GtProb(None, 0)) # pooled_gt.probability))
+                    continue
+                for paralog_gt in MultiCopyGT.create_all(pooled_gt.genotype, self.ext_pos_cn):
+                    # TODO: Add additional prior based on the paralog genotype.
+                    # self.paralog_genotypes.append(
+                        # VariantGenotypePred.GtProb(paralog_gt, pooled_gt.probability, is_pooled=False))
+                    self.paralog_genotypes.append(
+                        VariantGenotypePred.GtProb(paralog_gt, 0, is_pooled=False))
+
+    def _init_pooled_genotypes(self, sample):
+        sample_cn = 2 if self.cn_estimate is None else self.cn_estimate.pred_cn
+        read_counts = self.variant_obs.variant.samples[sample]['AD']
+        pooled_gt_counts, pooled_gt_probs = genotype_likelihoods(sample_cn, read_counts)
+
+        n_copies_range = np.arange(len(pooled_gt_counts[0]))
+        # Ignore pooled genotypes if they have probability < 10^-5.
+        THRESHOLD_PROB = -5 * common.LOG10
+        self.pooled_genotypes = []
+
+        ixs = np.argsort(-pooled_gt_probs)
+        for j, i in enumerate(ixs):
+            pooled_gt_prob = pooled_gt_probs[i]
+            if pooled_gt_prob < THRESHOLD_PROB and self.pooled_genotypes:
+                other_prob = logsumexp(pooled_gt_probs[ixs[j:]])
+                self.pooled_genotypes.append(VariantGenotypePred.GtProb(None, other_prob))
+                break
+
+            # Convert GT counts into regular genotype (for example 2,2 -> 0/0/1/1).
+            pooled_gt = np.repeat(n_copies_range, pooled_gt_counts[i])
+            self.pooled_genotypes.append(VariantGenotypePred.GtProb(pooled_gt, pooled_gt_prob))
+
+    def _update_pooled_genotypes(self):
+        if (self.paralog_genotypes is None or len(self.pooled_genotypes) == 1 or
+                # There is only one pooled genotype (last genotype is "*").
+                (len(self.pooled_genotypes) == 2 and self.pooled_genotypes[1].is_undefined)):
+            return
+
+        pooled_gt_dict = defaultdict(list)
+        for paralog_gt in self.paralog_genotypes:
+            key = paralog_gt.genotype and paralog_gt.genotype.pooled_genotype
+            pooled_gt_dict[key].append(paralog_gt.probability)
+
+        self.pooled_genotypes = []
+        for pooled_gt, probs in pooled_gt_dict.items():
+            self.pooled_genotypes.append(VariantGenotypePred.GtProb(pooled_gt, logsumexp(probs)))
+        self.pooled_genotypes.sort()
+
+    def paralog_genotype_quality(self, ext_copy_i):
+        """
+        Returns best paralog genotype for the extended copy `i` and its quality.
+        """
+        if self.paralog_genotypes is None or ext_copy_i is None:
+            return None, 0
+
+        gt_dict = defaultdict(list)
+        oth_prob = -np.inf
+        for paralog_gt in self.paralog_genotypes:
+            if paralog_gt.is_undefined:
+                oth_prob = paralog_gt.probability
+            else:
+                gt_dict[paralog_gt.genotype.genotype[ext_copy_i]].append(paralog_gt.probability)
+
+        genotypes = []
+        genotype_probs = []
+        for gt, probs in gt_dict.items():
+            genotypes.append(gt)
+            genotype_probs.append(logsumexp(probs))
+        best_i = np.argmax(genotype_probs)
+        genotype_probs.append(oth_prob)
+        qual = common.phred_qual(genotype_probs, best_i)
+        return genotypes[best_i], np.floor(qual)
+
+    def pooled_genotype_quality(self):
+        """
+        Returns best paralog genotype and its quality.
+        """
+        return VariantGenotypePred.GtProb.phred_of_first(self.pooled_genotypes)
 
     def _match_var_pos_to_cn_estimates(self, cn_estimates):
         if len(cn_estimates) > 1:
@@ -1144,7 +1321,6 @@ class VariantGenotypePred:
             est_a = cn_estimates[0]
             est_b = cn_estimates[1]
             if est_a.pred_cn != est_b.pred_cn or est_a.paralog_cn != est_b.paralog_cn:
-                print('    SetB unknown agCN')
                 self.filter.add(Filter.Unknown_agCN)
                 return
         self.cn_estimate = est = cn_estimates[0]
@@ -1152,7 +1328,6 @@ class VariantGenotypePred:
         # TODO: What to do with qualities and agCN/psCN filters?
         agcn = est.pred_cn
         if agcn is None:
-            print('    SetC unknown agCN')
             self.filter.add(Filter.Unknown_agCN)
             return
 
@@ -1194,10 +1369,6 @@ class VariantGenotypePred:
                     break
         self.ext_pos_to_var_pos = tuple(map(tuple, self.ext_pos_to_var_pos))
 
-    def _init_gt_priors(self):
-        # TODO: Make more complicated.
-        self.paralog_gt_probs = np.zeros(len(self.paralog_genotypes))
-
     def var_get_shared_pos2(self, ext_copy_i, pos2_str, genome):
         assert ext_copy_i == 0
         ext_variant_regions = tuple(self.variant_obs.variant_positions[i].region
@@ -1216,11 +1387,10 @@ class VariantGenotypePred:
         assert len(res) == len(ext_variant_regions) - 1
         return tuple(res)
 
-    def _add_read(self, curr_read_positions, allele_obs, n_copies, log_pscn_frac):
+    def _add_read(self, curr_read_positions, allele_obs, n_copies, probs_update, log_pscn_frac):
         read_pos, read_pos_probs = curr_read_positions.get_mate_pos_probs(allele_obs.is_first_mate)
         if not read_pos:
             return
-
         k = 0
         n_read_pos = len(read_pos)
         ext_read_pos_probs = np.full(n_copies, -np.inf)
@@ -1233,28 +1403,34 @@ class VariantGenotypePred:
                     break
         ext_read_pos_probs += log_pscn_frac
         ext_read_pos_probs -= logsumexp(ext_read_pos_probs)
-        # print('        Initial  read pos probs:', read_pos_probs)
-        # print('        Extended read pos probs:', ext_read_pos_probs)
 
         read_allele = allele_obs.allele_ix
-        gt_probs = np.zeros(len(self.paralog_genotypes))
-        for i, gt in enumerate(self.paralog_genotypes):
-            gt_probs[i] = gt.calc_read_obs_prob(ext_read_pos_probs, read_allele)
-        gt_probs -= logsumexp(gt_probs)
-        # print('        Update genotype probabilities by {}'.format(gt_probs))
-        self.paralog_gt_probs += gt_probs
+        for i in range(len(probs_update)):
+            probs_update[i] += self.paralog_genotypes[i].genotype.calc_read_obs_prob(ext_read_pos_probs, read_allele)
+        probs_update -= logsumexp(probs_update)
 
     def add_reads(self, read_positions):
-        if self.paralog_genotypes is None or len(self.paralog_genotypes) < 2:
+        if self.paralog_genotypes is None:
+            return
+        n_defined = len(self.paralog_genotypes) - int(self.paralog_genotypes[-1].is_undefined)
+        if n_defined < 2:
             return
 
         n_alleles = len(self.variant_obs.variant.alleles)
         for gt in self.paralog_genotypes:
-            gt.precompute_read_obs_probs(n_alleles)
+            if not gt.is_undefined:
+                gt.genotype.precompute_read_obs_probs(n_alleles)
 
         n_copies = len(self.ext_pos_cn)
         log_pscn_frac = np.log(self.ext_pos_cn) - np.log(sum(self.ext_pos_cn))
+        probs_update = np.zeros(n_defined)
+
         for read_hash, allele_obs in self.variant_obs.observations[self.sample_id].items():
-            # print('    Add read {}, allele obs {}'.format(read_hash, allele_obs))
-            self._add_read(read_positions[read_hash], allele_obs, n_copies, log_pscn_frac)
-        self.paralog_gt_probs -= logsumexp(self.paralog_gt_probs)
+            self._add_read(read_positions[read_hash], allele_obs, n_copies, probs_update, log_pscn_frac)
+        for i, prob in enumerate(probs_update):
+            self.paralog_genotypes[i].probability += prob
+        normalization = logsumexp([gt.probability for gt in self.paralog_genotypes])
+        for gt in self.paralog_genotypes:
+            gt.probability -= normalization
+        self.paralog_genotypes.sort()
+        self._update_pooled_genotypes()

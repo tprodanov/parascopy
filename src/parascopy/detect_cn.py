@@ -707,7 +707,7 @@ def get_regions(args, genome, load_models):
     regions = []
     for model_params in loaded_models:
         main_entry = model_params.main_entry
-        name = main_entry.info['name']
+        name = main_entry['name']
         if name in model_names:
             raise ValueError('Provided several models with the same name ({})'.format(name))
         regions.append(NamedInterval.from_region(main_entry.region1, genome, name))

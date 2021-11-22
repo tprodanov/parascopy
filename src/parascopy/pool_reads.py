@@ -286,7 +286,7 @@ class BamWrapper:
 
             if not self._read_groups:
                 common.log('ERROR: Input file {} has no read groups in the header.'.format(self._filename))
-                common.log('Please specify sample name in "-I input-list.txt"')
+                common.log('Please specify sample name as "-i filename::sample" or in "-I input-list.txt"')
                 exit(1)
 
     @property

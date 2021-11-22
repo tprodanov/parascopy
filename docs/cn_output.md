@@ -13,7 +13,7 @@ Table of contents
 Copy number profiles
 --------------------
 
-Aggregate copy number (agCN) and paralog-specific copy number (psCN) are written in `res.samples.bed.gz` file.
+Aggregate copy number (agCN) and paralog-specific copy number (psCN) are written in the `res.samples.bed.gz` file.
 The file is sorted by genomic position and compatable with a BED file format,
 you can read it using `zcat <filename>` or extract entries using `tabix <filename> chr:start-end`.
 

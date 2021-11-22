@@ -767,13 +767,13 @@ def _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_p
     n_observations, n_samples = depth_matrix.shape
     ref_copy_num = windows[0].cn
 
-    joint_entry = model_params.get_hmm_entry(group_name)
-    min_cn, max_cn = map(int, joint_entry.info['copy_nums'].split(','))
+    input_hmm_entry = model_params.get_hmm_entry(group_name)
+    min_cn, max_cn = map(int, input_hmm_entry['copy_nums'].split(','))
     left_states = ref_copy_num - min_cn
     right_states = max_cn - ref_copy_num
     model = CopyNumHmm(n_samples, ref_copy_num, left_states, right_states, n_observations, agcn_jump)
 
-    initial = -np.array(list(map(float, joint_entry.info['initial'].split(','))))
+    initial = -np.array(list(map(float, input_hmm_entry['initial'].split(','))))
     initial -= logsumexp(initial)
     model.set_initial(initial)
 

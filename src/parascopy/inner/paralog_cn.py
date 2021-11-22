@@ -918,10 +918,16 @@ class Filters:
         return tuple(map(str, self.filters))
 
     def __len__(self):
-        return len(self.filters)
+        return 0 if self.filters is None else len(self.filters)
 
     def __bool__(self):
         return bool(self.filters)
+
+    def copy(self):
+        res = Filters()
+        if self.filters:
+            res.filters = self.filters.copy()
+        return res
 
 
 class ResultEntry:
