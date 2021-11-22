@@ -138,47 +138,7 @@ Compatible reference genomes can be dowloaded from
 Test dataset
 ------------
 
-First, download the precomputed homology table and model parameters for the `hg38` version of the human genome.
-For a single-sample analysis, download a subsampled
-[HG00113 human genome (360 Mb)](https://dl.dropboxusercontent.com/s/46tt30brotjml0y/HG00113.cram).
-We will assume that the reference genome, homology tables and precomputed models are located in the `data` directory.
-
-First, you need to calculate background read depth, this step will take 2-5 minutes:
-```bash
-samtools index HG00113.cram
-parascopy depth -i HG00113.cram \   # Input cram file
-    -f data/hg38.fa \               # Reference genome (indexed fasta)
-    -g hg38 \                       # Reference genome version
-    -o depth_HG00113                # Output directory
-```
-Next, we calculate copy number profiles for a single sample using precomputed model parameters.
-Depending on the number of threads, this step will take 10-40 minutes.
-Adding `--regions-subset SMN1` will reduce running time to under a minute.
-```bash
-parascopy cn-using data/models_v1.2.5/EUR   # Precomputed model parameters
-    -i HG00113.cram \                       # Input cram file
-    -f data/hg38.fa \                       # Reference genome
-    -t data/homology_table/hg38.bed.gz \    # Homology table
-    -d depth_HG00113 \                      # Background read depth
-    -o parascopy_HG00113                    # Output directory
-    # -@ 10 \                               # Optional: number of threads
-    # --regions-subset SMN1                 # Optional: analyze only SMN1/2 locus
-```
-You can find output file description [here](#output-files).
-
-For multi-sample analysis, download alignment files for
-[503 European samples (195 Mb)](https://dl.dropboxusercontent.com/s/o4ntonnxhs780ui/GBA.tar.gz).
-Background read depth for these samples is located in `GBA/1kgp_depth.csv.gz`.
-Calculating copy number profiles for 503 samples and a single locus (GBA) will take 25-30 minutes using a single core.
-```bash
-tar xf GBA.tar.gz
-parascopy cn -I GBA/input.list \            # List of input .cram files
-    -f data/hg38.fa \                       # Reference genome
-    -t data/homology_table/hg38.bed.gz \    # Homology table
-    -d GBA/1kgp_depth.csv.gz \              # Background read depth
-    -r chr1:155231479-155244699::GBA \      # Region "chrom:start-end[::name]"
-    -o parascopy_GBA                        # Output directory
-```
+You can find test pipeline and datasets [here](docs/test_pipeline.sh).
 
 Known issues
 ------------
