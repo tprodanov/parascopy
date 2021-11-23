@@ -1,5 +1,6 @@
-[![Install with bioconda](https://img.shields.io/conda/v/bioconda/parascopy.svg?label=Install%20with%20conda&color=blueviolet&style=flat-square)](https://anaconda.org/bioconda/parascopy)
-[![Updated](https://anaconda.org/bioconda/parascopy/badges/latest_release_date.svg?style=flat-square)](https://anaconda.org/bioconda/parascopy)
+[![GitHub](https://img.shields.io/github/v/tag/tprodanov/parascopy.svg?label=GitHub&color=blueviolet&style=flat-square)](https://github.com/tprodanov/parascopy/releases)
+[![Bioconda](https://img.shields.io/conda/v/bioconda/parascopy.svg?label=Bioconda&color=blue&style=flat-square)](https://anaconda.org/bioconda/parascopy)
+[![Last updated](https://anaconda.org/bioconda/parascopy/badges/latest_release_date.svg?label=Last%20updated&color=blue&style=flat-square)](https://anaconda.org/bioconda/parascopy)
 
 Parascopy
 ---------
