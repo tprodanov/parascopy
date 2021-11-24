@@ -148,11 +148,17 @@ For single-sample analysis, we subsampled HG00113 human genome, which can downlo
 Please, index the cram file using `samtools index HG00113.cram`.
 
 We start by calculating background read depth, which should take 2-5 minutes:
-https://github.com/tprodanov/parascopy/blob/25c10ba81302da8071c3007f066f6002d0716825/docs/test_pipeline.sh#L27
+```bash
+parascopy depth -i HG00113.cram -f data/hg38.fa -g hg38 -o depth_HG00113
+```
 Next, we calculate copy number profiles for 167 duplicated loci using precomputed model parameters
 obtained using 503 European samples.
 This step takes 10-40 minutes depending on the number of threads (controlled by `-@ N`).
-https://github.com/tprodanov/parascopy/blob/25c10ba81302da8071c3007f066f6002d0716825/docs/test_pipeline.sh#L31-L33
+```bash
+parascopy cn-using data/models_v1.2.5/EUR \
+    -i HG00113.cram -f data/hg38.fa -t data/homology_table/hg38.bed.gz \
+    -d depth_HG00113 -o parascopy_HG00113
+```
 You can analyze a subset of loci by specifying `data/models_v1.2.5/EUR/<locus>.gz`,
 for example analysis of the SMN1 locus should take less than a minute.
 
@@ -161,7 +167,11 @@ can be downloaded [here (195 Mb)](https://dl.dropboxusercontent.com/s/o4ntonnxhs
 (extract using `tar xf GBA.tar.gz`).
 Background read depth is already calculated and is located in `GBA/1kgp_depth.csv.gz`.
 Calculating copy number profiles for the GBA/GBAP1 locus should take around 25-30 minutes using a single core.
-https://github.com/tprodanov/parascopy/blob/25c10ba81302da8071c3007f066f6002d0716825/docs/test_pipeline.sh#L42-L44
+```bash
+parascopy cn -I GBA/input.list  -f data/hg38.fa \
+    -t data/homology_table/hg38.bed.gz -d GBA/1kgp_depth.csv.gz \
+    -r chr1:155231479-155244699::GBA -o parascopy_GBA
+```
 Here, the region is supplied using the `-r chr:start-end[::name]` format,
 alternatively you can supply regions in a BED file using the `-R` argument (optional: fourth column with region names).
 
