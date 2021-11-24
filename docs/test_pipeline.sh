@@ -1,7 +1,7 @@
 #!/bin/bash
 
-mkdir -p parascopy/data
-cd parascopy/data
+mkdir -p parascopy_test/data
+cd parascopy_test/data
 
 echo -e "\n\nDownloading homology tables\n\n"
 wget -c https://dl.dropboxusercontent.com/s/okzeedb6gze6zzs/homology_table_hg38.tar
@@ -32,11 +32,10 @@ parascopy cn-using data/models_v1.2.5/EUR \
     -i HG00113.cram -f data/hg38.fa -t data/homology_table/hg38.bed.gz \
     -d depth_HG00113 -o parascopy_HG00113
 # Optionally: specify number of threads with -@ command.
-# You can find output file descriptions here: https://github.com/tprodanov/parascopy/blob/main/docs/cn_output.md
 
-echo =e "\n\nDownloading multi-sample data (195 Mb)\n\n"
+echo -e "\n\nDownloading multi-sample data (195 Mb)\n\n"
 wget -c https://dl.dropboxusercontent.com/s/o4ntonnxhs780ui/GBA.tar.gz
-tar xvf GBA.tar.gz
+tar xf GBA.tar.gz
 
 # Takes 25-30 minutes.
 echo -e "\n\nCalculating copy number profiles for multiple samples\n\n"
