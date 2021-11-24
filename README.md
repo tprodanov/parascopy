@@ -139,7 +139,34 @@ Compatible reference genomes can be dowloaded from
 Test dataset
 ------------
 
-You can find test pipeline and datasets [here](docs/test_pipeline.sh).
+You can find the full test pipeline [here](docs/test_pipeline.sh).
+Alternatively, you can follow step-by-step instructions below:
+
+First, place reference human genome (hg38), precomputed homology tables and model parameters in `data` directory.
+For single-sample analysis, we subsampled HG00113 human genome, which can downloaded
+[here (360 Mb)](https://dl.dropboxusercontent.com/s/46tt30brotjml0y/HG00113.cram).
+Please, index the cram file using `samtools index HG00113.cram`.
+
+We start by calculating background read depth, which should take 2-5 minutes:
+https://github.com/tprodanov/parascopy/blob/25c10ba81302da8071c3007f066f6002d0716825/docs/test_pipeline.sh#L27
+Next, we calculate copy number profiles for 167 duplicated loci using precomputed model parameters
+obtained using 503 European samples.
+This step takes 10-40 minutes depending on the number of threads (controlled by `-@ N`).
+https://github.com/tprodanov/parascopy/blob/25c10ba81302da8071c3007f066f6002d0716825/docs/test_pipeline.sh#L31-L33
+You can analyze a subset of loci by specifying `data/models_v1.2.5/EUR/<locus>.gz`,
+for example analysis of the SMN1 locus should take less than a minute.
+
+For multi-sample analysis, we extracted reads aligned to the GBA/GBAP1 locus for 503 European samples,
+can be downloaded [here (195 Mb)](https://dl.dropboxusercontent.com/s/o4ntonnxhs780ui/GBA.tar.gz)
+(extract using `tar xf GBA.tar.gz`).
+Background read depth is already calculated and is located in `GBA/1kgp_depth.csv.gz`.
+Calculating copy number profiles for the GBA/GBAP1 locus should take around 25-30 minutes using a single core.
+https://github.com/tprodanov/parascopy/blob/25c10ba81302da8071c3007f066f6002d0716825/docs/test_pipeline.sh#L42-L44
+Here, the region is supplied using the `-r chr:start-end[::name]` format,
+alternatively you can supply regions in a BED file using the `-R` argument (optional: fourth column with region names).
+
+Sample output can be found [here (251 Mb)](https://dl.dropboxusercontent.com/s/ddkh3mflezapvqz/test_output.tar.gz),
+output files description can be found [here](https://github.com/tprodanov/parascopy/blob/main/docs/cn_output.md).
 
 Known issues
 ------------
