@@ -298,6 +298,25 @@ class Params:
         self.loess_frac = args.loess_frac
         return self
 
+    def equals(self, other):
+        if self.window_size != other.window_size:
+            return False
+        if self.low_mapq_ratio != other.low_mapq_ratio:
+            return False
+        if self.clipped_ratio != other.clipped_ratio:
+            return False
+        if self.unpaired_ratio != other.unpaired_ratio:
+            return False
+        if self.neighbours != other.neighbours:
+            return False
+        if self.neighbours_dist != other.neighbours_dist:
+            return False
+        if self.loess_frac != other.loess_frac:
+            return False
+        if self.gc_bounds != other.gc_bounds:
+            return False
+        return True
+
 
 def _filter_windows(windows, params, depth1, depth2, keep_window):
     n_windows = len(depth1)
@@ -553,7 +572,7 @@ class Depth:
                     elif 'neighbour' in key:
                         self._params.neighbours = int(value)
                     elif 'GC-content range' in key:
-                        m = re.search(r'\[(\d+)[, \t]*(\d+)\]', value)
+                        m = re.search(r'\[(\d+)[, \t]+(\d+)\]', value)
                         self._params.gc_bounds = (int(m.group(1)), int(m.group(2)) + 1)
 
             if self._params.window_size is None:
@@ -582,17 +601,43 @@ class Depth:
                 n = float(row['nbinom_n'])
                 p = float(row['nbinom_p'])
                 if (np.isnan(n) or np.isnan(p)) and self.gc_content_defined(gc_content):
-                    common.log('ERROR: Some samples are missing depth values (for example sample {} and GC content {})'
+                    raise RuntimeError('ERROR: Sample {} is missing read depth parameters (see GC-content {})'
                         .format(row['sample'], gc_content))
-                    exit(1)
                 self._nbinom_params[sample_id, gc_content] = (n, p)
 
     @classmethod
-    def from_nbinom_params(cls, nbinom_params, params):
-        self = cls.__new__(cls)
-        self._nbinom_params = nbinom_params
-        self._params = params
-        return self
+    def from_filenames(cls, filenames, samples, *args, **kwargs):
+        depth = None
+        has_samples = None
+
+        for filename in filenames:
+            curr_depth = Depth(filename, samples, *args, **kwargs)
+            curr_has_samples = ~np.any(np.isnan(curr_depth._nbinom_params), axis=(1, 2))
+            assert len(samples) == len(curr_has_samples)
+
+            if depth is None:
+                depth = curr_depth
+                has_samples = curr_has_samples
+                continue
+
+            if not depth._params.equals(curr_depth._params):
+                raise RuntimeError(
+                    'Cannot merge background read depth from "{}" and "{}": parameters do not match.'
+                    .format(filenames[0], filename))
+
+            for sample_id in np.where(curr_has_samples)[0]:
+                if has_samples[sample_id]:
+                    raise RuntimeError('Cannot load background read depth: sample {} appears twice.'
+                        .format(samples[sample_id]))
+                depth._nbinom_params[sample_id] = curr_depth._nbinom_params[sample_id]
+                has_samples[sample_id] = True
+
+        gc_bounds = slice(depth._params.gc_bounds[0], depth._params.gc_bounds[1])
+        for sample_id, sample in enumerate(samples):
+            if np.any(np.isnan(depth._nbinom_params[sample_id, gc_bounds, :])):
+                raise RuntimeError('Cannot load background read depth: Sample {} is missing some/all values.'
+                    .format(sample))
+        return depth
 
     def at(self, sample_id, gc_content):
         return self._nbinom_params[sample_id, gc_content, :]

@@ -736,7 +736,7 @@ def filter_regions(regions, loaded_models, regions_subset):
 def parse_args(prog_name, in_args, is_new):
     assert prog_name is not None
     usage = ('{prog} {model}(-i <bam> [...] | -I <bam-list>) -t <table> -f <fasta> '
-        '{regions}-d <bg-depth> -o <dir> [arguments]').format(prog=prog_name, model='' if is_new else '<model> ',
+        '{regions}-d <bg-depth> [...] -o <dir> [arguments]').format(prog=prog_name, model='' if is_new else '<model> ',
         regions='(-r <region> [...] | -R <bed>) ' if is_new else '')
 
     DEFAULT_PSCN_BOUND = (8, 500)
@@ -768,9 +768,9 @@ def parse_args(prog_name, in_args, is_new):
         help='Input indexed bed table with information about segmental duplications.')
     io_args.add_argument('-f', '--fasta-ref', metavar='<file>', required=True,
         help='Input reference fasta file.')
-    io_args.add_argument('-d', '--depth', metavar='<file>', required=True,
-        help='Input file / directory with background read depth.\n'
-        'Should be created using "parascopy depth".')
+    io_args.add_argument('-d', '--depth', metavar='<file> [<file> ...]', required=True, nargs='+',
+        help='Input files / directories with background read depth.\n'
+            'Should be created using "parascopy depth".')
     io_args.add_argument('-o', '--output', metavar='<dir>', required=True,
         help='Output directory.')
 
@@ -900,9 +900,9 @@ def main(prog_name=None, in_args=None, is_new=None):
 
     samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
     if loaded_models:
-        bg_depth = depth_.Depth(args.depth, samples)
+        bg_depth = depth_.Depth.from_filenames(args.depth, samples)
     else:
-        bg_depth = depth_.Depth(args.depth, samples, window_filtering_mult=args.window_filtering)
+        bg_depth = depth_.Depth.from_filenames(args.depth, samples, window_filtering_mult=args.window_filtering)
         common.log(bg_depth.describe_params() + '    ============')
 
     run(regions, data, samples, bg_depth, loaded_models)
