@@ -312,6 +312,32 @@ def _update_vcf_header(vcf_header, samples):
         vcf_header.add_sample(sample)
 
 
+def _validate_read_groups(pooled_bam, read_groups_dict, samples):
+    pooled_read_groups = bam_file_.get_read_groups(pooled_bam)
+    if len(pooled_read_groups) != len(read_groups_dict):
+        common.log('WARN: Number of read groups does not match: {} in pooled BAM, {} expected.'.format(
+            len(pooled_read_groups), len(read_groups_dict)))
+
+    samples_present = np.zeros(len(samples), dtype=np.bool)
+    for rg, sample in pooled_read_groups:
+        if rg not in read_groups_dict:
+            common.log('ERROR: Unknown pooled read group {} (sample {}). Perhaps the set of input files has changed?'
+                .format(rg, sample))
+            exit(1)
+
+        exp_sample = samples[read_groups_dict[rg]]
+        if sample != exp_sample:
+            common.log(('ERROR: Pooled read group {} is associated with two different samples ({} and {}). '
+                'Perhaps the set of input files has changed?').format(rg, sample, exp_sample))
+            exit(1)
+        samples_present[samples.id(sample)] = True
+
+    if np.any(~samples_present):
+        ixs = np.where(~samples_present)[0]
+        common.log('WARN: {} samples are present in the input files, but not in the pooled BAM file. For example: {}'
+            .format(len(ixs), samples[ixs[0]]))
+
+
 def analyze_region(interval, data, samples, bg_depth, model_params):
     subdir = os.path.join(data.args.output, interval.os_name)
     duplications = []
@@ -404,6 +430,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
             for read_group, sample in bam_wrapper.read_groups().values():
                 read_groups_dict[read_group] = samples.id(sample)
         with pysam.AlignmentFile(pooled_bam_path, require_index=True) as bam_file:
+            _validate_read_groups(bam_file, read_groups_dict, samples)
             time_log.log('Calculating aggregate read depth')
             common.log('[{}] Calculating aggregate read depth'.format(interval.name))
             window_counts, psv_observations = _calculate_pooled_depth(bam_file, samples, bg_depth, read_groups_dict,
@@ -900,11 +927,10 @@ def main(prog_name=None, in_args=None, is_new=None):
     common.mkdir_clear(os.path.join(directory, 'model'), args.rerun == 'full')
     regions, loaded_models = filter_regions(regions, loaded_models, args.regions_subset)
 
-    bam_wrappers = pool_reads.load_bam_files(args.input, args.input_list, data.genome, allow_unnamed=False)
+    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, data.genome)
     data.set_bam_wrappers(bam_wrappers)
     depth_.check_duplicated_samples(bam_wrappers)
 
-    samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
     if loaded_models:
         bg_depth = depth_.Depth.from_filenames(args.depth, samples)
     else:

@@ -67,8 +67,7 @@ class Samples:
     def from_bam_wrappers(cls, bam_wrappers):
         samples = set()
         for bam_wrapper in bam_wrappers:
-            for _, sample in bam_wrapper.read_groups().values():
-                samples.add(sample)
+            samples.update(bam_wrapper.present_samples())
         return cls(samples)
 
     def __contains__(self, sample_name):

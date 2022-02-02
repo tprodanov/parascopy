@@ -208,9 +208,9 @@ def pool_reads_inner(bam_wrappers, out_path, interval, duplications, genome, wei
     out_header = _create_header(genome, interval.chrom_id, bam_wrappers, max_mate_dist)
     tmp_path = out_path + '.tmp'
     with pysam.AlignmentFile(tmp_path, 'wb', header=out_header) as tmp_bam:
-        for bam_wrapper in bam_wrappers:
+        for bam_index, bam_wrapper in enumerate(bam_wrappers, 1):
             if verbose:
-                common.log('    Extracting reads from {:3d}: {}'.format(bam_wrapper.index + 1, bam_wrapper.filename))
+                common.log('    Extracting reads from {:3d}: {}'.format(bam_index, bam_wrapper.filename))
             read_positions = defaultdict(_ReadPositions)
 
             read_groups = bam_wrapper.read_groups()
@@ -261,37 +261,31 @@ def pool_reads(bam_wrappers, out_path, interval, table, genome, args):
 
 
 class BamWrapper:
-    def __init__(self, index, filename, sample, genome, allow_unnamed=False):
-        self._index = index
+    def __init__(self, filename, sample, genome):
         self._filename = filename
+        self._input_sample = sample
+        with self.open_bam_file(genome) as bam_file:
+            self._old_read_groups = bam_file_.get_read_groups(bam_file)
+        self._read_groups = None
 
+    def init_new_read_groups(self, samples):
         # Dictionary old_read_group -> (new_read_group, sample_name).
         self._read_groups = {}
-        with self.open_bam_file(genome) as bam_file:
-            old_read_groups = bam_file_.get_read_groups(bam_file)
 
-            if sample is not None:
-                # Associate reads without read_group with sample from the input file.
-                self._read_groups[None] = ('__{}'.format(self._index), sample)
-            elif allow_unnamed:
-                # Otherwise, use Unnamed-X for all reads without read group.
-                unnamed_sample = 'Unnamed-{}'.format(self._index + 1)
-                self._read_groups[None] = ('__{}'.format(self._index), unnamed_sample)
+        if self._input_sample is not None:
+            # Associate reads without read_group with sample from the input file.
+            self._read_groups[None] = ('__{}'.format(samples.id(self._input_sample)), self._input_sample)
 
-            for old_read_group, old_sample in old_read_groups:
-                new_read_group = '{}-{}'.format(old_read_group, self._index)
-                # If BAM file is associated with sample name, all reads should have it. Otherwise, old sample name is kept.
-                new_sample = sample or old_sample
-                self._read_groups[old_read_group] = (new_read_group, new_sample)
+        for old_read_group, old_sample in self._old_read_groups:
+            # If BAM file is associated with sample name, all reads should have it. Otherwise, old sample name is kept.
+            new_sample = self._input_sample or old_sample
+            new_read_group = '{}-{}'.format(old_read_group, samples.id(new_sample))
+            self._read_groups[old_read_group] = (new_read_group, new_sample)
 
-            if not self._read_groups:
-                common.log('ERROR: Input file {} has no read groups in the header.'.format(self._filename))
-                common.log('Please specify sample name as "-i filename::sample" or in "-I input-list.txt"')
-                exit(1)
-
-    @property
-    def index(self):
-        return self._index
+        if not self._read_groups:
+            common.log('ERROR: Input file {} has no read groups in the header.'.format(self._filename))
+            common.log('Please specify sample name as "-i filename::sample" or in "-I input-list.txt"')
+            exit(1)
 
     @property
     def filename(self):
@@ -304,8 +298,13 @@ class BamWrapper:
     def read_groups(self):
         return self._read_groups
 
+    def present_samples(self):
+        if self._input_sample is not None:
+            return (self._input_sample,)
+        return set(self._old_read_groups.values())
 
-def load_bam_files(input, input_list, genome, allow_unnamed=False):
+
+def load_bam_files(input, input_list, genome):
     """
     Loads BAM files from either input or input-list.
     Returns list of BamWrapper's.
@@ -337,7 +336,12 @@ def load_bam_files(input, input_list, genome, allow_unnamed=False):
             except UnicodeDecodeError:
                 raise ValueError('Cannot read input list "-I {0}", perhaps you want to use "-i {0}"?'
                     .format(input_list))
-    return [BamWrapper(i, *tup, genome, allow_unnamed=allow_unnamed) for i, tup in enumerate(filenames)]
+
+    bam_wrappers = [BamWrapper(filename, sample, genome) for filename, sample in filenames]
+    samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
+    for bam_wrapper in bam_wrappers:
+        bam_wrapper.init_new_read_groups(samples)
+    return bam_wrappers, samples
 
 
 def main(prog_name=None, in_args=None):
@@ -395,7 +399,7 @@ def main(prog_name=None, in_args=None):
 
     with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
         interval = Interval.parse(args.region, genome)
-        bam_wrappers = load_bam_files(args.input, args.input_list, genome, allow_unnamed=False)
+        bam_wrappers, samples = load_bam_files(args.input, args.input_list, genome)
         pool_reads(bam_wrappers, args.output, interval, table, genome, args)
 
 

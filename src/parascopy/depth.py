@@ -441,13 +441,13 @@ def _summarize_sample(sample, sample_window_counts, params, windows, out, res):
             res.append(line)
 
 
-def _single_file_depth(bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params):
+def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params):
     """
     bam_file: either str or pysam.AlignmentFile.
     Returns dictionary { sample: [_Window] }.
     """
     need_close = False
-    common.log('    Calculating background depth for file {:3}: {}'.format(bam_wrapper.index + 1, bam_wrapper.filename))
+    common.log('    Calculating background depth for file {:3}: {}'.format(bam_index, bam_wrapper.filename))
     with bam_wrapper.open_bam_file(genome_filename) as bam_file:
         n_windows = len(windows)
         read_groups = bam_wrapper.read_groups()
@@ -488,8 +488,9 @@ def _try_single_file_depth(*args, **kwargs):
 
 def all_files_depth(bam_wrappers, windows, fetch_regions, genome_filename, threads, params, out_prefix, out_means):
     if threads <= 1:
-        for bam_wrapper in bam_wrappers:
-            for line in _single_file_depth(bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params):
+        for bam_index, bam_wrapper in enumerate(bam_wrappers, 1):
+            for line in _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_filename, out_prefix,
+                    params):
                 out_means.write(line)
             out_means.flush()
         return
@@ -507,9 +508,9 @@ def all_files_depth(bam_wrappers, windows, fetch_regions, genome_filename, threa
         pool.terminate()
 
     pool = multiprocessing.Pool(threads)
-    for bam_wrapper in bam_wrappers:
+    for bam_index, bam_wrapper in enumerate(bam_wrappers, 1):
         pool.apply_async(_try_single_file_depth, callback=callback, error_callback=err_callback,
-            args=(bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params))
+            args=(bam_index, bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params))
     pool.close()
     pool.join()
 
@@ -672,7 +673,7 @@ class Depth:
 def check_duplicated_samples(bam_wrappers):
     samples = {}
     for i, bam_wrapper in enumerate(bam_wrappers):
-        for rg, sample in bam_wrapper.read_groups().items():
+        for sample in bam_wrapper.present_samples():
             if sample in samples and samples[sample] != i:
                 confl_filename = bam_wrappers[samples[sample]].filename
                 common.log('ERROR: Sample {} appears in two input files: {} and {}'
@@ -770,7 +771,7 @@ def main(prog_name, in_args):
     common.mkdir(args.output)
     genome = Genome(args.fasta_ref)
 
-    bam_wrappers = pool_reads.load_bam_files(args.input, args.input_list, genome, allow_unnamed=False)
+    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome)
     check_duplicated_samples(bam_wrappers)
 
     threads = max(1, min(len(bam_wrappers), args.threads, os.cpu_count()))
