@@ -823,8 +823,8 @@ def parse_args(prog_name, in_args, is_new):
     aggr_det_args.add_argument('--no-multipliers', action='store_false', dest='use_multipliers',
         help='Do not estimate or use read depth multipliers.')
 
+    par_det_args = parser.add_argument_group('Paralog-specific copy number detection arguments')
     if is_new:
-        par_det_args = parser.add_argument_group('Paralog-specific copy number detection arguments')
         par_det_args.add_argument('--reliable-threshold', type=float, metavar='<float> <float>',
             nargs=2, default=(0.8, 0.95),
             help='PSV-reliability thresholds (reliable PSV has all f-values over the threshold).\n'
@@ -836,6 +836,12 @@ def parse_args(prog_name, in_args, is_new):
                 '- aggregate copy number is higher than <int>[1]           [default: {}],\n'
                 '- number of possible psCN tuples is higher than <int>[2]  [default: {}].')
                 .format(*DEFAULT_PSCN_BOUND))
+    else:
+        par_det_args.add_argument('--reliable-threshold', type=float, metavar='<float> <float>', nargs=2,
+            help='PSV-reliability thresholds (reliable PSV has all f-values over the threshold).\n'
+                'First value is used for gene conversion detection,\n'
+                'second value is used to estimate paralog-specific CN.\n'
+                'Default: use reliable thresholds from <model>.')
 
     exec_args = parser.add_argument_group('Execution parameters')
     exec_args.add_argument('--rerun', choices=('full', 'partial', 'none'), metavar='full|partial|none', default='none',

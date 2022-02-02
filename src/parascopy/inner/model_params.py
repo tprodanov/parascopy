@@ -227,7 +227,8 @@ class ModelParams:
         args.max_ref_cn = int(main_entry[('max_ref_cn', 'max_copy_num')])
         args.agcn_jump = int(main_entry[('agcn_jump', 'copy_num_jump')])
 
-        args.reliable_threshold = tuple(map(float, main_entry['reliable_threshold'].split(',')))
+        if args.reliable_threshold is None:
+            args.reliable_threshold = tuple(map(float, main_entry['reliable_threshold'].split(',')))
         args.pscn_bound = tuple(map(int, main_entry[('pscn_bound', 'copy_num_bound')].split(',')))
         args.transition_prob = float(main_entry['transition_prob'])
         return args
