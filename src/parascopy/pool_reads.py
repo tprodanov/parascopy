@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import operator
 import pysam
 import numpy as np
 from collections import defaultdict
@@ -301,7 +302,7 @@ class BamWrapper:
     def present_samples(self):
         if self._input_sample is not None:
             return (self._input_sample,)
-        return set(self._old_read_groups.values())
+        return set(map(operator.itemgetter(1), self._old_read_groups))
 
 
 def load_bam_files(input, input_list, genome):
