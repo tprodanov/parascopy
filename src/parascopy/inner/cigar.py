@@ -614,6 +614,18 @@ class Cigar:
                 return True
         return False
 
+    @staticmethod
+    def append(cigar, len, op):
+        if cigar and cigar[-1][1] == op:
+            cigar[-1] = (len + cigar[-1][0], op)
+        else:
+            cigar.append((len, op))
+
+    @staticmethod
+    def extend(cigar, it):
+        Cigar.append(cigar, *next(it))
+        cigar.extend(it)
+
 
 class CigarIndex:
     def __init__(self, cigar, step_size=100):

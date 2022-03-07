@@ -204,7 +204,7 @@ def _calculate_pooled_depth(bam_file, samples, bg_depth, read_groups_dict, dupl_
     window_size = bg_depth.window_size
     window_starts = np.array([window.region1.start for window in windows])
     # Matrix of WindowCounts (n_samples x n_windows).
-    window_counts = [[depth_.WindowCounts() for _j in range(n_samples)] for _i in range(n_windows)]
+    window_counts = [[depth_.WindowCounts(bg_depth.params) for _j in range(n_samples)] for _i in range(n_windows)]
 
     read_centers = [[] for _ in range(n_samples)]
     for record in bam_file:
@@ -406,8 +406,8 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
     _write_bed_files(interval, duplications, const_regions, genome, subdir)
     pooled_bam_path = os.path.join(subdir, 'pooled_reads.bam')
     if not os.path.exists(pooled_bam_path):
-        pool_reads.pool_reads_inner(data.bam_wrappers, pooled_bam_path, interval,
-            duplications, genome, Weights(), samtools=args.samtools, verbose=True, time_log=time_log)
+        pool_reads.pool(data.bam_wrappers, pooled_bam_path, interval, duplications, genome,
+            samtools=args.samtools, verbose=True, time_log=time_log)
 
     extra_files = dict(depth='depth.csv', region_groups='region_groups.txt', windows='windows.bed',
         hmm_states='hmm_states.csv', hmm_params='hmm_params.csv',
@@ -430,7 +430,6 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
             for read_group, sample in bam_wrapper.read_groups().values():
                 read_groups_dict[read_group] = samples.id(sample)
         with pysam.AlignmentFile(pooled_bam_path, require_index=True) as bam_file:
-            _validate_read_groups(bam_file, read_groups_dict, samples)
             time_log.log('Calculating aggregate read depth')
             common.log('[{}] Calculating aggregate read depth'.format(interval.name))
             window_counts, psv_observations = _calculate_pooled_depth(bam_file, samples, bg_depth, read_groups_dict,
@@ -760,7 +759,7 @@ def filter_regions(regions, loaded_models, regions_subset):
     return regions, loaded_models
 
 
-def parse_args(prog_name, in_args, is_new):
+def parse_args(prog_name, in_argv, is_new):
     assert prog_name is not None
     usage = ('{prog} {model}(-i <bam> [...] | -I <bam-list>) -t <table> -f <fasta> '
         '{regions}-d <bg-depth> [...] -o <dir> [arguments]').format(prog=prog_name, model='' if is_new else '<model> ',
@@ -891,7 +890,7 @@ def parse_args(prog_name, in_args, is_new):
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
-    args = parser.parse_args(in_args)
+    args = parser.parse_args(in_argv)
 
     args.is_new = is_new
     if args.samtools != 'none':
@@ -909,8 +908,8 @@ def parse_args(prog_name, in_args, is_new):
     return args
 
 
-def main(prog_name=None, in_args=None, is_new=None):
-    args = parse_args(prog_name, in_args, is_new)
+def main(prog_name=None, in_argv=None, is_new=None):
+    args = parse_args(prog_name, in_argv, is_new)
     np.set_printoptions(precision=6, linewidth=sys.maxsize, suppress=True, threshold=sys.maxsize)
 
     data = _DataStructures(args)
@@ -935,7 +934,7 @@ def main(prog_name=None, in_args=None, is_new=None):
         bg_depth = depth_.Depth.from_filenames(args.depth, samples)
     else:
         bg_depth = depth_.Depth.from_filenames(args.depth, samples, window_filtering_mult=args.window_filtering)
-        common.log(bg_depth.describe_params() + '    ============')
+        common.log(bg_depth.params.describe() + '    ============')
 
     run(regions, data, samples, bg_depth, loaded_models)
     data.close()

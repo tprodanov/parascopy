@@ -73,7 +73,7 @@ def main():
         print(_get_usage(prog_name))
         return
     command = sys.argv[1]
-    inner_args = sys.argv[2:]
+    inner_argv = sys.argv[2:]
     inner_prog = '{} {}'.format(prog_name, command)
 
     if command == '-h' or command == '--help' or command == 'help':
@@ -90,40 +90,44 @@ def main():
 
     if command == 'pretable':
         from . import pretable
-        return _process_exceptions(pretable.main, inner_prog, inner_args)
+        return _process_exceptions(pretable.main, inner_prog, inner_argv)
 
     if command == 'table':
         from . import combine_table
-        return _process_exceptions(combine_table.main, inner_prog, inner_args)
+        return _process_exceptions(combine_table.main, inner_prog, inner_argv)
 
     if command == 'depth':
         from . import depth
-        return _process_exceptions(depth.main, inner_prog, inner_args)
+        return _process_exceptions(depth.main, inner_prog, inner_argv)
 
     if command == 'cn' or command == 'cn-using':
         is_new = command == 'cn'
         from . import detect_cn
-        return _process_exceptions(detect_cn.main, inner_prog, inner_args, is_new)
+        return _process_exceptions(detect_cn.main, inner_prog, inner_argv, is_new)
 
     if command == 'pool':
         from . import pool_reads
-        return _process_exceptions(pool_reads.main, inner_prog, inner_args)
+        return _process_exceptions(pool_reads.main, inner_prog, inner_argv)
 
     if command == 'view':
         from . import view
-        return _process_exceptions(view.main, inner_prog, inner_args)
+        return _process_exceptions(view.main, inner_prog, inner_argv)
 
     if command == 'msa':
         from . import msa
-        return _process_exceptions(msa.main, inner_prog, inner_args)
+        return _process_exceptions(msa.main, inner_prog, inner_argv)
 
     if command == 'psvs':
         from . import psvs
-        return _process_exceptions(psvs.main, inner_prog, inner_args)
+        return _process_exceptions(psvs.main, inner_prog, inner_argv)
 
     if command == 'call':
         from . import call_variants
-        return _process_exceptions(call_variants.main, inner_prog, inner_args)
+        return _process_exceptions(call_variants.main, inner_prog, inner_argv)
+
+    if command == 'pool-vcf' or command == 'pool_vcf':
+        from . import pool_variants
+        return _process_exceptions(pool_variants.main, inner_prog, inner_argv)
 
     _throw_error(prog_name, command)
 

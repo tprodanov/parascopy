@@ -268,28 +268,6 @@ def record_ord_key(rec1):
     return (rec1.reference_id, rec1.reference_start)
 
 
-def common_prefix(seq0, *seqs):
-    try:
-        for i, nt in enumerate(seq0):
-            for seq in seqs:
-                if seq[i] != nt:
-                    return i
-    except IndexError:
-        return i
-    return len(seq0)
-
-
-def common_suffix(seq0, *seqs):
-    try:
-        for i in itertools.count(1):
-            nt = seq0[-i]
-            for seq in seqs:
-                if seq[-i] != nt:
-                    return i - 1
-    except IndexError:
-        return i - 1
-
-
 def str_count(count, word):
     """
     str_count(10, 'word') -> '10 words'
@@ -354,3 +332,16 @@ def extended_nargs(min_values=1, max_values=2):
                 raise argparse.ArgumentTypeError(msg)
             setattr(args, self.dest, values)
     return RequiredLength
+
+
+def checked_fetch_coord(fetch_file, chrom, start, end):
+    try:
+        return fetch_file.fetch(chrom, start, end)
+    except ValueError as e:
+        common.log('ERROR: Cannot fetch {}:{}-{} from {} (possibly missing chromosome).'
+            .format(chrom, start + 1, end, fetch_file.filename.decode()))
+        return iter(())
+
+
+def checked_fetch(fetch_file, region, genome):
+    return checked_fetch_coord(fetch_file, region.chrom_name(genome), region.start, region.end)

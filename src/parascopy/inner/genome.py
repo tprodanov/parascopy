@@ -91,6 +91,34 @@ class ChromNames:
         for chrom_id in range(self.n_chromosomes):
             yield self.chrom_interval(chrom_id, named=named)
 
+    def complement_intervals(self, intervals, include_full_chroms=True):
+        curr_chrom_id = 0
+        curr_end = 0
+        res = []
+        for interval in intervals:
+            if interval.chrom_id > curr_chrom_id:
+                curr_len = self._lengths[curr_chrom_id]
+                if curr_len > curr_end and (curr_end > 0 or include_full_chroms):
+                    res.append(Interval(curr_chrom_id, curr_end, curr_len))
+                if include_full_chroms:
+                    for chrom_id in range(curr_chrom_id + 1, interval.chrom_id):
+                        res.append(Interval(chrom_id, 0, self._lengths[chrom_id]))
+                curr_chrom_id = interval.chrom_id
+                curr_end = 0
+
+            assert interval.chrom_id == curr_chrom_id and interval.start >= curr_end
+            if interval.start > curr_end:
+                res.append(Interval(curr_chrom_id, curr_end, interval.start))
+            curr_end = interval.end
+
+        curr_len = self._lengths[curr_chrom_id]
+        if curr_len > curr_end and (curr_end > 0 or include_full_chroms):
+            res.append(Interval(curr_chrom_id, curr_end, curr_len))
+        if include_full_chroms:
+            for chrom_id in range(curr_chrom_id + 1, len(self._lengths)):
+                res.append(Interval(chrom_id, 0, self._lengths[chrom_id]))
+        return res
+
 
 class Genome(ChromNames):
     def __init__(self, filename):

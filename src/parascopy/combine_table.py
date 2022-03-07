@@ -534,7 +534,7 @@ def _duplications_iterator(table, args, genome):
             yield dupl
 
 
-def main(prog_name=None, in_args=None):
+def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
         description='Convert homology pre-table into homology table.\n'
@@ -580,7 +580,7 @@ def main(prog_name=None, in_args=None):
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version',
         version=long_version(), help='Show version.')
-    args = parser.parse_args(in_args)
+    args = parser.parse_args(in_argv)
 
     common.log('Using {} threads'.format(args.threads))
     if args.graph is not None:

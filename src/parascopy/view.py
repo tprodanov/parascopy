@@ -67,7 +67,7 @@ def parse_expression(expr):
     return inner
 
 
-def main(prog_name=None, in_args=None):
+def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
         description='View and filter homology table.',
@@ -101,7 +101,7 @@ def main(prog_name=None, in_args=None):
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
-    args = parser.parse_args(in_args)
+    args = parser.parse_args(in_argv)
 
     with pysam.TabixFile(args.input, parser=pysam.asTuple()) as table, \
             common.open_possible_gzip(args.output, 'w') as outp:

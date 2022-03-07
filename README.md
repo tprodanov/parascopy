@@ -19,7 +19,7 @@ Table of contents
 * [Output files](#output-files)
 * [Precomputed data](#precomputed-data)
 * [Test dataset](#test-dataset)
-* [Known issues](#known-issues)
+* [Frequently asked questions](#frequently-asked-questions)
 * [Issues](#issues)
 * [See also](#see-also)
 
@@ -176,15 +176,12 @@ Here, the region is supplied using the `-r chr:start-end[::name]` format,
 alternatively you can supply regions in a BED file using the `-R` argument (optional: fourth column with region names).
 
 Sample output can be found [here (251 Mb)](https://dl.dropboxusercontent.com/s/ddkh3mflezapvqz/test_output.tar.gz),
-output files description can be found [here](https://github.com/tprodanov/parascopy/blob/main/docs/cn_output.md).
+output files description can be found [here](docs/cn_output.md).
 
-Known issues
-------------
+Frequently asked questions
+--------------------------
 
-If aggregate copy number jumps significantly in a short region (especially for disease-associated genes, such as SMN1),
-it is possible that the alignment file is missing reads for some duplicated loci.
-You can try to map unaligned reads, or map all reads using a different mapping tool.
-Use `samtools view input.bam "*"` to extract unaligned reads (does not extract unmapped reads with a mapped mate).
+You can find FAQ [here](docs/faq.md).
 
 Issues
 ------

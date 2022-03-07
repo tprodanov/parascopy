@@ -5,7 +5,7 @@ import pysam
 import numpy as np
 from enum import Enum
 from scipy.stats import poisson, multinomial
-from scipy.special import logsumexp
+from scipy.special import logsumexp, gammaln
 from functools import lru_cache
 from collections import namedtuple, defaultdict
 
@@ -13,6 +13,7 @@ from . import duplication as duplication_
 from .cigar import Cigar, Operation
 from .genome import Interval
 from .paralog_cn import Filters
+from . import errors
 from . import common
 from . import itree
 from . import polynomials
@@ -22,34 +23,36 @@ def copy_vcf_fields(source_rec, target_rec, old_to_new=None):
     """
     Copies format fields from source_rec to target_rec.
         Copies fields GQ, DP, GT, AD.
-        NOTE: In the future we can add GL field, but it is unclear how to use it with ploidy > 2,
-        also it is unclear, how to sum values if two alleles were combined.
-
     old_to_new: None or list of indices, old_to_new[old_allele_index] = new_allele_index.
     """
     n_alleles = len(target_rec.alleles)
     for sample, source in source_rec.samples.items():
         target = target_rec.samples[sample]
-        target['GQ'] = source['GQ']
-        target['DP'] = source['DP']
-        source_gt = source['GT']
-        if not source_gt or source_gt[0] is None:
-            source_gt = None
+        if 'GQ' in source:
+            target['GQ'] = source['GQ']
+        if 'DP' in source:
+            target['DP'] = source['DP']
 
-        if old_to_new is None:
-            target['GT'] = source_gt
-            if source['AD'][0] is not None:
-                target['AD'] = source['AD']
-            continue
+        if 'GT' in source:
+            source_gt = source['GT']
+            if source_gt is None or source_gt[0] is None:
+                pass
+            elif old_to_new is None:
+                target['GT'] = source_gt
+            else:
+                target['GT'] = tuple(old_to_new[j] for j in source_gt)
 
-        if source_gt:
-            target['GT'] = sorted(old_to_new[j] for j in source_gt)
-        if source['AD'][0] is not None:
-            source_allele_depth = source['AD']
-            target_allele_depth = [0] * n_alleles
-            for i, j in enumerate(old_to_new):
-                target_allele_depth[j] += source_allele_depth[i]
-            target['AD'] = target_allele_depth
+        if 'AD' in source:
+            source_ad = source['AD']
+            if source_ad is None or source_ad[0] is None:
+                pass
+            elif old_to_new is None:
+                target['AD'] = source_ad
+            else:
+                target_ad = [0] * n_alleles
+                for i, j in enumerate(old_to_new):
+                    target_ad[j] += source_ad[i]
+                target['AD'] = target_allele_depth
 
 
 def _move_left_gap(gap_start, gap_seq, chrom_seq, chrom_seq_shift, min_start):
@@ -330,9 +333,9 @@ class PsvStatus(Enum):
             raise ValueError('Unexpected PSV status {}'.format(s))
 
 
-class _PsvPosAllele(namedtuple('_PsvPosAllele', ('psv_ix interval strand allele_ix'))):
+class _PsvPosAllele(namedtuple('_PsvPosAllele', ('psv_ix region strand allele_ix'))):
     def __lt__(self, other):
-        return self.interval.__lt__(other.interval)
+        return self.region.__lt__(other.region)
 
 
 class _PsvPos:
@@ -379,7 +382,7 @@ class _PsvPos:
 
     @property
     def start(self):
-        return self.positions[0].interval.start
+        return self.positions[0].region.start
 
     @property
     def ref(self):
@@ -391,8 +394,9 @@ class _PsvPos:
 
     def weighted_positions(self, allele_ix):
         """
-        Returns two arrays: one with _PsvPosAllele,
-        second with probababilities of each position given a read that supports allele_ix.
+        Returns two lists:
+            - PSV positions (_PsvPosAllele),
+            - probababilities of each position given a read that supports allele_ix.
         """
         return self.positions, self.pos_weights[allele_ix]
 
@@ -427,6 +431,10 @@ class VariantReadObservations:
 
         # List of instances of VariantReadObservations (because there could be several PSVs within one variant).
         self.psv_observations = None
+        # If variant overlaps a PSV, psv_paralog_priors will contain a matrix (n_copies x n_alleles) with
+        # log-probabilities of observing corresponding allele on the corresponding copy.
+        self.psv_paralog_priors = None
+        self.psv_paralog_cache = None
         # Parent VariantReadObservations. Inverse of self.psv_observations.
         self.parent = None
 
@@ -535,7 +543,7 @@ class VariantReadObservations:
         allele_corresp = []
         for allele in old_alleles:
             allele_corresp.append(new_alleles.index(allele) if allele in new_alleles else None)
-        return allele_corresp
+        return tuple(allele_corresp)
 
     @staticmethod
     def _psv_allele_corresp(variant, psv):
@@ -570,9 +578,11 @@ class VariantReadObservations:
             var_sub_alleles.append(sub_allele)
         return VariantReadObservations._simple_allele_corresp(var_sub_alleles, psv_alleles)
 
-    def set_psv(self, psv: _PsvPos):
+    def set_psv(self, psv: _PsvPos, varcall_params):
+        assert len(self.variant_positions) == len(psv.positions)
         allele_corresp = self._psv_allele_corresp(self.variant, psv.psv_record)
         full_match = np.all(np.arange(len(self.variant.alleles)) == allele_corresp)
+        self._update_psv_paralog_priors(psv, allele_corresp, varcall_params)
 
         new_psv_obs = self.shallow_copy_obs() if full_match else self.copy_obs()
         if not full_match:
@@ -582,16 +592,69 @@ class VariantReadObservations:
         self.psv_observations.append(new_psv_obs)
         return new_psv_obs
 
+    def _update_psv_paralog_priors(self, psv, allele_corresp, varcall_params):
+        n_copies = len(self.variant_positions)
+        n_alleles = len(self.variant.alleles)
+        priors_update = np.full((n_copies, n_alleles), -np.inf)
+
+        for psv_i, psv_pos in enumerate(psv.positions):
+            for var_i, var_pos in enumerate(self.variant_positions):
+                if var_pos.region.intersects(psv_pos.region):
+                    break
+            else:
+                raise ValueError('PSV position {} has no matches with variant positions {}'
+                    .format(psv_pos, self.variant_positions))
+            fval = psv.f_values[psv_i]
+            allele_match = [psv_allele_ix == psv_pos.allele_ix for psv_allele_ix in allele_corresp]
+            n_match = sum(allele_match)
+            if n_match == 0 or n_match == n_alleles:
+                priors_update[var_i] = 0
+            else:
+                prior_match = np.log(fval / n_match)
+                prior_mismatch = np.log((1 - fval) / (n_alleles - n_match))
+                priors_update[var_i] = np.where(allele_match, prior_match, prior_mismatch)
+
+        if self.psv_paralog_priors is None:
+            self.psv_paralog_priors = priors_update
+            self.psv_paralog_cache = {}
+        else:
+            self.psv_paralog_priors += priors_update
+            self.psv_paralog_cache.clear()
+
+        self.psv_paralog_priors = np.maximum(self.psv_paralog_priors, varcall_params.mutation_rate)
+        self.psv_paralog_priors -= logsumexp(self.psv_paralog_priors, axis=1)[:, np.newaxis]
+
+    def calculate_psv_paralog_priors(self, ext_pos_to_var_pos, paralog_genotypes, paralog_genotype_probs):
+        cache = self.psv_paralog_cache.get(ext_pos_to_var_pos)
+        if cache is None:
+            n_copies = len(ext_pos_to_var_pos)
+            n_alleles = self.psv_paralog_priors.shape[1]
+            ext_paralog_priors = np.zeros((n_copies, n_alleles))
+            for i, ext_pos in enumerate(ext_pos_to_var_pos):
+                new_row = logsumexp(self.psv_paralog_priors[ext_pos, :], axis=0)
+                ext_paralog_priors[i] = new_row - logsumexp(new_row)
+            gt_cache = {}
+            self.psv_paralog_cache[ext_pos_to_var_pos] = (ext_paralog_priors, gt_cache)
+        else:
+            ext_paralog_priors, gt_cache = cache
+
+        for i, gt in enumerate(paralog_genotypes):
+            gt_prob = gt_cache.get(gt.genotype)
+            if gt_prob is None:
+                gt_prob = gt.overl_psv_prior(ext_paralog_priors)
+                gt_cache[gt.genotype] = gt_prob
+            paralog_genotype_probs[i] = gt_prob
+
     def init_vcf_records(self, genome, vcf_headers):
         alleles = self.variant.alleles
         self.new_vcf_records = []
         self.new_vcf_allele_corresp = []
 
         for vcf_i, pos_i in itertools.product(range(2), range(len(self.variant_positions))):
-            if vcf_i == 0 and pos_i > 0:
+            pos = self.variant_positions[pos_i]
+            if vcf_i == 0 and pos.region.start != self.variant.start:
                 continue
             vcf_header = vcf_headers[vcf_i]
-            pos = self.variant_positions[pos_i]
 
             record = vcf_header.new_record()
             record.chrom = pos.region.chrom_name(genome)
@@ -623,6 +686,7 @@ class VariantReadObservations:
             record.filter.add('PASS')
             self.new_vcf_records.append(record)
             self.new_vcf_allele_corresp.append(old_to_new)
+        assert len(self.new_vcf_records) == len(self.variant_positions) + 1
 
     def update_vcf_records(self, var_gts, genome):
         PHRED_THRESHOLD = 3
@@ -637,12 +701,16 @@ class VariantReadObservations:
             old_to_new = self.new_vcf_allele_corresp[i]
             rec_fmt = record.samples[sample_id]
             pooled_gt, pooled_gt_qual = var_gts.pooled_genotype_quality()
+            gt_filter = var_gts.filter
+
             if pooled_gt is not None:
+                pooled_gt = pooled_gt.convert(old_to_new)
                 if i == 0:
-                    rec_fmt['GT'] = tuple(old_to_new[allele_ix] for allele_ix in pooled_gt)
-                    rec_fmt['GQ'] = pooled_gt_qual
+                    rec_fmt['GT'] = pooled_gt.to_tuple()
+                    rec_fmt['GQ'] = 0 if gt_filter else pooled_gt_qual
+                    rec_fmt['GQ0'] = pooled_gt_qual
                 else:
-                    rec_fmt['PGT'] = '/'.join(str(old_to_new[allele_ix]) for allele_ix in pooled_gt)
+                    rec_fmt['PGT'] = str(pooled_gt)
                     rec_fmt['PGQ'] = pooled_gt_qual
 
             rec_fmt['DP'] = int(read_depth)
@@ -650,7 +718,6 @@ class VariantReadObservations:
             for j, count in zip(old_to_new, allele_counts):
                 curr_allele_counts[j] = int(count)
             rec_fmt['AD'] = curr_allele_counts
-            gt_filter = var_gts.filter
 
             if i == 0:
                 if gt_filter:
@@ -670,28 +737,11 @@ class VariantReadObservations:
                     gt_filter.add(Filter.Unknown_psCN)
                 if out_gt is not None:
                     rec_fmt['GT'] = out_gt
-                    rec_fmt['GQ'] = paralog_gt_qual
+                    rec_fmt['GQ'] = 0 if gt_filter else paralog_gt_qual
+                    rec_fmt['GQ0'] = paralog_gt_qual
 
             if gt_filter:
                 rec_fmt['GTfilter'] = gt_filter.to_tuple()
-
-    def write_all_gt_probs(self, var_gts, sample_name, out):
-        variant = var_gts.variant_obs.variant
-        out.write('{}\t{}\t'.format(variant.pos, sample_name))
-
-        if var_gts.paralog_genotypes is None:
-            out.write('*\t')
-        else:
-            out.write(' '.join('{}={:.3g}'.format(paralog_gt.genotype_str, abs(paralog_gt.probability / common.LOG10))
-                for paralog_gt in var_gts.paralog_genotypes))
-            out.write('\t')
-
-        if var_gts.pooled_genotypes is None:
-            out.write('*\n')
-        else:
-            out.write(' '.join('{}={:.3g}'.format(pooled_gt.genotype_str, abs(pooled_gt.probability / common.LOG10))
-                for pooled_gt in var_gts.pooled_genotypes))
-            out.write('\n')
 
     def set_use_samples(self, max_other_obs_frac=0.1, min_read_depth=10):
         n_samples = len(self.observations)
@@ -713,7 +763,9 @@ class VariantReadObservations:
         assert self.parent is not None
         if not self.use_samples[sample_id] or self.variant.skip():
             return
+        # print('Add PSV observations {}'.format(self.start + 1))
         for read_hash, allele_obs in self.observations[sample_id].items():
+            # print('    Hash {}   {}'.format(read_hash, allele_obs))
             read_positions[read_hash].add(self.variant, allele_obs)
 
     @staticmethod
@@ -733,6 +785,8 @@ class VariantReadObservations:
             vcf_header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
             vcf_header.add_line('##FORMAT=<ID=GTfilter,Number=.,Type=String,Description="GT filter">')
             vcf_header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="The Phred-scaled Genotype Quality">')
+            vcf_header.add_line('##FORMAT=<ID=GQ0,Number=1,Type=Float,Description='
+                '"Raw genotype quality (= GQ if there is no GT filter)."')
             vcf_header.add_line('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">')
             vcf_header.add_line('##FORMAT=<ID=AD,Number=R,Type=Integer,'
                 'Description="Number of observation for each allele">')
@@ -783,7 +837,7 @@ def read_freebayes_binary(ra_reader, samples, vcf_file, dupl_pos_finder):
     return positions
 
 
-def add_psv_variants(all_read_allele_obs, psv_records, genome):
+def add_psv_variants(all_read_allele_obs, psv_records, genome, varcall_params):
     searcher = itree.NonOverlTree(all_read_allele_obs, itree.start, itree.variant_end)
 
     psv_read_allele_obs = []
@@ -807,7 +861,7 @@ def add_psv_variants(all_read_allele_obs, psv_records, genome):
         variant_ix = (i, len(all_read_allele_obs[i].psv_observations))
         psv = _PsvPos(psv, genome, psv_ix, variant_ix)
         n_psvs[psv.status.value] += 1
-        curr_psv_obs = all_read_allele_obs[i].set_psv(psv)
+        curr_psv_obs = all_read_allele_obs[i].set_psv(psv, varcall_params)
         assert len(psv_read_allele_obs) == psv_ix
         psv_read_allele_obs.append(curr_psv_obs)
 
@@ -883,99 +937,127 @@ class DuplPositionFinder:
 
         for entry in self._dupl_tree.overlap(region.start, region.end):
             dupl = entry.data
-            pos2 = dupl.align_variant(variant)
+            try:
+                pos2 = dupl.align_variant(variant)
+            except errors.VariantOutOfBounds:
+                continue
             if pos2 is not None:
                 res.append(pos2)
         res.sort()
         return tuple(res)
 
 
+FORBIDDEN_LOC_PENALTY = -20.0 * common.LOG10
+
+
 class _ReadEndPositions:
     def __init__(self):
         self.seq_len = None
-        self.read_positions = None
-
-        # _PsvPosAllele entries.
+        # If the read is mapped uniquely, unique_read_pos will have an Interval. Otherwise, it is None.
+        self.unique_read_pos = None
+        # tuple: If true location is unknown, but there are locations that are certainly incorrect, store it here.
+        self.forbidden_read_pos = None
+        # Pairs (_PsvPosAllele, log probability).
         self.psv_positions = []
-        # Natural-log position weights (not necessarily normalized).
-        self.psv_pos_weights = []
 
-    def set_read_positions(self, read_coord, dupl_pos_finder):
+    def set_read_positions(self, read_coord):
         self.seq_len = read_coord.seq_len
-        if read_coord.mapped_uniquely:
-            self.read_positions = (read_coord.aln_region,)
-        else:
-            self.read_positions = dupl_pos_finder.find_read_pos(read_coord.aln_region)
-            if len(self.read_positions) == 1:
-                # Because we know that the read is not mapped uniquely.
-                self.read_positions = ()
+        self.unique_read_pos = read_coord.get_certainly_correct_location()
+        self.forbidden_read_pos = read_coord.get_certainly_incorrect_locations()
 
     def add(self, psv_pos, allele_ix):
+        if self.unique_read_pos is not None:
+            return
         positions, weights = psv_pos.weighted_positions(allele_ix)
         weights = np.array(weights)
         weights -= logsumexp(weights)
-        self.psv_positions.extend(positions)
-        self.psv_pos_weights.extend(weights)
+        self.psv_positions.extend(zip(positions, weights))
 
-    def calc_single_mate_pos_probs(self):
+    def calculate_possible_locations(self, read_len_summand=10):
         """
-        Returns (None, None), if the read is not present in the read coordinates (too far from the duplication).
-
-        Otherwise returns two lists:
-            - List of regions,
-            - List of region log probabilities.
-
-        If mapping position is not known but is outside of the duplication, returns two empty lists.
+        read_len_summand: maximum distance between PSV = seq_len + read_len_summand.
+        Returns two lists:
+            - List of Intervals. Last entry may be None: this corresponds to an unknown location.
+            - List of corresponding probabilities.
         """
-        if self.read_positions is None:
-            # Read is not present in the read coordinates.
-            return None, None
+        if self.unique_read_pos is not None:
+            return (self.unique_read_pos,), np.array((0.0,))
 
-        n_read_pos = len(self.read_positions)
-        if n_read_pos == 0:
-            # Unknown possible positions.
-            return (), np.zeros(0)
-        elif n_read_pos == 1:
-            # Unique possible position.
-            return (self.read_positions[0],), np.zeros(1)
-        elif not self.psv_positions:
-            # There are no PSVs, all positions are equally likely.
-            return self.read_positions, np.full(n_read_pos, -np.log(n_read_pos))
+        possible_locations = []
+        possible_loc_probs = []
+        if self.psv_positions:
+            self._calculate_psv_clusters(possible_locations, possible_loc_probs, self.seq_len + read_len_summand)
+        n_locs = len(possible_locations)
 
-        sum_weight = np.zeros(n_read_pos)
-        overl_psvs = np.zeros(n_read_pos, dtype=np.uint16)
-        # TODO: Check overlapping PSVs.
-        for psv_pos, psv_weight in zip(self.psv_positions, self.psv_pos_weights):
-            psv_interval = psv_pos.interval
-            for read_pos_ix, read_pos in enumerate(self.read_positions):
-                if read_pos.intersects(psv_interval):
-                    sum_weight[read_pos_ix] += psv_weight
-                    overl_psvs[read_pos_ix] += 1
-                    break
-            # else:
-            #     # No read positions found.
-            #     print('        Could not find position for PSV {!r}'.format(psv_pos.interval))
+        if self.forbidden_read_pos:
+            for region in self.forbidden_read_pos:
+                found = False
+                for i in range(n_locs):
+                    if region.intersects(possible_locations[i]):
+                        possible_loc_probs[i] += FORBIDDEN_LOC_PENALTY
+                        found = True
+                if not found:
+                    possible_locations.append(region)
+                    possible_loc_probs.append(FORBIDDEN_LOC_PENALTY)
 
-        MISSING_PSV_PENALTY = np.log(0.01)
-        max_psvs = np.max(overl_psvs)
-        sum_weight += (max_psvs - overl_psvs) * MISSING_PSV_PENALTY
-        sum_weight -= logsumexp(sum_weight)
-        return self.read_positions, sum_weight
+        if n_locs == 0:
+            # There are no overlapping PSVs, so we add a proxy location, that overlaps all non-forbidden locations
+            possible_locations.append(None)
+            possible_loc_probs.append(0.0)
+        possible_loc_probs = np.array(possible_loc_probs)
+        possible_loc_probs -= logsumexp(possible_loc_probs)
+        return tuple(possible_locations), possible_loc_probs
+
+    def _calculate_psv_clusters(self, possible_locations, possible_loc_probs, max_psv_dist):
+        curr_psv_ixs = set()
+        curr_prob = 0.0
+        start_region = None
+        end_region = None
+        loc_n_psvs = []
+
+        self.psv_positions.sort()
+        for psv_pos, psv_pos_prob in self.psv_positions:
+            if start_region is None or (start_region.distance(psv_pos.region) > max_psv_dist or
+                    psv_pos.psv_ix in curr_psv_ixs):
+                if start_region is not None:
+                    possible_locations.append(Interval(start_region.chrom_id,
+                        max(0, start_region.start - self.seq_len), end_region.end + self.seq_len))
+                    possible_loc_probs.append(curr_prob)
+                    loc_n_psvs.append(len(curr_psv_ixs))
+                start_region = psv_pos.region
+                curr_psv_ixs.clear()
+                curr_prob = 0.0
+
+            curr_psv_ixs.add(psv_pos.psv_ix)
+            end_region = psv_pos.region
+            curr_prob += psv_pos_prob
+
+        possible_locations.append(Interval(start_region.chrom_id,
+            max(0, start_region.start - self.seq_len), end_region.end + self.seq_len))
+        possible_loc_probs.append(curr_prob)
+        loc_n_psvs.append(len(curr_psv_ixs))
+
+        if len(set(loc_n_psvs)) != 1:
+            # print('Different PSVs')
+            MISSING_PSV_PENALTY = -5 * common.LOG10
+            assert len(loc_n_psvs) == len(possible_locations)
+            max_psvs = max(loc_n_psvs)
+            for i, n_psvs in enumerate(loc_n_psvs):
+                possible_loc_probs[i] += MISSING_PSV_PENALTY * (max_psvs - n_psvs)
 
     def debug(self, genome, psvs):
-        if not self.read_positions:
-            print('        Unknown possible positions')
-        else:
-            for pos in self.read_positions:
-                print('        {} ({} position)'.format(pos.to_str_comma(genome),
-                    'possible' if len(self.read_positions) > 1 else 'unique'))
-
-        ixs = sorted(range(len(self.psv_positions)), key=lambda i: self.psv_positions[i])
-        for i in ixs:
-            pos = self.psv_positions[i]
-            print('        {}:{}  psv {} - {} [{}]  = {:.3f}'.format(pos.interval.to_str_comma(genome),
-                '+' if pos.strand else '-', pos.psv_ix,
-                psvs[pos.psv_ix].variant.alleles[pos.allele_ix], pos.allele_ix, np.exp(self.psv_pos_weights[i])))
+        if self.unique_read_pos:
+            print('            Unique location: {}'.format(self.unique_read_pos.to_str(genome)))
+        if self.forbidden_read_pos:
+            print('            Forbidden locations:')
+            for loc in self.forbidden_read_pos:
+                print('                {}'.format(loc.to_str(genome)))
+        if self.psv_positions:
+            print('            PSVs:')
+        for psv_pos, psv_pos_prob in self.psv_positions:
+            print('                {}:{}  psv {} - {} [{}]  = {:.3f}'.format(
+                psv_pos.region.to_str_comma(genome), '+' if psv_pos.strand else '-', psv_pos.psv_ix,
+                psvs[psv_pos.psv_ix].variant.alleles[psv_pos.allele_ix], psv_pos.allele_ix, np.exp(psv_pos_prob)))
 
 
 class _ReadPositions:
@@ -989,34 +1071,29 @@ class _ReadPositions:
         self.positions2 = None
         self.probs2 = None
 
-    def set_read_positions(self, read_coord, dupl_pos_finder):
+    def set_read_positions(self, read_coord):
         self.requires_mate = read_coord.is_paired
         is_read1 = bool(read_coord.read_hash & np.uint8(1))
-        self.mate_read_pos[1 - is_read1].set_read_positions(read_coord, dupl_pos_finder)
+        self.mate_read_pos[1 - is_read1].set_read_positions(read_coord)
 
     def add(self, psv_pos: _PsvPos, allele_obs: AlleleObservation):
         self.mate_read_pos[1 - allele_obs.is_first_mate].add(psv_pos, allele_obs.allele_ix)
 
-    def init_paired_read_pos_probs(self, max_mate_dist):
-        self.positions1, self.probs1 = self.mate_read_pos[0].calc_single_mate_pos_probs()
-        self.positions2, self.probs2 = self.mate_read_pos[1].calc_single_mate_pos_probs()
+    def init_paired_read_pos_probs(self, max_mate_dist, no_mate_penalty):
+        # NOTE: What happens if there is no read mate?
+        self.positions1, self.probs1 = self.mate_read_pos[0].calculate_possible_locations()
+        self.positions2, self.probs2 = self.mate_read_pos[1].calculate_possible_locations()
 
-        # pos_probs2 is None if the read mate is too far away, and it is empty,
-        # if mate is near, but its position is unknown.
-        if not self.positions1 or not self.positions2:
-            return
-
-        # Penalty for not having a mate is 10^-5.
-        NO_MATE_PENALTY = -5 * common.LOG10
-        new_probs1 = self.probs1 + NO_MATE_PENALTY
-        new_probs2 = self.probs2 + NO_MATE_PENALTY
-
+        assert self.positions1 and self.positions2
+        new_probs1 = self.probs1 + no_mate_penalty
+        new_probs2 = self.probs2 + no_mate_penalty
         n = len(self.positions1)
         m = len(self.positions2)
         for i in range(n):
             pos1 = self.positions1[i]
             for j in range(m):
-                if pos1.distance(self.positions2[j]) <= max_mate_dist:
+                pos2 = self.positions2[j]
+                if pos1 is None or pos2 is None or pos1.distance(pos2) <= max_mate_dist:
                     new_prob = self.probs1[i] + self.probs2[j]
                     new_probs1[i] = max(new_probs1[i], new_prob)
                     new_probs2[j] = max(new_probs2[j], new_prob)
@@ -1032,45 +1109,39 @@ class _ReadPositions:
     def debug(self, genome, psvs):
         print('      * First mate:')
         self.mate_read_pos[0].debug(genome, psvs)
+        for pos1, prob1 in zip(self.positions1, self.probs1):
+            print('        {:30} {:7.3f} ({:.5f})'
+                .format('ANY' if pos1 is None else pos1.to_str(genome), prob1 / common.LOG10, np.exp(prob1)))
+
         print('      * Second mate:')
         self.mate_read_pos[1].debug(genome, psvs)
-
-        if self.positions1 is not None:
-            if self.positions1 is not None:
-                print('      $ Weighted first mate positions: {} {}'.format(len(self.positions1), len(self.probs1)))
-                for pos1, prob1 in zip(self.positions1, self.probs1):
-                    print('        {:30} {:.3f}'.format(pos1.to_str(genome), prob1))
-            else:
-                print('      $ Unknown first mate positions.')
-
-            if self.positions2 is not None:
-                print('      $ Weighted second mate positions: {} {}'.format(len(self.positions2), len(self.probs2)))
-                for pos2, prob2 in zip(self.positions2, self.probs2):
-                    print('        {:30} {:.3f}'.format(pos2.to_str(genome), prob2))
-            else:
-                print('      $ Unknown second mate positions.')
+        for pos2, prob2 in zip(self.positions2, self.probs2):
+            print('        {:30} {:7.3f} ({:.5f})'
+                .format('ANY' if pos2 is None else pos2.to_str(genome), prob2 / common.LOG10, np.exp(prob2)))
 
 
 class ReadCollection:
-    def __init__(self, sample_id, coord_index, dupl_pos_finder):
+    def __init__(self, sample_id, sample, coord_index):
         CLEAR_LAST_BIT = ~np.uint64(1)
 
         self.sample_id = sample_id
+        self.sample = sample
         self.read_positions = defaultdict(_ReadPositions)
         coordinates = coord_index.load(sample_id)
         for read_coord in coordinates.values():
             read_hash = read_coord.read_hash & CLEAR_LAST_BIT
-            self.read_positions[read_hash].set_read_positions(read_coord, dupl_pos_finder)
+            self.read_positions[read_hash].set_read_positions(read_coord)
 
-    def add_psv_observations(self, psv_read_allele_obs, max_mate_dist):
+    def add_psv_observations(self, psv_read_allele_obs, max_mate_dist, no_mate_penalty):
         for curr_allele_obs in psv_read_allele_obs:
             if curr_allele_obs is not None:
                 curr_allele_obs.psv_update_read_probabilities(self.sample_id, self.read_positions)
-        # for read_pos in self.read_positions.values(): TODO: RETURN
-        for read_hash, read_pos in self.read_positions.items():
-            read_pos.init_paired_read_pos_probs(max_mate_dist)
+        for read_pos in self.read_positions.values():
+        # for read_hash, read_pos in self.read_positions.items():
+            # print('Calculate single mate pos probs: {}'.format(read_hash))
+            read_pos.init_paired_read_pos_probs(max_mate_dist, no_mate_penalty)
 
-    def debug_read_probs(self, sample, genome, psvs):
+    def debug_read_probs(self, genome, psvs):
         for psv in psvs:
             if psv is None:
                 print('PSV is None')
@@ -1080,7 +1151,7 @@ class ReadCollection:
                 ' '.join(psv.variant.alleles), psv.variant.psv_record.start + 1, ' '.join(psv.variant.psv_record.alleles),
                 psv.use_samples, psv.parent.use_samples))
 
-        print('Sample {}'.format(sample))
+        print('Sample {}'.format(self.sample))
         for read_hash, read_pos in self.read_positions.items():
             print('    Hash = {}'.format(read_hash))
             read_pos.debug(genome, psvs)
@@ -1103,15 +1174,46 @@ class Filter(Enum):
             return 'Unknown_psCN'
 
 
-class MultiCopyGT:
-    ALLELE_MATCH_PROB = 0.99
-    ALLELE_ERROR_PROB = 1 - ALLELE_MATCH_PROB
+@lru_cache(maxsize=None)
+def log_multinomial_coeff(gt):
+    return gammaln(len(gt) + 1) - gammaln(np.bincount(gt) + 1).sum()
 
+
+class PooledGT:
+    def __init__(self, tup):
+        self._tup = tuple(tup)
+
+    def __len__(self):
+        return len(self._tup)
+
+    def __getitem__(self, i):
+        return self._tup.__getitem__(i)
+
+    # def __iter__(self):
+    #     return self._tup.__iter__()
+
+    def __eq__(self, oth):
+        return self._tup == oth._tup
+
+    def __hash__(self):
+        return self._tup.__hash__()
+
+    def __str__(self):
+        return '/'.join(map(str, self._tup))
+
+    def to_tuple(self):
+        return self._tup
+
+    def convert(self, old_to_new):
+        return PooledGT(old_to_new[allele_ix] for allele_ix in self._tup)
+
+
+class MultiCopyGT:
     def __init__(self, gt, pscn, pooled_gt=None):
         if pooled_gt is None:
-            self.pooled_genotype = tuple(sorted(gt))
+            self.pooled_genotype = PooledGT(sorted(gt))
         else:
-            assert isinstance(pooled_gt, tuple)
+            assert isinstance(pooled_gt, PooledGT)
             self.pooled_genotype = pooled_gt
 
         self.genotype = []
@@ -1126,14 +1228,15 @@ class MultiCopyGT:
         # This does not account for different location probabilities for a read.
         self.precomp_read_obs_probs = None
 
-    def precompute_read_obs_probs(self, n_alleles):
+    def precompute_read_obs_probs(self, n_alleles, error_rate):
         self.precomp_read_obs_probs = np.zeros((n_alleles, self.n_copies))
         for copy_i, part_gt in enumerate(self.genotype):
             part_gt_len = len(part_gt)
             for allele_j in range(n_alleles):
                 n_matches = part_gt.count(allele_j)
-                self.precomp_read_obs_probs[allele_j, copy_i] = np.log((n_matches * MultiCopyGT.ALLELE_MATCH_PROB
-                    + (part_gt_len - n_matches) * MultiCopyGT.ALLELE_ERROR_PROB) / part_gt_len)
+
+                self.precomp_read_obs_probs[allele_j, copy_i] = np.log(
+                    (n_matches * (1 - error_rate) + (part_gt_len - n_matches) * error_rate) / part_gt_len)
 
     def calc_read_obs_prob(self, copy_probabilities, read_allele):
         return logsumexp(self.precomp_read_obs_probs[read_allele] + copy_probabilities)
@@ -1141,9 +1244,32 @@ class MultiCopyGT:
     def __str__(self):
         return '_'.join('/'.join(map(str, gt)) for gt in self.genotype)
 
+    def __eq__(self, oth):
+        return self.genotype == other.genotype
+
+    def __hash__(self):
+        return self.genotype.__hash__()
+
+    def no_psv_prior(self, penalty):
+        """
+        Returns prior for multi-copy genotype that does not overlap PSV.
+        For each extended copy, add penalty (log) for each non-reference allele present.
+        1/1 and 0/1 will lead to the same penalty.
+        """
+        res = 0
+        for gt in self.genotype:
+            gt = set(gt)
+            res += len(gt) - (0 in gt)
+        return res * penalty
+
+    def overl_psv_prior(self, paralog_priors):
+        res = 0
+        for i, gt in enumerate(self.genotype):
+            res += log_multinomial_coeff(gt) + np.sum(paralog_priors[i, gt])
+        return res
+
     @classmethod
     def create_all(cls, pooled_gt, pscn):
-        pooled_gt = tuple(sorted(pooled_gt))
         if len(set(pooled_gt)) == 1:
             yield MultiCopyGT(pooled_gt, pscn, pooled_gt)
             return
@@ -1155,44 +1281,43 @@ class MultiCopyGT:
                 used_genotypes.add(new.genotype)
                 yield new
 
+    @staticmethod
+    def aggregate_genotypes(paralog_genotypes, paralog_genotype_probs, ext_copy_i):
+        """
+        Returns aggregated genotypes and their probabilities.
+        If ext_copy_i is None -- aggregates by pooled genotype, otherwise aggregates by copy i genotypes.
+        """
+        gt_dict = defaultdict(list)
+        for paralog_gt, paralog_gt_prob in zip(paralog_genotypes, paralog_genotype_probs):
+            key = paralog_gt.pooled_genotype if ext_copy_i is None else paralog_gt.genotype[ext_copy_i]
+            gt_dict[key].append(paralog_gt_prob)
+
+        n = len(gt_dict)
+        res_genotypes = [None] * n
+        res_genotype_probs = np.zeros(n)
+        i = 0
+        for gt, gt_probs in gt_dict.items():
+            res_genotypes[i] = gt
+            res_genotype_probs[i] = logsumexp(gt_probs)
+            i += 1
+        return res_genotypes, res_genotype_probs
+
+
+def _genotype_probs_to_str(genotypes, probs):
+    """
+    Returns index of the best genotype and string representation of the genotypes and their probabilities.
+    """
+    MIN_PROB = -50 * common.LOG10
+    ixs = np.argsort(-probs)
+    s = ' '.join('{}={:.3g}'.format(genotypes[i], abs(probs[i] / common.LOG10)) for i in ixs if probs[i] >= MIN_PROB)
+    return ixs[0], s
+
 
 class VariantGenotypePred:
-    class GtProb:
-        def __init__(self, gt, prob, is_pooled=True):
-            self.genotype = gt
-            if gt is None:
-                self.genotype_str = 'other'
-            elif is_pooled:
-                self.genotype_str = '/'.join(map(str, gt))
-            else:
-                self.genotype_str = str(gt)
-            self.probability = prob
-
-        @property
-        def is_undefined(self):
-            return self.genotype is None
-
-        def __lt__(self, other):
-            return (self.is_undefined, -self.probability).__lt__((other.is_undefined, -other.probability))
-
-        @staticmethod
-        def phred_of_first(all_probs):
-            MAX_PHRED = 10000
-            n = 0 if all_probs is None else len(all_probs)
-            if n == 0:
-                return (None, 0)
-
-            best_gt = all_probs[0].genotype
-            if n == 1:
-                return (best_gt, MAX_PHRED)
-            oth_prob = logsumexp([all_probs[i].probability for i in range(1, n)])
-            phred = min(np.floor(-10 * oth_prob / common.LOG10), MAX_PHRED) if np.isfinite(oth_prob) else MAX_PHRED
-            return (best_gt, phred)
-
-
     def __init__(self, variant_obs):
         self.variant_obs = variant_obs
         self.sample_id = None
+        self.sample = None
         self.filter = Filters()
 
         self.cn_estimate = None
@@ -1210,11 +1335,14 @@ class VariantGenotypePred:
         # List of tuples of indices: [(index, ...)], inverse of var_pos_to_ext_pos.
         self.ext_pos_to_var_pos = None
 
-        self.pooled_genotypes = None
+        self.pooled_genotype = None
+        self.pooled_genotype_qual = None
         self.paralog_genotypes = None
+        self.paralog_genotype_probs = None
 
-    def init_genotypes(self, sample_id, sample, cn_profiles):
+    def init_genotypes(self, sample_id, sample, cn_profiles, varcall_params, out):
         self.sample_id = sample_id
+        self.sample = sample
 
         for var_pos in self.variant_obs.variant_positions:
             cn_estimates = list(cn_profiles.cn_estimates(sample_id, var_pos.region))
@@ -1224,10 +1352,9 @@ class VariantGenotypePred:
         else:
             # No CN estimates found.
             self.filter.add(Filter.Unknown_agCN)
-
-        self._init_pooled_genotypes(sample)
-        if not self.cn_estimate:
+            self._init_pooled_genotypes(varcall_params, out)
             return
+        pooled_genotypes = self._init_pooled_genotypes(varcall_params, out)
 
         if not self.variant_obs.use_samples[sample_id]:
             self.filter.add(Filter.UnclearObs)
@@ -1235,54 +1362,45 @@ class VariantGenotypePred:
 
         if self.ext_pos_cn is not None:
             self.paralog_genotypes = []
-            for pooled_gt in self.pooled_genotypes:
-                if pooled_gt.is_undefined:
-                    # self.paralog_genotypes.append(VariantGenotypePred.GtProb(None, 0)) # pooled_gt.probability))
-                    continue
-                for paralog_gt in MultiCopyGT.create_all(pooled_gt.genotype, self.ext_pos_cn):
-                    # TODO: Add additional prior based on the paralog genotype.
-                    # self.paralog_genotypes.append(
-                        # VariantGenotypePred.GtProb(paralog_gt, pooled_gt.probability, is_pooled=False))
-                    self.paralog_genotypes.append(
-                        VariantGenotypePred.GtProb(paralog_gt, 0, is_pooled=False))
+            for pooled_gt in pooled_genotypes:
+                self.paralog_genotypes.extend(MultiCopyGT.create_all(pooled_gt, self.ext_pos_cn))
+            self._calculate_paralog_priors(varcall_params, out)
 
-    def _init_pooled_genotypes(self, sample):
+    def _init_pooled_genotypes(self, varcall_params, out, return_best=True):
         sample_cn = 2 if self.cn_estimate is None else self.cn_estimate.pred_cn
-        read_counts = self.variant_obs.variant.samples[sample]['AD']
-        pooled_gt_counts, pooled_gt_probs = genotype_likelihoods(sample_cn, read_counts)
-
+        read_counts = self.variant_obs.variant.samples[self.sample]['AD']
+        pooled_gt_counts, pooled_gt_probs = genotype_likelihoods(sample_cn, read_counts,
+            error_prob=varcall_params.error_rate_pooled)
         n_copies_range = np.arange(len(pooled_gt_counts[0]))
-        # Ignore pooled genotypes if they have probability < 10^-5.
-        THRESHOLD_PROB = -5 * common.LOG10
-        self.pooled_genotypes = []
+        pooled_gts = [PooledGT(np.repeat(n_copies_range, gt_counts)) for gt_counts in pooled_gt_counts]
 
-        ixs = np.argsort(-pooled_gt_probs)
-        for j, i in enumerate(ixs):
-            pooled_gt_prob = pooled_gt_probs[i]
-            if pooled_gt_prob < THRESHOLD_PROB and self.pooled_genotypes:
-                other_prob = logsumexp(pooled_gt_probs[ixs[j:]])
-                self.pooled_genotypes.append(VariantGenotypePred.GtProb(None, other_prob))
-                break
+        best_i, pooled_gt_str = _genotype_probs_to_str(pooled_gts, pooled_gt_probs)
+        out.write('{}\t{}\tpooled_init\t{}\n'.format(self.sample, self.variant_obs.variant.pos, pooled_gt_str))
 
-            # Convert GT counts into regular genotype (for example 2,2 -> 0/0/1/1).
-            pooled_gt = np.repeat(n_copies_range, pooled_gt_counts[i])
-            self.pooled_genotypes.append(VariantGenotypePred.GtProb(pooled_gt, pooled_gt_prob))
+        self.pooled_genotype = pooled_gts[best_i]
+        self.pooled_genotype_qual = int(common.phred_qual(pooled_gt_probs, best_i))
+        if return_best:
+            threshold = varcall_params.pooled_gt_thresh
+            ixs = (best_i,) if pooled_gt_probs[best_i] < threshold else np.where(pooled_gt_probs >= threshold)[0]
+            return [pooled_gts[i] for i in ixs]
+        else:
+            return None
 
-    def _update_pooled_genotypes(self):
-        if (self.paralog_genotypes is None or len(self.pooled_genotypes) == 1 or
-                # There is only one pooled genotype (last genotype is "*").
-                (len(self.pooled_genotypes) == 2 and self.pooled_genotypes[1].is_undefined)):
+    def _calculate_paralog_priors(self, varcall_params, out):
+        self.paralog_genotype_probs = np.zeros(len(self.paralog_genotypes))
+        if len(self.paralog_genotypes) < 2:
             return
 
-        pooled_gt_dict = defaultdict(list)
-        for paralog_gt in self.paralog_genotypes:
-            key = paralog_gt.genotype and paralog_gt.genotype.pooled_genotype
-            pooled_gt_dict[key].append(paralog_gt.probability)
+        if self.variant_obs.psv_paralog_priors is None:
+            for i, gt in enumerate(self.paralog_genotypes):
+                self.paralog_genotype_probs[i] = gt.no_psv_prior(varcall_params.mutation_rate)
+        else:
+            self.variant_obs.calculate_psv_paralog_priors(self.ext_pos_to_var_pos, self.paralog_genotypes,
+                self.paralog_genotype_probs)
 
-        self.pooled_genotypes = []
-        for pooled_gt, probs in pooled_gt_dict.items():
-            self.pooled_genotypes.append(VariantGenotypePred.GtProb(pooled_gt, logsumexp(probs)))
-        self.pooled_genotypes.sort()
+        self.paralog_genotype_probs -= logsumexp(self.paralog_genotype_probs)
+        _, paralog_priors_str = _genotype_probs_to_str(self.paralog_genotypes, self.paralog_genotype_probs)
+        out.write('{}\t{}\tparalog_priors\t{}\n'.format(self.sample, self.variant_obs.variant.pos, paralog_priors_str))
 
     def paralog_genotype_quality(self, ext_copy_i):
         """
@@ -1290,30 +1408,16 @@ class VariantGenotypePred:
         """
         if self.paralog_genotypes is None or ext_copy_i is None:
             return None, 0
-
-        gt_dict = defaultdict(list)
-        oth_prob = -np.inf
-        for paralog_gt in self.paralog_genotypes:
-            if paralog_gt.is_undefined:
-                oth_prob = paralog_gt.probability
-            else:
-                gt_dict[paralog_gt.genotype.genotype[ext_copy_i]].append(paralog_gt.probability)
-
-        genotypes = []
-        genotype_probs = []
-        for gt, probs in gt_dict.items():
-            genotypes.append(gt)
-            genotype_probs.append(logsumexp(probs))
-        best_i = np.argmax(genotype_probs)
-        genotype_probs.append(oth_prob)
-        qual = common.phred_qual(genotype_probs, best_i)
-        return genotypes[best_i], np.floor(qual)
+        aggr_gts, aggr_gt_probs = MultiCopyGT.aggregate_genotypes(self.paralog_genotypes, self.paralog_genotype_probs,
+            ext_copy_i)
+        best_i = np.argmax(aggr_gt_probs)
+        return aggr_gts[best_i], int(common.phred_qual(aggr_gt_probs, best_i))
 
     def pooled_genotype_quality(self):
         """
         Returns best paralog genotype and its quality.
         """
-        return VariantGenotypePred.GtProb.phred_of_first(self.pooled_genotypes)
+        return self.pooled_genotype, self.pooled_genotype_qual
 
     def _match_var_pos_to_cn_estimates(self, cn_estimates):
         if len(cn_estimates) > 1:
@@ -1387,50 +1491,80 @@ class VariantGenotypePred:
         assert len(res) == len(ext_variant_regions) - 1
         return tuple(res)
 
-    def _add_read(self, curr_read_positions, allele_obs, n_copies, probs_update, log_pscn_frac):
+    def _add_read(self, curr_read_positions, allele_obs, n_copies, log_pscn_frac):
         read_pos, read_pos_probs = curr_read_positions.get_mate_pos_probs(allele_obs.is_first_mate)
-        if not read_pos:
-            return
-        k = 0
         n_read_pos = len(read_pos)
         ext_read_pos_probs = np.full(n_copies, -np.inf)
         for i, variant_pos in enumerate(self.variant_obs.variant_positions):
-            for j in range(k, n_read_pos):
-                if read_pos[j].intersects(variant_pos.region):
-                    k = j + 1
-                    ext_pos_i = self.var_pos_to_ext_pos[i]
+            ext_pos_i = self.var_pos_to_ext_pos[i]
+            for j, read_pos_j in enumerate(read_pos):
+                if read_pos_j is None or read_pos_j.intersects(variant_pos.region):
                     ext_read_pos_probs[ext_pos_i] = np.logaddexp(ext_read_pos_probs[ext_pos_i], read_pos_probs[j])
                     break
+            else:
+                ext_read_pos_probs[ext_pos_i] = np.logaddexp(ext_read_pos_probs[ext_pos_i], FORBIDDEN_LOC_PENALTY)
+
         ext_read_pos_probs += log_pscn_frac
+        # TODO: Check for infinities.
+        # if np.any(~np.isfinite(ext_read_pos_probs)):
+        #     print('Infinities')
         ext_read_pos_probs -= logsumexp(ext_read_pos_probs)
 
         read_allele = allele_obs.allele_ix
-        for i in range(len(probs_update)):
-            probs_update[i] += self.paralog_genotypes[i].genotype.calc_read_obs_prob(ext_read_pos_probs, read_allele)
-        probs_update -= logsumexp(probs_update)
+        for i, paralog_gt in enumerate(self.paralog_genotypes):
+            self.paralog_genotype_probs[i] += paralog_gt.calc_read_obs_prob(ext_read_pos_probs, read_allele)
 
-    def add_reads(self, read_positions):
+    def add_reads(self, read_positions, varcall_params, out):
         if self.paralog_genotypes is None:
             return
-        n_defined = len(self.paralog_genotypes) - int(self.paralog_genotypes[-1].is_undefined)
-        if n_defined < 2:
-            return
 
+        # print('Add reads to variant {}'.format(self.variant_obs.variant.pos))
         n_alleles = len(self.variant_obs.variant.alleles)
         for gt in self.paralog_genotypes:
-            if not gt.is_undefined:
-                gt.genotype.precompute_read_obs_probs(n_alleles)
+            gt.precompute_read_obs_probs(n_alleles, varcall_params.error_rate_paralog)
 
         n_copies = len(self.ext_pos_cn)
-        log_pscn_frac = np.log(self.ext_pos_cn) - np.log(sum(self.ext_pos_cn))
-        probs_update = np.zeros(n_defined)
-
+        log_pscn_frac = np.log(self.ext_pos_cn) - np.log(np.sum(self.ext_pos_cn))
         for read_hash, allele_obs in self.variant_obs.observations[self.sample_id].items():
-            self._add_read(read_positions[read_hash], allele_obs, n_copies, probs_update, log_pscn_frac)
-        for i, prob in enumerate(probs_update):
-            self.paralog_genotypes[i].probability += prob
-        normalization = logsumexp([gt.probability for gt in self.paralog_genotypes])
-        for gt in self.paralog_genotypes:
-            gt.probability -= normalization
-        self.paralog_genotypes.sort()
-        self._update_pooled_genotypes()
+            # print('    Add read {}  {}'.format(read_hash, allele_obs))
+            self._add_read(read_positions[read_hash], allele_obs, n_copies, log_pscn_frac)
+        self.paralog_genotype_probs -= logsumexp(self.paralog_genotype_probs)
+
+        _, paralog_str = _genotype_probs_to_str(self.paralog_genotypes, self.paralog_genotype_probs)
+        out.write('{}\t{}\tparalog_probs\t{}\n'.format(self.sample, self.variant_obs.variant.pos, paralog_str))
+
+        pooled_genotypes, pooled_genotype_probs = MultiCopyGT.aggregate_genotypes(
+            self.paralog_genotypes, self.paralog_genotype_probs, None)
+        best_pooled, pooled_str = _genotype_probs_to_str(pooled_genotypes, pooled_genotype_probs)
+        out.write('{}\t{}\tpooled_probs\t{}\n'.format(self.sample, self.variant_obs.variant.pos, pooled_str))
+        self.pooled_genotype = pooled_genotypes[best_pooled]
+        self.pooled_genotype_qual = int(common.phred_qual(pooled_genotype_probs, best_pooled))
+
+
+class VarCallParameters:
+    def __init__(self, args, samples):
+        self.pooled_gt_thresh = args.limit_pooled * common.LOG10
+        self.mutation_rate = args.mutation_rate * common.LOG10
+        self._set_use_af(args, samples)
+        self.no_mate_penalty = args.no_mate_penalty * common.LOG10
+
+        self.error_rate_pooled = np.power(10.0, args.error_rate)
+        assert 0 < self.error_rate_pooled < 1
+        self.error_rate_paralog = self.error_rate_pooled
+
+    def _set_use_af(self, args, samples):
+        use_af_arg = args.use_af.lower()
+        if use_af_arg in ('yes', 'y', 'true', 't'):
+            self.use_af = True
+
+        elif use_af_arg in ('no', 'n', 'false', 'f'):
+            self.use_af = False
+
+        elif use_af_arg.startswith('over-'):
+            count = use_af_arg.split('-', 1)[-1]
+            if not count.isdigit():
+                raise ValueError('Cannot parse --use-af {}'.format(use_af_arg))
+            self.use_af = len(samples) >= int(count)
+
+        else:
+            raise ValueError('Cannot parse --use-af {}'.format(use_af_arg))

@@ -55,9 +55,6 @@ def _msa_from_pairs(region1, seq1, aligned_regions):
 
 
 def _write_aligned_regions_csv(region, region_seq, aligned_regions, genome, outp):
-    outp.write('# %s\n' % ' '.join(sys.argv))
-    outp.write('chrom2\tpos2\tchrom1\tpos1\tnt1\tnt2\n')
-
     for al_region in aligned_regions:
         if al_region is None:
             continue
@@ -211,7 +208,7 @@ def construct_msa(region, table, genome, excl_dupl, outp, outp_csv, true_clustal
     _write_msa(region, region_seq, duplications, aligned_regions, genome, outp, true_clustal, width)
 
 
-def main(prog_name=None, in_args=None):
+def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
         description='Visualize multiple sequence alignment of homologous regions.',
@@ -248,7 +245,7 @@ def main(prog_name=None, in_args=None):
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
-    args = parser.parse_args(in_args)
+    args = parser.parse_args(in_argv)
 
     with Genome(args.fasta_ref) as genome, \
             pysam.TabixFile(args.input, parser=pysam.asTuple()) as table, \
@@ -262,6 +259,10 @@ def main(prog_name=None, in_args=None):
 # Rundate:  %s
 # Command:  %s
 ########################################\n''' % (datetime.now().strftime('%b %d %Y %H:%M:%S'), ' '.join(sys.argv)))
+
+        if outp_csv:
+            outp_csv.write('# %s\n' % ' '.join(sys.argv))
+            outp_csv.write('chrom2\tpos2\tchrom1\tpos1\tnt1\tnt2\n')
 
         excl_dupl = parse_expression(args.exclude)
         for region in common.get_regions(args, genome, only_unique=False):

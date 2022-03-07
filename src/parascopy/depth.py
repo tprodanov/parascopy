@@ -20,7 +20,6 @@ except ImportError:
 from . import pool_reads
 from .inner import common
 from .inner.genome import Genome, Interval
-from .inner import bam_file as bam_file_
 from .inner.cigar import Cigar, Operation
 from . import long_version, __pkg_name__
 
@@ -106,28 +105,17 @@ def _summarize_windows(windows, tail_windows):
     return left_bound, right_bound + 1
 
 
-_LOW_MAPQ = 10
-_MAX_INSERT_SIZE = 50000
-
-
 class WindowCounts:
-    def __init__(self):
+    def __init__(self, params):
+        self.low_mapq_thresh = params.low_mapq_thresh
+        self.max_mate_dist = params.max_mate_dist
+
         # Not paired reads will also get to _depth_read1.
         self._depth_read1 = 0
         self._depth_read2 = 0
         self._low_mapq_reads = 0
         self._clipped_reads = 0
         self._unpaired_reads = 0
-
-    @classmethod
-    def from_row(cls, row):
-        self = cls()
-        self._depth_read1 = int(row['depth1'])
-        self._depth_read2 = int(row['depth2'])
-        self._low_mapq_reads = int(row['low_mapq'])
-        self._clipped_reads = int(row['clipped'])
-        self._unpaired_reads = int(row['unpaired'])
-        return self
 
     def add_read(self, read, cigar, trust_proper_pair=False, look_at_oa=False):
         """
@@ -137,7 +125,7 @@ class WindowCounts:
             self._depth_read2 += 1
         else:
             self._depth_read1 += 1
-        if read.mapping_quality < _LOW_MAPQ:
+        if read.mapping_quality < self.low_mapq_thresh:
             self._low_mapq_reads += 1
 
         base_qualities = read.query_qualities
@@ -156,7 +144,7 @@ class WindowCounts:
             elif trust_proper_pair:
                 pass
             elif read.reference_id != read.next_reference_id \
-                    or abs(read.reference_start - read.next_reference_start) > _MAX_INSERT_SIZE:
+                    or abs(read.reference_start - read.next_reference_start) > self.max_mate_dist:
                 self._unpaired_reads += 1
 
     def __iadd__(self, other):
@@ -180,7 +168,7 @@ class WindowCounts:
         return self._depth_read2
 
     def write_to(self, outp):
-        outp.write('%d\t%d\t%d\t%d\t%d' % (self._depth_read1, self._depth_read2,
+        outp.write('{}\t{}\t{}\t{}\t{}'.format(self._depth_read1, self._depth_read2,
             self._low_mapq_reads, self._clipped_reads, self._unpaired_reads))
 
     def passes(self, params):
@@ -234,7 +222,7 @@ class _FetchRegion:
         return ix
 
     def fetch_from(self, bam_file):
-        return bam_file_.checked_fetch(bam_file, self._chrom, self._reg_start, self._reg_end)
+        return common.checked_fetch_coord(bam_file, self._chrom, self._reg_start, self._reg_end)
 
     @property
     def start_ix(self):
@@ -258,8 +246,15 @@ def _get_fetch_regions(windows, genome, window_size, max_distance=100):
     return regions
 
 
+_DEFAULT_LOW_MAPQ = 10
+_DEFAULT_MATE_DIST = pool_reads.MATE_DISTANCE
+
+
 class Params:
-    def __init__(self, window_filtering_mult=1):
+    def __init__(self, low_mapq_thresh=_DEFAULT_LOW_MAPQ, max_mate_dist=_DEFAULT_MATE_DIST, window_filtering_mult=1):
+        self.low_mapq_thresh = low_mapq_thresh
+        self.max_mate_dist = max_mate_dist
+
         self.window_size = None
         self.low_mapq_ratio = 0.1 * window_filtering_mult
         self.clipped_ratio = 0.1 * window_filtering_mult
@@ -287,8 +282,8 @@ class Params:
         return s
 
     @classmethod
-    def from_args(cls, args, window_size):
-        self = cls()
+    def from_args(cls, args, window_size, bounds):
+        self = cls(args.low_mapq, args.mate_dist)
         self.window_size = window_size
         self.low_mapq_ratio = args.low_mapq_perc / 100.0
         self.clipped_ratio = args.clipped_perc / 100.0
@@ -296,6 +291,7 @@ class Params:
         self.neighbours = args.neighbours
         self.set_neighbours_dist()
         self.loess_frac = args.loess_frac
+        self.gc_bounds = tuple(bounds)
         return self
 
     def equals(self, other):
@@ -452,7 +448,7 @@ def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_fi
         n_windows = len(windows)
         read_groups = bam_wrapper.read_groups()
         samples = list(set(map(operator.itemgetter(1), read_groups.values())))
-        window_counts = { sample: [WindowCounts() for _ in range(n_windows)] for sample in samples }
+        window_counts = { sample: [WindowCounts(params) for _ in range(n_windows)] for sample in samples }
 
         for region in fetch_regions:
             start_ix = region.start_ix
@@ -518,22 +514,23 @@ def all_files_depth(bam_wrappers, windows, fetch_regions, genome_filename, threa
         raise RuntimeError('One of the threads failed')
 
 
-def _write_means_header(out_means, windows, args, bounds):
+def _write_means_header(out_means, windows, params):
     common.log('Calculate background depth')
     window_size = len(windows[0])
-    out_means.write('# %s\n' % ' '.join(sys.argv))
-    out_means.write('# window size: %d\n' % window_size)
-    out_means.write('# number of windows: %d\n' % len(windows))
-    out_means.write('# max percentage of low MAPQ reads: %.1f\n' % (args.low_mapq_perc))
-    out_means.write('# max percentage of clipped reads: %.1f\n' % (args.clipped_perc))
-    out_means.write('# max percentage of unpaired reads: %.1f\n' % (args.unpaired_perc))
-    out_means.write('# skip neighbour windows: %d\n' % args.neighbours)
-    out_means.write('# loess fraction: %.4f\n' % args.loess_frac)
-    out_means.write('# tail windows: %d\n' % args.tail_windows)
-    out_means.write('# GC-content range: [%d %d]\n' % (bounds[0], bounds[1] - 1))
+    out_means.write('# command: {}\n'.format(' '.join(sys.argv)))
+    out_means.write('# window size: {}\n'.format(window_size))
+    out_means.write('# number of windows: {}\n'.format(len(windows)))
+    out_means.write('# low MAPQ threshold: {}\n'.format(params.low_mapq_thresh))
+    out_means.write('# max mate distance: {}\n'.format(params.max_mate_dist))
+    out_means.write('# max percentage of low MAPQ reads: {:.1f}\n'.format((params.low_mapq_perc)))
+    out_means.write('# max percentage of clipped reads: {:.1f}\n'.format((params.clipped_perc)))
+    out_means.write('# max percentage of unpaired reads: {:.1f}\n'.format((params.unpaired_perc)))
+    out_means.write('# skip neighbour windows: {}\n'.format(params.neighbours))
+    out_means.write('# loess fraction: {:.4f}\n'.format(params.loess_frac))
+    out_means.write('# tail windows: {}\n'.format(params.tail_windows))
+    out_means.write('# GC-content range: [{} {}]\n'.format(params.gc_bounds[0], params.gc_bounds[1] + 1))
     out_means.write('sample\tgc_content\tread_end\tn_windows\tmean\tvar\tquartiles'
         '\tmean_loess\tvar_loess\tnbinom_n\tnbinom_p\n')
-    return
 
 
 class Depth:
@@ -551,7 +548,7 @@ class Depth:
         """
         if os.path.isdir(filename):
             filename = os.path.join(filename, 'depth.csv')
-        self._params = Params(window_filtering_mult)
+        self._params = Params(window_filtering_mult=window_filtering_mult)
 
         req_fields = 'sample gc_content read_end nbinom_n nbinom_p'.split()
         with common.open_possible_gzip(filename) as inp:
@@ -564,6 +561,11 @@ class Depth:
                     key, value = map(str.strip, line[1:].split(':'))
                     if 'window size' in key:
                         self._params.window_size = int(value)
+                    elif 'MAPQ threshold' in key:
+                        self._params.low_mapq_thresh = int(value)
+                    elif 'mate' in key:
+                        self._params.max_mate_dist = int(value)
+
                     elif 'MAPQ' in key:
                         self._params.low_mapq_ratio = float(value) / 100 * window_filtering_mult
                     elif 'clipped' in key:
@@ -580,8 +582,8 @@ class Depth:
                 common.log('ERROR: Input file does not contain line "# window size: INT"')
                 exit(1)
             elif fieldnames is None or set(req_fields) - set(fieldnames):
-                common.log('ERROR: Input file does not contain some of the following fields: %s'
-                    % ', '.join(req_fields))
+                common.log('ERROR: Input file does not contain some of the following fields: {}'
+                    .format(', '.join(req_fields)))
                 exit(1)
             self._params.set_neighbours_dist()
 
@@ -604,6 +606,7 @@ class Depth:
                 if (np.isnan(n) or np.isnan(p)) and self.gc_content_defined(gc_content):
                     raise RuntimeError('ERROR: Sample {} is missing read depth parameters (see GC-content {})'
                         .format(row['sample'], gc_content))
+                    exit(1)
                 self._nbinom_params[sample_id, gc_content] = (n, p)
 
     @classmethod
@@ -666,8 +669,9 @@ class Depth:
     def gc_bounds(self):
         return self._params.gc_bounds
 
-    def describe_params(self):
-        return self._params.describe()
+    @property
+    def params(self):
+        return self._params
 
 
 def check_duplicated_samples(bam_wrappers):
@@ -706,7 +710,7 @@ def _write_readme(out_dir):
         out.write('These files are not important for downstream analysis and can be removed.\n')
 
 
-def main(prog_name, in_args):
+def main(prog_name, in_argv):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
         description='Calculate read depth and variance in given genomic windows.',
@@ -757,6 +761,10 @@ def main(prog_name, in_args):
     depth_args.add_argument('--tail-windows', metavar='<int>', type=int, default=1000,
         help='Do not use GC-content if it lies in the left or right tail\n'
             'with less than <int> windows [default: %(default)s].')
+    depth_args.add_argument('--low-mapq', metavar='<int>', type=int, default=_DEFAULT_LOW_MAPQ,
+        help='Read mapping quality under <int> is considered as low [default: %(default)s].')
+    depth_args.add_argument('--mate-dist', metavar='<int>', type=int, default=_DEFAULT_MATE_DIST,
+        help='Insert size (~ distance between read mates) is expected to be under <int> [default: %(default)s].')
 
     opt_args = parser.add_argument_group('Optional arguments')
     opt_args.add_argument('-@', '--threads', metavar='<int>', type=int, default=4,
@@ -766,12 +774,12 @@ def main(prog_name, in_args):
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version',
         version=long_version(), help='Show version.')
-    args = parser.parse_args(in_args)
+    args = parser.parse_args(in_argv)
 
     common.mkdir(args.output)
     genome = Genome(args.fasta_ref)
 
-    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome)
+    bam_wrappers, _samples = pool_reads.load_bam_files(args.input, args.input_list, genome)
     check_duplicated_samples(bam_wrappers)
 
     threads = max(1, min(len(bam_wrappers), args.threads, os.cpu_count()))
@@ -803,9 +811,9 @@ def main(prog_name, in_args):
     _write_readme(args.output)
     with open(os.path.join(args.output, 'depth.csv'), 'w') as out_means:
         common.log('Start calculating coverage')
-        params = Params.from_args(args, window_size)
+        params = Params.from_args(args, window_size, bounds)
         common.log(params.describe() + '    ============')
-        _write_means_header(out_means, windows, args, bounds)
+        _write_means_header(out_means, windows, params)
         prefix = os.path.join(args.output, 'tmp')
         all_files_depth(bam_wrappers, windows, fetch_regions, args.fasta_ref, threads, params, prefix, out_means)
 

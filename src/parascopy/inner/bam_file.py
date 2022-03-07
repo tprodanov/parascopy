@@ -13,19 +13,6 @@ from . import common
 from .cigar import Cigar
 
 
-def checked_fetch(bam_file, chrom, start, end):
-    try:
-        return bam_file.fetch(chrom, start, end)
-    except ValueError as e:
-        common.log('ERROR: Cannot fetch {}:{}-{} from {}. Possibly chromosome {} is not in the alignment file.'
-            .format(chrom, start + 1, end, bam_file.filename.decode(), chrom))
-        return iter(())
-
-
-def fetch(bam_file, region, genome):
-    return checked_fetch(bam_file, region.chrom_name(genome), region.start, region.end)
-
-
 def get_read_groups(bam_file):
     """
     Returns list of pairs (group_id, sample).
@@ -115,61 +102,28 @@ class ReadStatus(Enum):
         return self == ReadStatus.Realigned
 
 
-class AllDuplTree:
-    def __init__(self, table, genome):
-        self.table = table
-        self.genome = genome
-        self.dupl_tree = defaultdict(IntervalTree)
-        self.query_tree = defaultdict(IntervalTree)
-
-    def query_region_contained(self, region):
-        for interval in self.query_tree[region.chrom_id].overlap(region.start, region.end):
-            if interval.begin <= region.start and region.end <= interval.end:
-                return True
-        return False
-
-    def _checked_add_dupl_region(self, region):
-        tree = self.dupl_tree[region.chrom_id]
-        if not tree.containsi(region.start, region.end, None):
-            tree.addi(region.start, region.end, None)
-
-    def add_query_region(self, region):
-        chrom_id = region.chrom_id
-        self.query_tree[chrom_id].addi(region.start, region.end, None)
-        for tup in self.table.fetch(region.chrom_name(self.genome), region.start, region.end):
-            dupl = Duplication.from_tuple(tup, self.genome)
-            self._checked_add_dupl_region(dupl.region1)
-            if not dupl.is_tangled_region:
-                self._checked_add_dupl_region(dupl.region2)
-
-    def unique_tail_size(self, region, padding_right=1000):
-        start = region.start
-        end = region.end
-        if not self.query_region_contained(region):
-            self.add_query_region(Interval(region.chrom_id, start, end + padding_right))
-
-        min_tail = end - start
-        for interval in self.dupl_tree[region.chrom_id].overlap(start, end):
-            # Interval completely contains the region.
-            min_tail = min(min_tail,
-                max(0, interval.begin - start, end - interval.end))
-            # No reason to write a break here, because dupl_tree.overlap is a set, not a lazy iterator.
-        return min_tail
-
-
-def _aln_b_is_true_position(cigar_a, cigar_b, aln_region_b, strand_b, baseq, dupl_tree, min_tail):
+def _aln_b_is_true_position(cigar_a, cigar_b, aln_region_b, strand_b, baseq, unique_tree, min_tail):
     has_clipping_a = True if cigar_a is None else cigar_a.has_true_clipping(baseq)
     has_clipping_b = cigar_b.has_true_clipping(common.cond_reverse(baseq, strand=strand_b))
     #  Same as (not has_clipping_a or has_clipping_b).
     if has_clipping_a <= has_clipping_b:
         return False
-    return dupl_tree.unique_tail_size(aln_region_b) >= min_tail
+    return unique_tree.intersection_size(aln_region_b) >= min_tail
 
 
 class RecordCoord:
-    STATUS_MASK = 0b00000011
-    MAPPED_UNIQ = 0b10000000
-    IS_PAIRED   = 0b01000000
+    class LocationInfo(Enum):
+        """
+        Alignment region can have unknown status (unknown if correct or incorrect),
+        certainly correct (it is known that self.aln_region is the true location),
+        or certainly incorrect (self.aln_region is not the true location, however the true location is unknown).
+        """
+        Unknown = 0
+        CertIncorrect = 1
+        CertCorrect = 2
+
+    IS_PAIRED   = 0b00000001
+    LOC_INFO_SHIFT = 6
     MAX_U16 = 0xffff
     byte_struct = None
 
@@ -194,15 +148,34 @@ class RecordCoord:
         self.read_hash = None
         self.seq_len = None
         self.aln_region = None
-        self.status = None
-        self.mapped_uniquely = False
+        self.location_info = RecordCoord.LocationInfo.Unknown
         self.is_paired = False
+        self.other_entries = None
+
+    def add_entry(self, other):
+        if self.other_entries:
+            self.other_entries.append(other)
+        else:
+            self.other_entries = [other]
+
+    def get_certainly_correct_location(self):
+        return self.aln_region if self.location_info == RecordCoord.LocationInfo.CertCorrect else None
+
+    def get_certainly_incorrect_locations(self):
+        res = []
+        if self.location_info == RecordCoord.LocationInfo.CertIncorrect:
+            res.append(self.aln_region)
+        if self.other_entries:
+            for entry in self.other_entries:
+                if entry.location_info == RecordCoord.LocationInfo.CertIncorrect:
+                    res.append(entry.aln_region)
+        return tuple(res)
 
     @classmethod
-    def from_pooled_record(cls, record, dupl_tree, genome, min_mapq=50, min_unique_tail=50):
+    def from_pooled_record(cls, record, unique_tree, genome, min_mapq=50, min_unique_tail=15):
         self = cls()
         self.read_hash = string_hash_fnv1(record.query_name, record.is_read1)
-        # print('Hash {} {}'.format(record.query_name, self.read_hash))
+        # print('From pooled record: hash {} {}'.format(record.query_name, self.read_hash))
         self.seq_len = len(record.query_sequence)
         self.is_paired = record.is_paired
 
@@ -211,11 +184,12 @@ class RecordCoord:
             self.aln_region = aln_region_a = Interval(chrom_a, record.reference_start, record.reference_end)
             cigar_a = Cigar.from_pysam_tuples(record.cigartuples)
             mapq_a = record.mapping_quality
+            # print('    Alignment A:    {}   {}   {}'.format(aln_region_a.to_str(genome), cigar_a.to_str('.'), mapq_a))
+            # print('    unique tail A = {}'.format(unique_tree.intersection_size(aln_region_a)))
         else:
             cigar_a = None
 
-        self.status = ReadStatus(record.get_tag('st'))
-        if self.status.has_orig_aln():
+        if record.has_tag('OA'):
             oa_tag = record.get_tag('OA').split(',')
             chrom_b = genome.chrom_id(oa_tag[0])
             start_b = int(oa_tag[1]) - 1
@@ -226,27 +200,31 @@ class RecordCoord:
             aln_region_b = Interval(chrom_b, start_b, start_b + cigar_b.ref_len)
             if self.aln_region is None:
                 self.aln_region = aln_region_b
+            # print('    Alignment B:    {}   {}   {}'.format(aln_region_b.to_str(genome), cigar_b.to_str('.'), mapq_b))
+            # print('    unique tail B = {}'.format(unique_tree.intersection_size(aln_region_b)))
 
             # Do not check mapq_a because it is always 60.
             if mapq_b >= min_mapq and _aln_b_is_true_position(
-                    cigar_a, cigar_b, aln_region_b, strand_b, record.query_qualities, dupl_tree, min_unique_tail):
+                    cigar_a, cigar_b, aln_region_b, strand_b, record.query_qualities, unique_tree, min_unique_tail):
                 self.aln_region = aln_region_b
-                self.mapped_uniquely = True
+                self.location_info = RecordCoord.LocationInfo.CertCorrect
+            elif cigar_b.aligned_len > cigar_a.aligned_len + min_unique_tail:
+                self.location_info = RecordCoord.LocationInfo.CertIncorrect
 
         elif mapq_a >= min_mapq and not cigar_a.has_true_clipping(record.query_qualities) and \
-                dupl_tree.unique_tail_size(aln_region_a) >= min_unique_tail:
+                unique_tree.intersection_size(aln_region_a) >= min_unique_tail:
             self.aln_region = aln_region_a
-            self.mapped_uniquely = True
+            self.location_info = RecordCoord.LocationInfo.CertCorrect
+        # print('    -> location info = {}'.format(self.location_info))
 
         assert self.aln_region is not None
         return self
 
     def write_binary(self, out):
-        flag = self.status.value
+        flag = 0
         if self.is_paired:
             flag |= RecordCoord.IS_PAIRED
-        if self.mapped_uniquely:
-            flag |= RecordCoord.MAPPED_UNIQ
+        flag |= self.location_info.value << RecordCoord.LOC_INFO_SHIFT
 
         out.write(RecordCoord.byte_struct.pack(
             self.read_hash,
@@ -264,18 +242,16 @@ class RecordCoord:
         self.read_hash = np.uint64(read_hash)
         self.seq_len = seq_len
         self.aln_region = Interval(chrom_id, start, start + region_len)
-        self.status = ReadStatus(flag & RecordCoord.STATUS_MASK)
         self.is_paired = bool(flag & RecordCoord.IS_PAIRED)
-        self.mapped_uniquely = bool(flag & RecordCoord.MAPPED_UNIQ)
+        self.location_info = RecordCoord.LocationInfo(flag >> RecordCoord.LOC_INFO_SHIFT)
         return self
 
     def to_str(self, genome=None):
-        return 'Hash {}: status {}, length {}, alignment {}, mapped uniquely: {}'.format(self.read_hash,
-            self.status.name, self.seq_len, self.aln_region.to_str(genome) if genome else repr(self.aln_region),
-            self.mapped_uniquely)
+        return 'Hash {}: status {}, length {}, alignment {}, {}'.format(self.read_hash, self.status.name, self.seq_len,
+            self.aln_region.to_str(genome) if genome else repr(self.aln_region), self.location_info)
 
 
-def write_record_coordinates(in_bam, samples, dupl_tree, genome, out_filename):
+def write_record_coordinates(in_bam, samples, unique_tree, genome, out_filename):
     n_samples = len(samples)
     read_groups = {}
     for read_group, sample in get_read_groups(in_bam):
@@ -288,7 +264,7 @@ def write_record_coordinates(in_bam, samples, dupl_tree, genome, out_filename):
             for i in range(n_samples):
                 tmp_files.append(open(os.path.join(wdir, str(i)), 'wb'))
             for record in in_bam:
-                coord = RecordCoord.from_pooled_record(record, dupl_tree, genome)
+                coord = RecordCoord.from_pooled_record(record, unique_tree, genome)
                 sample_id = read_groups[record.get_tag('RG')]
                 coord.write_binary(tmp_files[sample_id])
         finally:
@@ -348,11 +324,7 @@ class CoordinatesIndex:
         for offset in range(0, length, struct_size):
             coord = RecordCoord.from_binary(buffer, offset)
             if coord.read_hash in coordinates:
-                curr_key = (coord.mapped_uniquely, len(coord.aln_region))
-                prev = coordinates[coord.read_hash]
-                prev_key = (prev.mapped_uniquely, len(prev.aln_region))
-                if curr_key > prev_key:
-                    coordinates[coord.read_hash] = coord
+                coordinates[coord.read_hash].add_entry(coord)
             else:
                 coordinates[coord.read_hash] = coord
         return coordinates

@@ -390,7 +390,7 @@ def _sort_output(in_path, out, args, genome, bgzip_output, wdir):
         raise RuntimeError('Bgzip finished with non-zero code')
 
 
-def main(prog_name=None, in_args=None):
+def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
         description='Create homology pre-table.\n'
@@ -450,7 +450,7 @@ def main(prog_name=None, in_args=None):
     oth_args.add_argument('-V', '--version', action='version',
         version=long_version(),
         help='Show version.')
-    args = parser.parse_args(in_args)
+    args = parser.parse_args(in_argv)
 
     common.check_executable(args.bwa, args.tabix, args.bgzip)
     args.threads = max(1, args.threads)

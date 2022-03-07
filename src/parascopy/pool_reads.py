@@ -17,10 +17,7 @@ from .view import parse_expression
 from . import long_version
 
 
-_MAX_INSERT_SIZE = 50000
-
-
-def _create_record(name, seq, qual, start, cigar_tuples, header, old_record, read_groups, status):
+def _create_record(name, seq, qual, start, cigar_tuples, header, old_record, read_groups, status, max_mate_dist):
     record = pysam.AlignedSegment(header)
     record.query_name = name
     record.query_sequence = seq
@@ -45,7 +42,7 @@ def _create_record(name, seq, qual, start, cigar_tuples, header, old_record, rea
             record.is_read2 = True
 
         if old_record.is_proper_pair and old_record.reference_id == old_record.next_reference_id \
-                and abs(old_record.reference_start - old_record.next_reference_start) <= _MAX_INSERT_SIZE:
+                and abs(old_record.reference_start - old_record.next_reference_start) <= max_mate_dist:
             record.is_proper_pair = True
 
     oa_tag = '{},{},{},{},{},{};'.format(old_record.reference_name, old_record.reference_start + 1,
@@ -67,7 +64,7 @@ def _create_header(genome, chrom_id, bam_wrappers, max_mate_dist):
 
 
 def _extract_reads(in_bam, out_bam, read_groups, region, genome, out_header, read_positions, max_mate_dist):
-    for record in bam_file_.fetch(in_bam, region, genome):
+    for record in common.checked_fetch(in_bam, region, genome):
         if record.flag & 3844:
             continue
 
@@ -75,7 +72,8 @@ def _extract_reads(in_bam, out_bam, read_groups, region, genome, out_header, rea
         assert curr_read_pos.add_realigned_pos(record.is_read2, record.reference_start)
         curr_read_pos.record_mate_pos(record, genome, max_mate_dist)
         new_rec = _create_record(record.query_name, record.query_sequence, record.query_qualities,
-            record.reference_start, record.cigartuples, out_header, record, read_groups, bam_file_.ReadStatus.SameLoc)
+            record.reference_start, record.cigartuples, out_header, record, read_groups, bam_file_.ReadStatus.SameLoc,
+            max_mate_dist)
         out_bam.write(new_rec)
 
 
@@ -126,23 +124,20 @@ def _extract_reads_and_realign(in_bam, out_bam, read_groups, dupl, genome, out_h
 
     read_positions: dictionary, key = read_name, values = _ReadPositions.
     """
-    for record in bam_file_.fetch(in_bam, dupl.region2, genome):
+    for record in common.checked_fetch(in_bam, dupl.region2, genome):
         if record.flag & 3844:
             continue
 
         orig_aln = Alignment.from_record(record, genome)
-        reg1_aln = dupl.align_read(record.query_sequence, orig_aln, weights, calc_score=False)
-
+        read_seq, reg1_aln = dupl.align_read(record.query_sequence, orig_aln, weights, calc_score=False)
         new_pos = reg1_aln.ref_interval.start
         if not read_positions[record.query_name].add_realigned_pos(record.is_read2, new_pos):
             continue
 
-        same_strand = reg1_aln.strand == orig_aln.strand
         cigar_tuples = reg1_aln.cigar.to_pysam_tuples() if reg1_aln.cigar is not None else None
-        new_rec = _create_record(record.query_name,
-            common.cond_rev_comp(record.query_sequence, strand=same_strand),
-            common.cond_reverse(record.query_qualities, strand=same_strand),
-            new_pos, cigar_tuples, out_header, record, read_groups, bam_file_.ReadStatus.Realigned)
+        new_rec = _create_record(record.query_name, read_seq,
+            common.cond_reverse(record.query_qualities, strand=dupl.strand),
+            new_pos, cigar_tuples, out_header, record, read_groups, bam_file_.ReadStatus.Realigned, max_mate_dist)
         read_positions[record.query_name].record_mate_pos(record, genome, max_mate_dist)
         out_bam.write(new_rec)
 
@@ -166,7 +161,7 @@ def _get_fetch_regions(fetch_positions, max_dist=100):
     return fetch_regions
 
 
-def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_groups):
+def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_groups, max_mate_dist):
     fetch_positions = []
     mate_names = set()
 
@@ -183,7 +178,7 @@ def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_group
         return
 
     for region in _get_fetch_regions(fetch_positions):
-        for record in bam_file_.fetch(in_bam, region, genome):
+        for record in common.checked_fetch(in_bam, region, genome):
             if record.flag & 3844:
                 continue
             key = (record.query_name, record.is_read2)
@@ -193,14 +188,16 @@ def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_group
 
             new_rec = _create_record(record.query_name, record.query_sequence, record.query_qualities,
                 record.reference_start, record.cigartuples, out_header, record, read_groups,
-                bam_file_.ReadStatus.ReadMate)
+                bam_file_.ReadStatus.ReadMate, max_mate_dist)
             out_bam.write(new_rec)
 
 
-_MATE_DISTANCE = 5000
+MATE_DISTANCE = 5000
 
-def pool_reads_inner(bam_wrappers, out_path, interval, duplications, genome, weights, *,
-        samtools, max_mate_dist=_MATE_DISTANCE, verbose=True, time_log=None):
+def pool(bam_wrappers, out_path, interval, duplications, genome, *,
+        samtools='samtools', weights=None, max_mate_dist=MATE_DISTANCE, verbose=True, time_log=None):
+    if weights is None:
+        weights = Weights()
     if verbose:
         common.log('Extracting and realigning reads')
     if time_log is not None:
@@ -222,7 +219,7 @@ def pool_reads_inner(bam_wrappers, out_path, interval, duplications, genome, wei
                     _extract_reads_and_realign(bam_file, tmp_bam, read_groups, dupl, genome,
                         out_header, weights, read_positions, max_mate_dist)
                 if max_mate_dist != 0:
-                    _write_mates(bam_file, tmp_bam, read_positions, genome, out_header, read_groups)
+                    _write_mates(bam_file, tmp_bam, read_positions, genome, out_header, read_groups, max_mate_dist)
 
     if verbose:
         common.log('Sorting pooled reads')
@@ -242,11 +239,9 @@ def pool_reads_inner(bam_wrappers, out_path, interval, duplications, genome, wei
         common.Process([samtools, 'index', out_path]).finish(zero_code_stderr=False)
 
 
-def pool_reads(bam_wrappers, out_path, interval, table, genome, args):
-    weights = Weights()
+def load_duplications(table, genome, interval, exclude_str):
+    exclude_dupl = parse_expression(exclude_str)
     duplications = []
-    exclude_dupl = parse_expression(args.exclude)
-
     for tup in table.fetch(interval.chrom_name(genome), interval.start, interval.end):
         dupl = duplication_.Duplication.from_tuple(tup, genome)
         if dupl.is_tangled_region or exclude_dupl(dupl, genome):
@@ -256,9 +251,7 @@ def pool_reads(bam_wrappers, out_path, interval, table, genome, args):
         dupl.set_sequences(genome=genome)
         dupl.set_padding_sequences(genome, 200)
         duplications.append(dupl)
-
-    pool_reads_inner(bam_wrappers, out_path, interval, duplications, genome, weights,
-        samtools=args.samtools, max_mate_dist=args.mate_dist, verbose=args.verbose)
+    return duplications
 
 
 class BamWrapper:
@@ -345,10 +338,10 @@ def load_bam_files(input, input_list, genome):
     return bam_wrappers, samples
 
 
-def main(prog_name=None, in_args=None):
+def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
-        description='Pool reads from various copies of a given homologous region.',
+        description='Pool reads from various copies of a duplication.',
         formatter_class=argparse.RawTextHelpFormatter, add_help=False,
         usage='{} (-i <bam> [...] | -I <bam-list>) -t <table> -f <fasta> -r <region> -o <bam>'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
@@ -367,7 +360,8 @@ def main(prog_name=None, in_args=None):
 
     io_args.add_argument('-t', '--table', metavar='<file>', required=True,
         help='Input indexed bed table with information about segmental duplications.')
-    io_args.add_argument('-f', '--fasta-ref', metavar='<file>', required=True)
+    io_args.add_argument('-f', '--fasta-ref', metavar='<file>', required=True,
+        help='Input reference fasta file.')
     io_args.add_argument('-r', '--region', metavar='<region>',
         help='Single region in format "chr:start-end". Start and end are 1-based inclusive.\nCommas are ignored.')
     io_args.add_argument('-o', '--output', metavar='<file>', required=True,
@@ -379,7 +373,7 @@ def main(prog_name=None, in_args=None):
         help='Exclude duplications for which the expression is true\n[default: %(default)s].')
 
     opt_args = parser.add_argument_group('Optional arguments')
-    opt_args.add_argument('-m', '--mate-dist', metavar='<int>|infinity', type=float, default=_MATE_DISTANCE,
+    opt_args.add_argument('-m', '--mate-dist', metavar='<int>|infinity', type=float, default=MATE_DISTANCE,
         help='Output read mates even if they are outside of the duplication,\n'
             'if the distance between mates is less than <int> [default: %(default)s].\n'
             'Use 0 to skip all mates outside the duplicated regions.\n'
@@ -393,15 +387,17 @@ def main(prog_name=None, in_args=None):
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
-    args = parser.parse_args(in_args)
+    args = parser.parse_args(in_argv)
 
     if args.samtools != 'none':
         common.check_executable(args.samtools)
 
     with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
         interval = Interval.parse(args.region, genome)
-        bam_wrappers, samples = load_bam_files(args.input, args.input_list, genome)
-        pool_reads(bam_wrappers, args.output, interval, table, genome, args)
+        bam_wrappers, _samples = load_bam_files(args.input, args.input_list, genome)
+        duplications = load_duplications(table, genome, interval, args.exclude)
+        pool(bam_wrappers, args.output, interval, duplications, genome,
+            samtools=args.samtools, max_mate_dist=args.mate_dist, verbose=args.verbose)
 
 
 if __name__ == '__main__':

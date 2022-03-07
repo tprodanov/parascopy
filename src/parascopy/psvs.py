@@ -24,18 +24,23 @@ class _SecondRegion:
         return _SecondRegion(self.start, self.end, self.dupl_index)
 
     def __str__(self):
-        return 'SR(start=%d, end=%d, dupl=%d)' % (self.start, self.end, self.dupl_index)
+        return 'SR(start={}, end={}, dupl={})'.format(self.start, self.end, self.dupl_index)
 
     def __repr__(self):
         return self.__str__()
 
 
-# reg2 will be used as list of _SecondRegion, or as a single _SecondRegion.
 class _Psv:
-    def __init__(self, start, end, reg2):
+    def __init__(self, start, end, reg2=None):
         self.start = start
         self.end = end
-        self.reg2 = reg2
+        # List of second regions.
+        # Fake PSVs (at the start and end of duplications) will have self.end = None and
+        # self.reg2 = [(dupl_i, is_start)].
+        self.reg2 = []
+        if reg2 is not None:
+            self.reg2.append(reg2)
+        self.active_dupl = None
 
     def to_record(self, vcf_header, chrom_name, duplications, genome, aligned_pos):
         record = vcf_header.new_record()
@@ -109,7 +114,15 @@ class _Psv:
         return self.start < other.start
 
     def __str__(self):
-        return 'start=%s, end=%s, reg2=%s' % (self.start, self.end, self.reg2)
+        return 'start={}, end={}, reg2={}, active={}'.format(self.start, self.end, self.reg2, self.active_dupl)
+
+    def copy(self):
+        res = _Psv(self.start, self.end)
+        for entry in self.reg2:
+            res.reg2.append(entry.copy())
+        if self.active_dupl is not None:
+            res.active_dupl = set(self.active_dupl)
+        return res
 
 
 def create_vcf_header(genome, chrom_ids=None, argv=None):
@@ -123,7 +136,92 @@ def create_vcf_header(genome, chrom_ids=None, argv=None):
     return vcf_header
 
 
-def create_psv_records(duplications, genome, vcf_header, region, tangled_regions):
+def duplication_differences(region1, reg1_seq, reg2_seq, full_cigar, dupl_i, psvs, aligned_pos,
+        in_region, tangled_searcher):
+    reg1_start = region1.start
+    psvs.append(_Psv(reg1_start, None, (dupl_i, True)))
+    psvs.append(_Psv(region1.end, None, (dupl_i, False)))
+
+    for (start1, end1, start2, end2) in full_cigar.find_differences():
+        if end1 - start1 != end2 - start2:
+            assert start1 >= 0 and start2 >= 0
+            ref = reg1_seq[start1:end1]
+            alt = reg2_seq[start2:end2]
+            psv_start = reg1_start + start1
+            new_start = variants_.move_left(psv_start, ref, (alt,), reg1_seq, reg1_start, skip_alleles=True)
+            if new_start is not None:
+                raise RuntimeError('PSV must be moved left')
+                # shift = psv_start - new_start
+                # start1 -= shift
+                # end1 -= shift
+                # start2 -= shift
+                # end2 -= shift
+
+        psv_start = reg1_start + start1
+        psv_end = reg1_start + end1
+        if psv_start < in_region.end and in_region.start < psv_end and \
+                tangled_searcher.overlap_size(psv_start, psv_end) == 0:
+            psvs.append(_Psv(psv_start, psv_end, _SecondRegion(start2, end2, dupl_i)))
+
+    curr_aligned_pos = []
+    exp_pos1 = 0
+    for pos2, pos1 in full_cigar.aligned_pairs():
+        if exp_pos1 != pos1:
+            for _ in range(exp_pos1, pos1):
+                curr_aligned_pos.append(None)
+        exp_pos1 = pos1 + 1
+        curr_aligned_pos.append(pos2)
+    assert len(curr_aligned_pos) == len(region1)
+    aligned_pos.append(curr_aligned_pos)
+
+
+def combine_psvs(psvs, aligned_pos, duplication_starts1):
+    psvs.sort()
+    to_save = _Psv(None, None)
+    to_save.active_dupl = set()
+    active_dupl = set()
+
+    for psv in psvs:
+        assert len(psv.reg2) == 1
+        psv_reg2 = psv.reg2[0]
+
+        if psv.is_fake():
+            dupl_i, is_start = psv_reg2
+            if is_start:
+                active_dupl.add(dupl_i)
+                if to_save.defined() and to_save.end > duplication_starts1[dupl_i]:
+                    to_save.active_dupl.add(dupl_i)
+            else:
+                active_dupl.remove(dupl_i)
+            continue
+
+        if to_save.defined() and to_save.end > psv.start:
+            skip_append = False
+            end_shift = max(0, psv.end - to_save.end)
+            to_save.end += end_shift
+            for region2 in to_save.reg2:
+                region2.end += end_shift
+                skip_append |= region2.dupl_index == psv_reg2.dupl_index
+
+            if not skip_append:
+                start_shift = psv.start - to_save.start
+                end_shift = to_save.end - psv.end
+                to_save.reg2.append(
+                    _SecondRegion(psv_reg2.start - start_shift, psv_reg2.end + end_shift, psv_reg2.dupl_index))
+
+        else:
+            if to_save.defined():
+                yield to_save.copy()
+            to_save.start = psv.start
+            to_save.end = psv.end
+            to_save.reg2.clear()
+            to_save.reg2.append(psv_reg2.copy())
+            to_save.active_dupl = set(active_dupl)
+    if to_save.defined():
+        yield to_save.copy()
+
+
+def create_psv_records(duplications, genome, vcf_header, in_region, tangled_regions):
     if not duplications:
         return []
 
@@ -137,88 +235,15 @@ def create_psv_records(duplications, genome, vcf_header, region, tangled_regions
     # In that case reg2 is a pair (dupl_i, is_start).
     psvs = []
 
-    for i, dupl in enumerate(duplications):
-        dupl_seq1 = dupl.seq1
-        dupl_seq2 = dupl.seq2
-        reg1_start = dupl.region1.start
-        psvs.append(_Psv(reg1_start, None, (i, True)))
-        psvs.append(_Psv(dupl.region1.end, None, (i, False)))
-
-        for (start1, end1, start2, end2) in dupl.full_cigar.find_differences():
-            if end1 - start1 != end2 - start2:
-                assert start1 >= 0 and start2 >= 0
-                ref = dupl_seq1[start1:end1]
-                alt = dupl_seq2[start2:end2]
-                psv_start = reg1_start + start1
-                new_start = variants_.move_left(psv_start, ref, (alt,), dupl_seq1, reg1_start, skip_alleles=True)
-                if new_start is not None:
-                    shift = psv_start - new_start
-                    start1 -= shift
-                    end1 -= shift
-                    start2 -= shift
-                    end2 -= shift
-
-            psv_start = reg1_start + start1
-            psv_end = reg1_start + end1
-            if psv_start < region.end and region.start < psv_end and \
-                    tangled_searcher.overlap_size(psv_start, psv_end) == 0:
-                psvs.append(_Psv(psv_start, psv_end, _SecondRegion(start2, end2, i)))
-
-        curr_aligned_pos = []
-        exp_pos1 = 0
-        for pos2, pos1 in dupl.full_cigar.aligned_pairs():
-            if exp_pos1 != pos1:
-                for _ in range(exp_pos1, pos1):
-                    curr_aligned_pos.append(None)
-            exp_pos1 = pos1 + 1
-            curr_aligned_pos.append(pos2)
-        assert len(curr_aligned_pos) == len(dupl.region1)
-        aligned_pos.append(curr_aligned_pos)
-    psvs.sort()
+    for dupl_i, dupl in enumerate(duplications):
+        duplication_differences(dupl.region1, dupl.seq1, dupl.seq2, dupl.full_cigar, dupl_i, psvs, aligned_pos,
+            in_region, tangled_searcher)
 
     chrom_name = genome.chrom_name(duplications[0].region1.chrom_id)
     psv_records = []
-    # _Psv instance. reg2 is used as a list of _SecondRegion.
-    to_save = _Psv(None, None, [])
-    to_save.active_dupl = set()
-    active_dupl = set()
-
-    for psv in psvs:
-        if psv.is_fake():
-            dupl_i, is_start = psv.reg2
-            if is_start:
-                active_dupl.add(dupl_i)
-                if to_save.defined() and to_save.end > duplications[dupl_i].region1.start:
-                    to_save.active_dupl.add(dupl_i)
-            else:
-                active_dupl.remove(dupl_i)
-            continue
-
-        if to_save.defined() and to_save.end > psv.start:
-            skip_append = False
-            end_shift = max(0, psv.end - to_save.end)
-            to_save.end += end_shift
-            for region2 in to_save.reg2:
-                region2.end += end_shift
-                skip_append |= region2.dupl_index == psv.reg2.dupl_index
-
-            if not skip_append:
-                start_shift = psv.start - to_save.start
-                end_shift = to_save.end - psv.end
-                to_save.reg2.append(
-                    _SecondRegion(psv.reg2.start - start_shift, psv.reg2.end + end_shift, psv.reg2.dupl_index))
-
-        else:
-            if to_save.defined():
-                psv_records.append(to_save.to_record(vcf_header, chrom_name, duplications, genome, aligned_pos))
-            to_save.start = psv.start
-            to_save.end = psv.end
-            to_save.reg2.clear()
-            to_save.reg2.append(psv.reg2.copy())
-            to_save.active_dupl = set(active_dupl)
-    if to_save.defined():
-        psv_records.append(to_save.to_record(vcf_header, chrom_name, duplications, genome, aligned_pos))
-
+    duplication_starts1 = [dupl.region1.start for dupl in duplications]
+    for pre_psv in combine_psvs(psvs, aligned_pos, duplication_starts1):
+        psv_records.append(pre_psv.to_record(vcf_header, chrom_name, duplications, genome, aligned_pos))
     psv_records.sort(key=operator.attrgetter('start'))
     return psv_records
 
@@ -232,7 +257,7 @@ def write_psvs(psv_records, vcf_header, vcf_path, tabix):
         common.Process([tabix, '-p', 'vcf', vcf_path]).finish()
 
 
-def main(prog_name=None, in_args=None):
+def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
         description='Output PSVs (paralogous-sequence variants) between homologous regions.',
@@ -260,7 +285,7 @@ def main(prog_name=None, in_args=None):
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
-    args = parser.parse_args(in_args)
+    args = parser.parse_args(in_argv)
 
     with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.input, parser=pysam.asTuple()) as table:
         regions = Interval.combine_overlapping(common.get_regions(args, genome))
@@ -279,6 +304,7 @@ def main(prog_name=None, in_args=None):
                 elif not excl_dupl(dupl, genome):
                     dupl.set_cigar_from_info()
                     dupl.set_sequences(genome=genome)
+                    dupl.set_padding_sequences(genome, 100)
                     duplications.append(dupl)
             records.extend(create_psv_records(duplications, genome, vcf_header, region, tangled_regions))
         write_psvs(records, vcf_header, args.output, 'tabix')
