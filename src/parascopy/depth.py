@@ -514,7 +514,7 @@ def all_files_depth(bam_wrappers, windows, fetch_regions, genome_filename, threa
         raise RuntimeError('One of the threads failed')
 
 
-def _write_means_header(out_means, windows, params):
+def _write_means_header(out_means, windows, params, tail_windows):
     common.log('Calculate background depth')
     window_size = len(windows[0])
     out_means.write('# command: {}\n'.format(' '.join(sys.argv)))
@@ -522,12 +522,12 @@ def _write_means_header(out_means, windows, params):
     out_means.write('# number of windows: {}\n'.format(len(windows)))
     out_means.write('# low MAPQ threshold: {}\n'.format(params.low_mapq_thresh))
     out_means.write('# max mate distance: {}\n'.format(params.max_mate_dist))
-    out_means.write('# max percentage of low MAPQ reads: {:.1f}\n'.format((params.low_mapq_perc)))
-    out_means.write('# max percentage of clipped reads: {:.1f}\n'.format((params.clipped_perc)))
-    out_means.write('# max percentage of unpaired reads: {:.1f}\n'.format((params.unpaired_perc)))
+    out_means.write('# max percentage of low MAPQ reads: {:.1f}\n'.format((params.low_mapq_ratio * 100)))
+    out_means.write('# max percentage of clipped reads: {:.1f}\n'.format((params.clipped_ratio * 100)))
+    out_means.write('# max percentage of unpaired reads: {:.1f}\n'.format((params.unpaired_ratio * 100)))
     out_means.write('# skip neighbour windows: {}\n'.format(params.neighbours))
     out_means.write('# loess fraction: {:.4f}\n'.format(params.loess_frac))
-    out_means.write('# tail windows: {}\n'.format(params.tail_windows))
+    out_means.write('# tail windows: {}\n'.format(tail_windows))
     out_means.write('# GC-content range: [{} {}]\n'.format(params.gc_bounds[0], params.gc_bounds[1] + 1))
     out_means.write('sample\tgc_content\tread_end\tn_windows\tmean\tvar\tquartiles'
         '\tmean_loess\tvar_loess\tnbinom_n\tnbinom_p\n')
@@ -813,7 +813,7 @@ def main(prog_name, in_argv):
         common.log('Start calculating coverage')
         params = Params.from_args(args, window_size, bounds)
         common.log(params.describe() + '    ============')
-        _write_means_header(out_means, windows, params)
+        _write_means_header(out_means, windows, params, args.tail_windows)
         prefix = os.path.join(args.output, 'tmp')
         all_files_depth(bam_wrappers, windows, fetch_regions, args.fasta_ref, threads, params, prefix, out_means)
 
