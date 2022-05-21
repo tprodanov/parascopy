@@ -1,12 +1,14 @@
 Parascopy CN output files
 -------------------------
 
-`parascopy cn` and `parascopy cn-using` output directory contains many files, most importantly `res.samples.bed.gz`,
-`res.matrix.bed.gz` and `psvs.vcf.gz`. You can find output files description here.
+`parascopy cn` and `parascopy cn-using` output directory contains many files,
+most importantly `res.samples.bed.gz`, `res.paralog.bed.gz` and `psvs.vcf.gz`.
+Here you can find the description of these output files.
 
 Table of contents
 -----------------
 * [Copy number profiles (res.samples.bed.gz)](#copy-number-profiles)
+* [Paralog-specific output (res.paralog.bed.gz)](#paralog-specific-output)
 * [Matrix with CN profiles (res.matrix.bed.gz)](#matrix-with-cn-profiles)
 * [Paralogous sequence variants (psvs.vcf.gz)](#paralogous-sequence-variants)
 
@@ -87,6 +89,23 @@ If `link` is present, `n_psvs` and other tags related to PSVs are summed for all
 - `agCN_probs`: this tag appears if agCN quality is less than 40, and it stores -log10 probabilities of possible agCN values.
     For example `agCN_probs=7:0.09,6:0.73` means that agCN is either 7 with probability 10<sup> -0.09</sup> ≈ 81%
     or 6 with probability 10<sup> -0.73</sup> ≈ 19%.
+
+Paralog-specific output
+-----------------------
+
+Output file `res.paralog.bed.gz` splits `res.samples.bed.gz` output into paralog-specific entries.
+Output entries are available only for regions, where paralog-specific copy number is available.
+The file has the following columns:
+| Number | Name | Description |
+| ------ | ---- | ----------- |
+| 1 | chrom | Chromosome name |
+| 2 | start | 0-based genomic position (inclusive) |
+| 3 | end   | 0-based genomic position (exclusive) |
+| 4 | sample   | Sample name |
+| 5 | filter   | Union over aggregate and paralog-specific CN filter |
+| 6 | copy_num | Paralog-specific copy number of the region |
+| 7 | qual     | Minimum over the aggregate CN and paralog-specific CN qualities |
+| 8 | main_region | See main_region in the `res.samples` file for more information |
 
 Matrix with CN profiles
 -----------------------

@@ -304,7 +304,10 @@ def log1minus(x):
     """
     Return 1 - sum(x) in a logarithmic scale.
     """
-    return logsumexp((0.0, logsumexp(x)), b=(1, -1))
+    subtrahend = logsumexp(x)
+    if subtrahend >= 0.0:
+        return -np.inf
+    return logsumexp((0.0, subtrahend), b=(1, -1))
 
 
 LOG10 = np.log(10)
@@ -335,10 +338,10 @@ def extended_phred_qual(probs, best_ix, *, sum_prob=None, rem_prob=None, max_val
         return min(-10 * rem_prob / LOG10, max_value)
 
     if sum_prob is None:
-        sum_prob = logsumexp((0.0, rem_prob), b=(1, -1))
+        sum_prob = logsumexp((0.0, min(rem_prob, 0.0)), b=(1, -1))
     else:
         assert rem_prob is None
-        rem_prob = logsumexp((0.0, sum_prob), b=(1, -1))
+        rem_prob = logsumexp((0.0, min(sum_prob, 0.0)), b=(1, -1))
 
     probs = probs + sum_prob
     probs[best_ix] = rem_prob
