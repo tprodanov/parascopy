@@ -52,6 +52,9 @@ def region1_start(dupl_region):
 def region1_end(dupl_region):
     return dupl_region.region1.end
 
+def identity(obj):
+    return obj
+
 
 def create_interval_tree(objects, start_getter, end_getter, store_indices=False):
     tree = IntervalTree()
@@ -81,38 +84,47 @@ class MultiChromTree:
     def overlap_iter(self, region):
         return (self._objects[i] for i in self.overlap_ixs(region))
 
+    def overlap_size(self, region):
+        tree = self._trees.get(region.chrom_id)
+        return 0 if tree is None else len(tree.overlap(region.start, region.end))
+
 
 class MultiNonOverlTree:
-    def __init__(self, regions):
+    def __init__(self, objects, region_getter=identity):
+        start_getter = lambda obj: region_getter(obj).start
+        end_getter = lambda obj: region_getter(obj).end
+
         self._trees = []
-        curr_regions = []
+        curr_objects = []
         curr_chrom_id = None
-        for region in regions:
-            if curr_chrom_id is not None and curr_chrom_id == region.chrom_id:
-                curr_regions.append(region)
+        for obj in objects:
+            chrom_id = region_getter(obj).chrom_id
+            if curr_chrom_id is not None and curr_chrom_id == chrom_id:
+                curr_objects.append(obj)
             else:
-                if curr_regions:
+                if curr_objects:
                     for _ in range(len(self._trees), curr_chrom_id):
                         self._trees.append(None)
-                    # itree.start and itree.end
-                    self._trees.append(NonOverlTree(curr_regions, start, end))
-                    curr_regions.clear()
+                    self._trees.append(NonOverlTree(curr_objects, start_getter, end_getter))
+                    curr_objects.clear()
 
-                curr_regions.append(region)
-                curr_chrom_id = region.chrom_id
+                curr_objects.append(obj)
+                curr_chrom_id = chrom_id
 
-        if curr_regions:
+        if curr_objects:
             for _ in range(len(self._trees), curr_chrom_id):
                 self._trees.append(None)
-            # itree.start and itree.end
-            self._trees.append(NonOverlTree(curr_regions, start, end))
+            self._trees.append(NonOverlTree(curr_objects, start_getter, end_getter))
 
     def overlap_iter(self, region):
-        tree = self._trees[region.chrom_id]
+        tree = None if region.chrom_id >= len(self._trees) else self._trees[region.chrom_id]
         if tree is None:
-            assert False # Just to check that we do not ask for regions where we do not expect them.
             return iter(())
         return tree.overlap_iter(region.start, region.end)
+
+    def overlap_size(self, region):
+        tree = None if region.chrom_id >= len(self._trees) else self._trees[region.chrom_id]
+        return 0 if tree is None else tree.overlap_size(region.start, region.end)
 
     def intersection_size(self, region):
         return sum(interval.intersection_size(region) for interval in self.overlap_iter(region))

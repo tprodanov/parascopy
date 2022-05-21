@@ -121,7 +121,8 @@ class Alignment:
         self._stats = stats
 
     def to_str(self, genome):
-        res = 'Aln(%s; %s; %s' % (self._ref_interval.to_str(genome), self.strand_str, self._cigar.to_str())
+        res = 'Aln({}; {}; {}'.format(self._ref_interval.to_str(genome), self.strand_str,
+            '*' if self._cigar is None else self._cigar.to_str())
         if self._stats:
             stats_str = self._stats.to_str('; ')
             if stats_str:
@@ -129,7 +130,7 @@ class Alignment:
         return res + ')'
 
     def to_short_str(self, genome):
-        res = '%s:%s' % (self._ref_interval.to_str(genome), self.strand_str)
+        res = '{}:{}'.format(self._ref_interval.to_str(genome), self.strand_str)
         if self._stats:
             stats_str = self._stats.to_str(';')
             if stats_str:

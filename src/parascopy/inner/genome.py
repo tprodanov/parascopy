@@ -68,6 +68,9 @@ class ChromNames:
     def chrom_lengths(self):
         return self._lengths
 
+    def names_lengths(self):
+        return zip(self._names, self._lengths)
+
     @property
     def n_chromosomes(self):
         return len(self._names)
@@ -80,7 +83,7 @@ class ChromNames:
         return cls(obj.references, obj.lengths)
 
     def generate_bam_header(self):
-        return '\n'.join(map('@SQ\tSN:%s\tLN:%d'.__mod__, zip(self._names, self._lengths)))
+        return '\n'.join(map('@SQ\tSN:%s\tLN:%d'.__mod__, self.names_lengths()))
 
     def chrom_interval(self, chrom_id, named=True):
         if named:
@@ -149,6 +152,39 @@ class Genome(ChromNames):
     def is_merged(self):
         return False
 
+    def compare_with_other(self, genome2, filename2):
+        set1 = set(self._names)
+        set2 = set(genome2.chrom_names)
+
+        PRINT_MAX = 5
+        if set1 != set2:
+            common.log('WARNING: Files "{}" and "{}" have different sets of contigs. This may raise errors later!'
+                .format(self.filename, filename2))
+            extra1 = sorted(set1 - set2)
+            if len(extra1) > PRINT_MAX:
+                extra1[PRINT_MAX] = '...'
+            if extra1:
+                common.log('File "{}" has {} extra contigs ({})'.format(
+                    self.filename, len(extra1), ', '.join(extra1[:PRINT_MAX + 1])))
+
+            extra2 = sorted(set2 - set1)
+            if len(extra2) > PRINT_MAX:
+                extra2[PRINT_MAX] = '...'
+            if extra2:
+                common.log('File "{}" has {} extra contigs ({})'.format(
+                    filename2, len(extra2), ', '.join(extra2[:PRINT_MAX + 1])))
+            common.log('')
+
+        for name in set1 & set2:
+            len1 = self.chrom_len(self.chrom_id(name))
+            len2 = genome2.chrom_len(genome2.chrom_id(name))
+            if len1 != len2:
+                common.log('WARNING: Files "{}" and "{}" have different contig lengths:'
+                    .format(self.filename, filename2))
+                common.log('For example contig "{}" has lengths {:,} and {:,}'.format(name, len1, len2))
+                common.log('')
+            break
+
 
 class GenomeMerge(ChromNames):
     def __init__(self, genome1, genome2):
@@ -160,7 +196,7 @@ class GenomeMerge(ChromNames):
         super().__init__([], [])
 
         for genome in (genome1, genome2):
-            for name, length in zip(genome.chrom_names, genome.chrom_lengths):
+            for name, length in genome.names_lengths():
                 new_chrom_id = self._ids.get(name)
                 if new_chrom_id is None:
                     self._ids[name] = len(self._names)
@@ -243,6 +279,9 @@ class Interval:
         if self._end <= self._start:
             raise ValueError('Cannot construct an empty interval: start0 = {:,}, end = {:,}'
                 .format(self._start, self._end))
+
+    def copy(self):
+        return Interval(self._chrom_id, self._start, self._end)
 
     @classmethod
     def parse(cls, string, genome):
@@ -429,6 +468,36 @@ class Interval:
             else:
                 res[-1] = res[-1].combine(interval)
         return res
+
+    @classmethod
+    def get_disjoint_subregions(cls, intervals):
+        """
+        Returns a minimal set of subregions,
+        s.t. each subregion is either contained or does not overlap any input intervals.
+        Additionally, returns tuple of indices for each subregion (which input intervals cover the subregion).
+        Input intervals must be sorted.
+        """
+        endpoints = []
+        for i, interval in enumerate(intervals):
+            endpoints.append((interval.chrom_id, interval.start, i))
+            endpoints.append((interval.chrom_id, interval.end, ~i))
+        endpoints.sort()
+
+        subregions = []
+        curr_ixs = set()
+        for i, (chrom_id, pos, ix) in enumerate(endpoints):
+            if curr_ixs:
+                chrom_id2, prev_pos, _ = endpoints[i - 1]
+                assert chrom_id == chrom_id2
+                if prev_pos < pos:
+                    subregions.append((cls(chrom_id, prev_pos, pos), tuple(curr_ixs)))
+
+            if ix < 0:
+                curr_ixs.remove(~ix)
+            else:
+                curr_ixs.add(ix)
+        assert not curr_ixs
+        return subregions
 
 
 class NamedInterval(Interval):

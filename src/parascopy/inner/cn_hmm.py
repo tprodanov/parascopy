@@ -422,7 +422,7 @@ def _transform_jump_probs(down, up, min_prob, max_prob, max_state_dist):
     for i in range(1, max_state_dist + 1):
         res[max_state_dist - i] = down * i
         res[max_state_dist + i] = up * i
-    res[max_state_dist] = logsumexp((0, logsumexp(res)), b=(1, -1))
+    res[max_state_dist] = common.log1minus(res)
     return res
 
 
@@ -889,7 +889,8 @@ def _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, agcn_ra
 
 
 def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, genome, out, model_params, *,
-        min_samples, agcn_range, agcn_jump, min_trans_prob, max_trans_prob=np.log(0.1), use_multipliers=True):
+        min_samples, agcn_range, agcn_jump, min_trans_prob, max_trans_prob=np.log(0.1), use_multipliers=True,
+        update_agcn_qual):
     dupl_hierarchy = region_group_extra.dupl_hierarchy
     windows = region_group_extra.hmm_windows
     ref_copy_num = windows[0].cn
@@ -968,7 +969,7 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
         sample_path = paths[sample_paths[sample_id]]
         sample_path = _split_path_by_probs(sample_path, model.gammas[sample_id], model, windows, window_boundaries)
 
-        sample_const_regions.append(_get_sample_const_regions(sample_id, sample_path, model))
+        sample_const_regions.append(_get_sample_const_regions(sample_id, sample_path, model, update_agcn_qual))
         sample_reliable_regions.append(_get_sample_reliable_region(sample_path))
     region_group_extra.set_viterbi_res(sample_const_regions, sample_reliable_regions)
 
@@ -1044,7 +1045,7 @@ def _split_path_by_probs(path, prob_matrix, model, windows, window_boundaries, m
     return new_path
 
 
-def _get_sample_const_regions(sample_id, main_path, model):
+def _get_sample_const_regions(sample_id, main_path, model, update_agcn_qual):
     res = []
     for segment in main_path:
         probs = [model.path_likelihood(sample_id, (segment,))]
@@ -1055,21 +1056,11 @@ def _get_sample_const_regions(sample_id, main_path, model):
                 probs.append(model.path_likelihood(sample_id, curr_path))
                 cns.append(model.get_copy_num(state))
 
-        probs = np.array(probs)
-        probs -= logsumexp(probs)
-        qual = common.phred_qual(probs, best_ix=0)
+        probs = np.array(probs) - logsumexp(probs)
         dupl_region = segment.dupl_region
-
-        pred_cn = cns[0]
-        pred_cn_str = model.format_cn(pred_cn)
-        cn_pred = cn_tools.CopyNumPrediction(dupl_region.region1, dupl_region.regions2, pred_cn, pred_cn_str, qual)
+        cn_pred = cn_tools.CopyNumPrediction.create(dupl_region.region1, dupl_region.regions2,
+            cns, probs, model, update_agcn_qual)
         cn_pred.info['region_ix'] = segment.const_region_ix
-
-        if qual <= 40 and len(probs) > 1:
-            probs = np.abs(probs)
-            ixs = np.argsort(probs)
-            cn_pred.info['agCN_probs'] = ','.join(
-                '{}:{:.3g}'.format(model.format_cn(cns[i]), probs[i] / common.LOG10) for i in ixs if probs[i] < 11)
         res.append(cn_pred)
     return res
 

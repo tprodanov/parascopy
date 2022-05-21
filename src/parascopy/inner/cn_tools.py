@@ -2,6 +2,7 @@ import collections
 import numpy as np
 import itertools
 import os
+from scipy.special import logsumexp
 
 from . import common
 from . import itree
@@ -23,7 +24,7 @@ class DuplRegion:
         self._region1 = region1
         # List of pairs (region, strand: bool)
         self._regions2 = regions2
-        self._copy_num = 2 + 2 * len(self.regions2) if self.regions2 is not None else None
+        self._copy_num = 2 + 2 * len(self.regions2) if self.regions2 is not None else 2
 
     @property
     def ix(self):
@@ -45,8 +46,10 @@ class DuplRegion:
         return self._copy_num
 
     def __str__(self):
-        cls_name = self.__class__.__name__
-        return '{}[{}]({!r}  copy num {})'.format(cls_name, self._ix, self._region1, self._copy_num)
+        prefix = self.__class__.__name__
+        if self._ix is not None:
+            prefix += '[{}]'.format(self._ix)
+        return '{}({!r}  CN = {})'.format(prefix, self._region1, self._copy_num)
 
     def continue_if_possible(self, other, max_dist, strict_order=True):
         """
@@ -187,12 +190,37 @@ class RegionGroup(DuplRegion):
 
 
 class CopyNumPrediction(DuplRegion):
-    def __init__(self, region1, regions2, pred_cn, pred_cn_str, qual):
+    def __init__(self, region1, regions2, pred_cn, pred_cn_str, pred_cn_qual):
         super().__init__(None, region1, regions2)
         self._pred_cn = pred_cn
         self._pred_cn_str = pred_cn_str
-        self._qual = qual
+        self._qual = pred_cn_qual
+        self._probable_cns = ((pred_cn, pred_cn_str, 0),)
         self._info = {}
+
+    @classmethod
+    def create(cls, region1, regions2, pred_cns, cn_probs, model, update_agcn_qual):
+        pred_cn = pred_cns[0]
+        pred_cn_qual = common.phred_qual(cn_probs, best_ix=0)
+        self = cls(region1, regions2, pred_cn, model.format_cn(pred_cn), pred_cn_qual)
+        if pred_cn_qual < update_agcn_qual:
+            thresh_prob = (-0.1 * update_agcn_qual - 1) * common.LOG10
+            ixs = np.where(cn_probs >= thresh_prob)[0]
+            if len(ixs) < 2:
+                ixs = np.argsort(-cn_probs)[:2]
+            if len(ixs) > 1:
+                self._probable_cns = tuple((pred_cns[i], model.format_cn(pred_cns[i]), cn_probs[i]) for i in ixs)
+                self.info['agCN_probs'] = \
+                    ','.join('{}:{:.4g}'.format(cn_str, np.exp(prob)) for _, cn_str, prob in self._probable_cns)
+        return self
+
+    def update_pred_cn(self, cn, cn_str, cn_qual):
+        if self._pred_cn == cn and self._qual >= cn_qual:
+            return
+        self._info['init_agCN'] = '{}:{:.0f}'.format(self._pred_cn_str, self._qual)
+        self._pred_cn = cn
+        self._pred_cn_str = cn_str
+        self._qual = cn_qual
 
     @property
     def pred_cn(self):
@@ -205,6 +233,10 @@ class CopyNumPrediction(DuplRegion):
     @property
     def qual(self):
         return self._qual
+
+    @property
+    def probable_cns(self):
+        return self._probable_cns
 
     @property
     def region_ix(self):
@@ -638,21 +670,22 @@ class RegionGroupExtra:
                 psv_type = 's'
             psv.info['rel'] = psv_type
 
-            for sample_id, psv_gt_probs in enumerate(psv_info.psv_gt_probs):
-                if psv_gt_probs is None:
+            for sample_id, sample_info in enumerate(psv_info.sample_infos):
+                sample_cn = sample_info and sample_info.best_cn
+                if sample_cn is None or sample_info.psv_gt_probs[sample_cn] is None:
                     continue
-                format = psv.samples[sample_id]
-                sample_cn = psv_info.sample_cns[sample_id]
+                fmt = psv.samples[sample_id]
+                psv_gt_probs = sample_info.psv_gt_probs[sample_cn]
                 precomp_data = psv_info.precomp_datas[sample_cn]
                 best_gt = np.argmax(psv_gt_probs)
 
                 # For example PSV genotype (4,2) -> 0/0/0/0/1/1
                 psv_gt = precomp_data.psv_genotypes[best_gt]
                 psv_gt = np.repeat(np.arange(len(psv_gt)), psv_gt)
-                format['GT'] = tuple(psv_gt)
-                format['GQ'] = int(common.phred_qual(psv_gt_probs, best_gt))
+                fmt['GT'] = tuple(psv_gt)
+                fmt['GQ'] = int(common.phred_qual(psv_gt_probs, best_gt))
 
-                support_row = psv_info.support_matrix[sample_id]
+                support_row = sample_info.support_rows.get(sample_cn)
                 if support_row is None:
                     continue
                 n_copies = len(precomp_data.sample_genotypes[0])
@@ -660,8 +693,8 @@ class RegionGroupExtra:
                     n_copies, sample_cn)
                 pscn, pscn_qual, any_known = paralog_cn.paralog_cn_str(pscn, pscn_qual)
                 if any_known:
-                    format['psCN'] = pscn
-                    format['psCNq'] = pscn_qual
+                    fmt['psCN'] = pscn
+                    fmt['psCNq'] = pscn_qual
 
     @property
     def has_f_values(self):
@@ -681,11 +714,12 @@ class RegionGroupExtra:
 
     def set_reliable_psvs(self, semirel_threshold, reliable_threshold):
         if self.has_f_values:
-            psvs_in_em = np.array([psv_info.in_em for psv_info in self.psv_infos])
+            self.psv_in_em = np.array([psv_info.in_em for psv_info in self.psv_infos])
             with np.errstate(invalid='ignore'):
-                self.psv_is_reliable = np.all(self.psv_f_values >= reliable_threshold, axis=1) & psvs_in_em
-                self.psv_is_semirel = np.all(self.psv_f_values >= semirel_threshold, axis=1) & psvs_in_em
+                self.psv_is_reliable = np.all(self.psv_f_values >= reliable_threshold, axis=1) & self.psv_in_em
+                self.psv_is_semirel = np.all(self.psv_f_values >= semirel_threshold, axis=1) & self.psv_in_em
         else:
             n_psvs = len(self._psv_infos)
+            self.psv_in_em = np.zeros(n_psvs, dtype=np.bool)
             self.psv_is_reliable = np.zeros(n_psvs, dtype=np.bool)
             self.psv_is_semirel = np.zeros(n_psvs, dtype=np.bool)

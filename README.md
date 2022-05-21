@@ -26,7 +26,8 @@ Table of contents
 Citing Parascopy
 ----------------
 
-Currently, the paper is in progress, please check later.
+If you use Parascopy, please cite:
+* Prodanov, T. & Bansal, V. Robust and accurate estimation of paralog-specific copy number for duplicated genes using whole-genome sequencing. *Nature Communications* (2022).
 
 Installation
 ------------

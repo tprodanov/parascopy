@@ -128,9 +128,10 @@ class _Psv:
 def create_vcf_header(genome, chrom_ids=None, argv=None):
     vcf_header = pysam.VariantHeader()
     if argv is not None:
-        vcf_header.add_line('##command="%s"' % ' '.join(argv))
-    for chrom_id in (chrom_ids or range(genome.n_chromosomes())):
-        vcf_header.add_line('##contig=<ID=%s,length=%d>' % (genome.chrom_name(chrom_id), genome.chrom_len(chrom_id)))
+        vcf_header.add_line('##command="{}"'.format(' '.join(argv)))
+    for chrom_id in (chrom_ids or range(genome.n_chromosomes)):
+        vcf_header.add_line('##contig=<ID={},length={}>'
+            .format(genome.chrom_name(chrom_id), genome.chrom_len(chrom_id)))
     vcf_header.add_line('##INFO=<ID=pos2,Number=.,Type=String,Description="Second positions of the PSV. '
         'Format: chrom:pos:strand[:allele]">')
     return vcf_header
@@ -150,7 +151,8 @@ def duplication_differences(region1, reg1_seq, reg2_seq, full_cigar, dupl_i, psv
             psv_start = reg1_start + start1
             new_start = variants_.move_left(psv_start, ref, (alt,), reg1_seq, reg1_start, skip_alleles=True)
             if new_start is not None:
-                raise RuntimeError('PSV must be moved left')
+                print(region1, psv_start, new_start, ref, alt)
+                raise RuntimeError('Variant/PSV is not in a canonical representation: must be moved left')
                 # shift = psv_start - new_start
                 # start1 -= shift
                 # end1 -= shift

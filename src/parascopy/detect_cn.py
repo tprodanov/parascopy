@@ -21,7 +21,7 @@ from . import pool_reads
 
 from .inner import common
 from .inner import duplication as duplication_
-from .inner.genome import Genome, Interval, NamedInterval
+from .inner.genome import Genome, ChromNames, Interval, NamedInterval
 from .inner.alignment import Weights
 from .inner.cigar import Cigar
 from .inner import variants as variants_
@@ -387,7 +387,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
         skip_regions = Interval.combine_overlapping(skip_regions)
         model_params.set_skip_regions(skip_regions)
 
-    psv_header = psvs_.create_vcf_header(genome, (interval.chrom_id,))
+    psv_header = psvs_.create_vcf_header(genome)
     _update_vcf_header(psv_header, samples)
     psv_records = psvs_.create_psv_records(duplications, genome, psv_header, interval, skip_regions)
 
@@ -462,7 +462,8 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
             common.log('[{}] Region group {}'.format(interval.name, group_name))
             cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
                 min_samples=args.min_samples, agcn_range=args.agcn_range, agcn_jump=args.agcn_jump,
-                min_trans_prob=args.transition_prob * np.log(10), use_multipliers=args.use_multipliers)
+                min_trans_prob=args.transition_prob * np.log(10), use_multipliers=args.use_multipliers,
+                update_agcn_qual=args.update_agcn)
             out.flush()
 
             time_log.log('Group {}: PSV genotype probabilities'.format(group_name))
@@ -479,10 +480,9 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
 
             time_log.log('Group {}: sample-PSV genotype probabilities'.format(group_name))
             variants_.calculate_support_matrix(group_extra)
-            group_extra.update_psv_records(args.reliable_threshold)
             time_log.log('Group {}: paralog-specific copy number and gene conversion'.format(group_name))
-            results.extend(paralog_cn.estimate_paralog_cn(group_extra, samples, genome, out,
-                max_agcn=args.pscn_bound[0], max_genotypes=args.pscn_bound[1]))
+            results.extend(paralog_cn.estimate_paralog_cn(group_extra, samples, genome, out, args.pscn_bound[0]))
+            group_extra.update_psv_records(args.reliable_threshold)
             out.flush()
 
     time_log.log('Writing results')
@@ -540,59 +540,62 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params):
     return region_ix, None
 
 
-def _join_summaries(out_dir, regions, successful, genome, filename, tabix):
-    """
-    Join vcf or bed files (vcf file when is_bed_file is False).
-    """
-    if filename.endswith('.bed') or filename.endswith('.bed.gz'):
-        is_bed_file = True
-    else:
-        assert filename.endswith('.vcf') or filename.endswith('.vcf.gz')
-        is_bed_file = False
-
+def join_bed_files(in_filenames, out_filename, genome, tabix):
     entries = []
-    write_header = True
     header = []
-
-    maxsplit = 3 + is_bed_file
-    for region, success in zip(regions, successful):
-        if not success:
-            continue
-        with common.open_possible_gzip(os.path.join(out_dir, region.os_name, filename)) as inp:
+    for in_filename in in_filenames:
+        with common.open_possible_gzip(in_filename) as inp:
+            write_header = not header
             for line in inp:
                 if line.startswith('#'):
                     if write_header:
                         header.append(line)
                     continue
-                line = line.split('\t', maxsplit=maxsplit)
+
+                line = line.split('\t', maxsplit=3)
                 line[0] = genome.chrom_id(line[0])
                 line[1] = int(line[1])
-                if is_bed_file:
-                    line[2] = int(line[2])
+                line[2] = int(line[2])
                 entries.append(line)
-            write_header = not header
 
     entries.sort()
-    out_filename = os.path.join(out_dir, filename)
     with common.open_possible_gzip(out_filename, 'w', bgzip=True) as out:
         for line in header:
             out.write(line)
         for entry in entries:
             entry[0] = genome.chrom_name(entry[0])
             entry[1] = str(entry[1])
-            if is_bed_file:
-                entry[2] = str(entry[2])
+            entry[2] = str(entry[2])
             out.write('\t'.join(entry))
     if out_filename.endswith('.gz') and tabix != 'none':
-        common.Process([tabix, '-p', 'bed' if is_bed_file else 'vcf', out_filename]).finish()
+        common.Process([tabix, '-p', 'bed', out_filename]).finish()
+
+
+def join_vcf_files(in_filenames, out_filename, genome, tabix, merge_duplicates=False):
+    records = []
+    header = None
+    for in_filename in in_filenames:
+        with pysam.VariantFile(in_filename) as vcf:
+            if header is None:
+                header = vcf.header
+            records.extend(vcf.fetch())
+
+    records.sort(key=variants_.vcf_record_key(genome))
+    if merge_duplicates:
+        records = variants_.merge_duplicates(records)
+    with common.open_vcf(out_filename, 'w', header=header) as vcf:
+        for record in records:
+            vcf.write(record)
+    if out_filename.endswith('.gz') and tabix != 'none':
+        common.Process([tabix, '-p', 'vcf', out_filename]).finish()
 
 
 def run(regions, data, samples, bg_depth, models):
+    n_regions = len(regions)
     if models is None:
-        models = [None] * len(regions)
+        models = [None] * n_regions
 
-    out_dir = data.args.output
-    threads = max(1, min(len(regions), data.args.threads))
+    threads = max(1, min(n_regions, data.args.threads))
     results = []
     if threads == 1:
         common.log('Using 1 thread')
@@ -616,17 +619,29 @@ def run(regions, data, samples, bg_depth, models):
         pool.close()
         pool.join()
 
-    n_regions = len(regions)
     results.sort()
     assert len(results) == n_regions and all(i == region_ix for i, (region_ix, _) in enumerate(results))
     successful = [exc is None for _, exc in results]
 
+    out_dir = data.args.output
     with open(os.path.join(out_dir, 'model', 'list.txt'), 'w') as model_list:
         for region in itertools.compress(regions, successful):
             model_list.write('{}.gz\n'.format(region.os_name))
-    _join_summaries(out_dir, regions, successful, data.genome, 'res.samples.bed.gz', data.args.tabix)
-    _join_summaries(out_dir, regions, successful, data.genome, 'res.matrix.bed.gz', data.args.tabix)
-    _join_summaries(out_dir, regions, successful, data.genome, 'psvs.vcf.gz', data.args.tabix)
+
+    genome = data.genome
+    successful_regions = list(itertools.compress(regions, successful))
+    if successful_regions:
+        common.log('Merging output files')
+        tabix = data.args.tabix
+        out_filename1 = os.path.join(out_dir, 'res.samples.bed.gz')
+        join_bed_files([os.path.join(out_dir, region.os_name, 'res.samples.bed.gz') for region in successful_regions],
+            out_filename1, genome, tabix)
+        paralog_cn.summary_to_paralog_bed(out_filename1,
+            os.path.join(out_dir, 'res.paralog.bed.gz'), genome, samples, tabix)
+        join_bed_files([os.path.join(out_dir, region.os_name, 'res.matrix.bed.gz') for region in successful_regions],
+            os.path.join(out_dir, 'res.matrix.bed.gz'), genome, tabix)
+        join_vcf_files([os.path.join(out_dir, region.os_name, 'psvs.vcf.gz') for region in successful_regions],
+            os.path.join(out_dir, 'psvs.vcf.gz'), genome, tabix)
 
     n_successes = sum(successful)
     if n_successes < n_regions:
@@ -635,7 +650,7 @@ def run(regions, data, samples, bg_depth, models):
         i = 0
         for region, (_, exc) in zip(regions, results):
             if exc is not None:
-                common.log('    {}: {}'.format(region.full_name(data.genome), exc))
+                common.log('    {}: {}'.format(region.full_name(genome), exc))
                 i += 1
                 if i >= 10:
                     break
@@ -648,7 +663,12 @@ def run(regions, data, samples, bg_depth, models):
         common.log('Success [{} regions out of {}]'.format(n_successes, n_regions))
 
 
-class _DataStructures:
+class DataStructures:
+    """
+    Store genome, table and other things in an unloaded/loaded state.
+    Necessary for multi-threaded applications to efficiently open/close files.
+    """
+
     def __init__(self, args):
         self._args = args
         self._loaded_times = 0
@@ -683,7 +703,7 @@ class _DataStructures:
         if self._loaded_times > 1:
             return
 
-        if self._args.is_new:
+        if hasattr(self._args, 'exclude'):
             self._exclude_dupl = parse_expression(self._args.exclude)
         else:
             self._exclude_dupl = None
@@ -700,7 +720,7 @@ class _DataStructures:
         self._bam_wrappers = bam_wrappers
 
     def copy(self):
-        res = _DataStructures(self._args)
+        res = DataStructures(self._args)
         res.set_bam_wrappers(self._bam_wrappers)
         return res
 
@@ -825,12 +845,12 @@ def parse_args(prog_name, in_argv, is_new):
         filt_args.add_argument('--max-ref-cn', type=int, metavar='<int>', default=10,
             help='Skip regions with reference copy number higher than <int> [default: %(default)s].')
 
-    aggr_det_args = parser.add_argument_group('Aggregate copy number detection arguments')
+    aggr_det_args = parser.add_argument_group('Aggregate copy number (agCN) detection arguments')
     if is_new:
         aggr_det_args.add_argument('--min-samples', type=int, metavar='<int>', default=50,
             help='Use multi-sample information if there are at least <int> samples present\n'
                 'for the region/PSV [default: %(default)s].')
-        aggr_det_args.add_argument('--min-windows', type=int, metavar='<int>', default=10,
+        aggr_det_args.add_argument('--min-windows', type=int, metavar='<int>', default=5,
             help='Predict aggregate and paralog copy number only in regions with at\n'
                 'least <int> windows [default: %(default)s].')
         aggr_det_args.add_argument('--window-filtering', type=float, metavar='<float>', default=1,
@@ -848,8 +868,10 @@ def parse_args(prog_name, in_argv, is_new):
             help='Log10 transition probability for the aggregate copy number HMM [default: %(default)s].')
     aggr_det_args.add_argument('--no-multipliers', action='store_false', dest='use_multipliers',
         help='Do not estimate or use read depth multipliers.')
+    aggr_det_args.add_argument('--update-agcn', type=float, metavar='<float>', default=40,
+        help='Update agCN using psCN probabilities when agCN quality is less than <float> [default: %(default)s].')
 
-    par_det_args = parser.add_argument_group('Paralog-specific copy number detection arguments')
+    par_det_args = parser.add_argument_group('Paralog-specific copy number (psCN) detection arguments')
     if is_new:
         par_det_args.add_argument('--reliable-threshold', type=float, metavar='<float> <float>',
             nargs=2, default=(0.8, 0.95),
@@ -912,8 +934,9 @@ def main(prog_name=None, in_argv=None, is_new=None):
     args = parse_args(prog_name, in_argv, is_new)
     np.set_printoptions(precision=6, linewidth=sys.maxsize, suppress=True, threshold=sys.maxsize)
 
-    data = _DataStructures(args)
+    data = DataStructures(args)
     data.prepare()
+    data.genome.compare_with_other(ChromNames.from_table(data.table), args.table)
 
     directory = args.output
     common.log('Using output directory "{}"'.format(directory))

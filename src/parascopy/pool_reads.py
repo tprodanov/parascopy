@@ -255,11 +255,15 @@ def load_duplications(table, genome, interval, exclude_str):
 
 
 class BamWrapper:
-    def __init__(self, filename, sample, genome):
+    def __init__(self, filename, sample, genome, store_contigs=False):
         self._filename = filename
         self._input_sample = sample
         with self.open_bam_file(genome) as bam_file:
             self._old_read_groups = bam_file_.get_read_groups(bam_file)
+            if store_contigs:
+                self._contigs = tuple(bam_file.references)
+            else:
+                self._contigs = None
         self._read_groups = None
 
     def init_new_read_groups(self, samples):
@@ -284,6 +288,13 @@ class BamWrapper:
     @property
     def filename(self):
         return self._filename
+
+    @property
+    def contigs(self):
+        return self._contigs
+
+    def clear_contigs(self):
+        self._contigs = None
 
     def open_bam_file(self, genome):
         genome_filename = genome if isinstance(genome, str) else genome.filename
@@ -331,10 +342,13 @@ def load_bam_files(input, input_list, genome):
                 raise ValueError('Cannot read input list "-I {0}", perhaps you want to use "-i {0}"?'
                     .format(input_list))
 
-    bam_wrappers = [BamWrapper(filename, sample, genome) for filename, sample in filenames]
+    bam_wrappers = [BamWrapper(filename, sample, genome, store_contigs=True) for filename, sample in filenames]
+    bam_file_.compare_contigs(bam_wrappers, genome)
+
     samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
     for bam_wrapper in bam_wrappers:
         bam_wrapper.init_new_read_groups(samples)
+        bam_wrapper.clear_contigs()
     return bam_wrappers, samples
 
 

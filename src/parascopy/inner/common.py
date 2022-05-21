@@ -115,7 +115,7 @@ class Process:
 def check_executable(*paths):
     for path in paths:
         if shutil.which(path) is None:
-            raise RuntimeError('Cannot find path "%s"' % path)
+            raise RuntimeError('Command "{}" is not executable'.format(path))
 
 
 def check_writable(filename):
@@ -135,13 +135,13 @@ class EmptyContextManager:
         pass
 
 
-def open_vcf(filename, mode='r', can_be_none=False, **kwargs):
+def open_vcf(filename, mode='r', can_be_none=False, **kwargs): # TODO: Use more.
     if filename is None and can_be_none:
         return EmptyContextManager()
     if filename == '-':
         return pysam.VariantFile(sys.stdin if mode == 'r' else sys.stdout, **kwargs)
     if filename.endswith('.gz'):
-        return pysam.VariantFile(filename, mode=mode + 'b', **kwargs)
+        return pysam.VariantFile(filename, mode=mode + 'z', **kwargs)
     return pysam.VariantFile(filename, mode=mode, **kwargs)
 
 
@@ -300,12 +300,49 @@ def tricube_kernel(values):
     return np.power(1.0 - np.power(np.minimum(np.abs(values), 1.0), 3), 3)
 
 
+def log1minus(x):
+    """
+    Return 1 - sum(x) in a logarithmic scale.
+    """
+    return logsumexp((0.0, logsumexp(x)), b=(1, -1))
+
+
 LOG10 = np.log(10)
 
 def phred_qual(probs, best_ix, max_value=10000):
-    if len(probs) == 1 and best_ix == 0:
+    """
+    Calculate PHRED quality of probs[best_ix], where sum(exp(probs)) = 1.
+    """
+    if len(probs) == 1:
+        assert best_ix == 0
         return max_value
     oth_prob = logsumexp(np.delete(probs, best_ix))
+    if np.isfinite(oth_prob):
+        return min(-10 * oth_prob / LOG10, max_value)
+    return max_value
+
+
+def extended_phred_qual(probs, best_ix, *, sum_prob=None, rem_prob=None, max_value=10000):
+    """
+    Calculate PHRED quality of probs[best_ix], where sum(exp(probs)) = 1.
+    In addition, it is known that there is an additional event with probability rem_prob.
+
+    Exactly one of `sum_prob` and `rem_prob` should be set.
+    If sum_prob is set, it should be log(1 - exp(rem_prob)).
+    """
+    if len(probs) == 1:
+        assert best_ix == 0
+        return min(-10 * rem_prob / LOG10, max_value)
+
+    if sum_prob is None:
+        sum_prob = logsumexp((0.0, rem_prob), b=(1, -1))
+    else:
+        assert rem_prob is None
+        rem_prob = logsumexp((0.0, sum_prob), b=(1, -1))
+
+    probs = probs + sum_prob
+    probs[best_ix] = rem_prob
+    oth_prob = logsumexp(probs)
     if np.isfinite(oth_prob):
         return min(-10 * oth_prob / LOG10, max_value)
     return max_value
@@ -345,3 +382,7 @@ def checked_fetch_coord(fetch_file, chrom, start, end):
 
 def checked_fetch(fetch_file, region, genome):
     return checked_fetch_coord(fetch_file, region.chrom_name(genome), region.start, region.end)
+
+
+def non_empty_file(filename):
+    return os.path.isfile(filename) and os.path.getsize(filename) > 0

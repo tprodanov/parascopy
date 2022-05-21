@@ -45,6 +45,55 @@ def get_comment_items(bam_file):
     return res
 
 
+def compare_contigs(bam_wrappers, genome):
+    genome_set = set(genome.chrom_names)
+    n = len(bam_wrappers)
+
+    missing_n_contigs = np.zeros(n)
+    missing_contigs = set()
+    extra_n_contigs = np.zeros(n)
+    extra_contigs = set()
+
+    for i, bam_wrapper in enumerate(bam_wrappers):
+        curr_contigs = set(bam_wrapper.contigs)
+        curr_missing = genome_set - curr_contigs
+        missing_n_contigs[i] = len(curr_missing)
+        missing_contigs |= curr_missing
+
+        curr_extra = curr_contigs - genome_set
+        extra_n_contigs[i] = len(curr_extra)
+        extra_contigs |= curr_extra
+
+    PRINT_MAX = 5
+    if missing_contigs or extra_contigs:
+        common.log('WARNING: Reference genome does not match BAM/CRAM files completely.')
+    if missing_contigs:
+        common.log('{} / {} alignment files have missing contigs.'.format(np.sum(missing_n_contigs > 0), n))
+        common.log('On average, {:.3f} contigs are missing per file. In total, {} contigs are missing.'
+            .format(np.mean(missing_n_contigs), len(missing_contigs)))
+
+        j = np.where(missing_n_contigs > 0)[0][0]
+        curr_missing = sorted(genome_set - set(bam_wrappers[j].contigs))
+        if len(curr_missing) > PRINT_MAX:
+            curr_missing[PRINT_MAX] = '...'
+        common.log('For example, "{}" has {:.0f} missing contigs ({})'
+            .format(bam_wrappers[j].filename, missing_n_contigs[j], ', '.join(curr_missing[:PRINT_MAX + 1])))
+        common.log('')
+
+    if extra_contigs:
+        common.log('{} / {} alignment files have extra contigs.'.format(np.sum(extra_n_contigs > 0), n))
+        common.log('On average, there are {:.3f} extra contigs per file. In total, there are {} extra contigs.'
+            .format(np.mean(extra_n_contigs), len(extra_contigs)))
+
+        j = np.where(extra_n_contigs > 0)[0][0]
+        curr_extra = sorted(set(bam_wrappers[j].contigs) - genome_set)
+        if len(curr_extra) > PRINT_MAX:
+            curr_extra[PRINT_MAX] = '...'
+        common.log('For example, "{}" has {:.0f} extra contigs ({})'
+            .format(bam_wrappers[j].filename, extra_n_contigs[j], ', '.join(curr_extra[:PRINT_MAX + 1])))
+        common.log('')
+
+
 class Samples:
     def __init__(self, samples):
         self._samples = sorted(samples)
@@ -77,6 +126,9 @@ class Samples:
 
     def __bool__(self):
         return bool(self._samples)
+
+    def __eq__(self, oth):
+        return self._samples == oth._samples
 
 
 def string_hash_fnv1(s: str, flag: bool):
@@ -208,7 +260,7 @@ class RecordCoord:
                     cigar_a, cigar_b, aln_region_b, strand_b, record.query_qualities, unique_tree, min_unique_tail):
                 self.aln_region = aln_region_b
                 self.location_info = RecordCoord.LocationInfo.CertCorrect
-            elif cigar_b.aligned_len > cigar_a.aligned_len + min_unique_tail:
+            elif cigar_a is None or cigar_b.aligned_len > cigar_a.aligned_len + min_unique_tail:
                 self.location_info = RecordCoord.LocationInfo.CertIncorrect
 
         elif mapq_a >= min_mapq and not cigar_a.has_true_clipping(record.query_qualities) and \

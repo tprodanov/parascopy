@@ -303,8 +303,10 @@ class Duplication:
         start2, end2 = self._full_cigar.aligned_region(start1, end1, alt_size_diff)
         assert start2 >= 0 and end2 <= len(self._region2)
         if end2 <= start2:
-            raise ValueError('Align variant failed: variant {}:{} ({}): start1 {}, end1 {}, start2 {}, end2 {}'
-                .format(variant.chrom, variant.pos, ','.join(variant.alleles), start1, end1, start2, end2))
+            # raise ValueError('Align variant failed: variant {}:{} ({}): start1 {}, end1 {}, start2 {}, end2 {}'
+            #     .format(variant.chrom, variant.pos, ','.join(variant.alleles), start1, end1, start2, end2))
+            # Variant aligns to a deletion.
+            return None
 
         seq2 = self._seq2[start2:end2]
         dupl_start = self._region2.start + start2 if self._strand else self._region2.end - end2
@@ -633,7 +635,7 @@ class Duplication:
         """
         reg_start1 = self._region1.start
         start2, end2 = self._full_cigar.read_region(start1 - reg_start1, end1 - reg_start1)
-        if start2 == end2:
+        if start2 >= end2:
             return None
         if self._strand:
             return Interval(self._region2.chrom_id, self._region2.start + start2, self._region2.start + end2)

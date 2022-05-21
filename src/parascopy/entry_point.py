@@ -56,7 +56,8 @@ def _throw_error(prog_name, command):
 
 
 def _print_citations():
-    print('Publication in progress, please check later!')
+    print('Prodanov, T. & Bansal, V. Robust and accurate estimation of paralog-specific copy number '
+        'for duplicated genes using whole-genome sequencing. Nature Communications (2022).')
 
 
 def _process_exceptions(fn, *args, **kwargs):
