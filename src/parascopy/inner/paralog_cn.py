@@ -755,7 +755,7 @@ class GeneConversionHmm(cn_hmm.HmmModel):
 GeneConversion = collections.namedtuple('GeneConversion', 'start end main_gt replacement_gt qual n_psvs')
 
 
-def _detect_gene_conversion(sample_id, genotypes_str, sample_gt_probs, psv_infos, semirel_psv_ixs):
+def _detect_gene_conversion(sample_id, sample_cn, genotypes_str, sample_gt_probs, psv_infos, semirel_psv_ixs):
     n_psvs = len(semirel_psv_ixs)
     n_genotypes = len(genotypes_str)
 
@@ -766,6 +766,7 @@ def _detect_gene_conversion(sample_id, genotypes_str, sample_gt_probs, psv_infos
     HMM_SAMPLE_ID = 0
     for i, psv_ix in enumerate(semirel_psv_ixs):
         sample_info = psv_infos[psv_ix].sample_infos[sample_id]
+        assert sample_info.best_cn == sample_cn
         emission_matrix[HMM_SAMPLE_ID, :, i] = sample_info.support_rows[sample_info.best_cn]
     model.set_emission_matrices(emission_matrix)
     prob, states_vec = model.viterbi(HMM_SAMPLE_ID)
@@ -904,7 +905,7 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
         semirel_psv_ixs = psv_ixs[region_group_extra.psv_is_semirel[psv_ixs]]
 
         if np.all(paralog_qual >= GENE_CONV_QUAL_THRESHOLD) and len(semirel_psv_ixs) >= MIN_SEMIREL_PSVS:
-            gene_conv = _detect_gene_conversion(sample_id, sample_genotypes_str, sample_gt_probs,
+            gene_conv = _detect_gene_conversion(sample_id, sample_cn, sample_genotypes_str, sample_gt_probs,
                 psv_infos, semirel_psv_ixs)
             for entry in gene_conv:
                 out.gene_conversion.write('{}\t{}\t{}\t'.format(region_chrom, entry.start, entry.end))

@@ -276,6 +276,8 @@ def calculate_all_psv_gt_probs(region_group_extra, max_agcn, max_genotypes):
             cn_weights = np.array(cn_weights, dtype=np.float)
             if len(cn_weights):
                 cn_weights -= logsumexp(cn_weights)
+                ixs = np.argsort(-cn_weights)
+                cns = np.array(cns)[ixs]
             _fill_psv_gts(sample_id, cns, cn_weights, psv_infos, psv_counts, psv_start_ix, psv_end_ix, max_genotypes)
 
 
