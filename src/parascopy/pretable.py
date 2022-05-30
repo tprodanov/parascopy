@@ -151,7 +151,7 @@ def _aln_to_dupl_wrapper(record, regions, region_seqs,
     return (region_ix, read_ix), dupl_res
 
 
-def _write_artificial_reads(region_seqs, read_len, step, min_aln_len, outp):
+def _write_artificial_reads(region_seqs, read_len, step, min_aln_len, out):
     count = 0
     for seq_i, seq in enumerate(region_seqs):
         for i, start in enumerate(range(0, len(seq) - min_aln_len + 1, step)):
@@ -159,7 +159,7 @@ def _write_artificial_reads(region_seqs, read_len, step, min_aln_len, outp):
             # Because there could be unexpected letters (not only N).
             if curr_seq.count('A') + curr_seq.count('C') + curr_seq.count('G') + curr_seq.count('T') != len(curr_seq):
                 continue
-            outp.write('>{}-{}\n{}\n'.format(seq_i, i, curr_seq))
+            out.write('>{}-{}\n{}\n'.format(seq_i, i, curr_seq))
             count += 1
     return count
 
@@ -306,7 +306,7 @@ def _remove_subalignments(duplications):
     return res
 
 
-def align_to_genome(regions, genome, args, wdir, outp):
+def align_to_genome(regions, genome, args, wdir, out):
     region_seqs = [region.get_sequence(genome) for region in regions]
     common.log('    Writing artificial reads')
     reads_path = os.path.join(wdir, 'reads.fa')
@@ -323,8 +323,11 @@ def align_to_genome(regions, genome, args, wdir, outp):
         duplications = _analyze_hits(regions, region_seqs, aln_file, args)
 
     for dupl in duplications:
-        outp.write(dupl.to_str(genome))
-        outp.write('\n')
+        out.write(dupl.to_str(genome))
+        out.write('\n')
+        if args.symmetric and not dupl.is_tangled_region:
+            out.write(dupl.revert().to_str(genome))
+            out.write('\n')
 
 
 def write_header(genome, out, argv):
@@ -427,12 +430,14 @@ def main(prog_name=None, in_argv=None):
         help='Artificial read length [default: %(default)s].')
     opt_args.add_argument('--step-size', type=int, metavar='<int>', default=150,
         help='Artificial reads step size [default: %(default)s].')
-    opt_args.add_argument('-F', '--force', action='store_true',
-        help='Force overwrite output file.')
-    opt_args.add_argument('-@', '--threads', type=int, metavar='<int>', default=4,
-        help='Use <int> threads [default: %(default)s].')
+    opt_args.add_argument('-a', '--asymmetric', action='store_false', dest='symmetric',
+        help='Create an asymmetric homology table.')
 
     exe_args = parser.add_argument_group('Executable arguments')
+    exe_args.add_argument('-F', '--force', action='store_true',
+        help='Force overwrite output file.')
+    exe_args.add_argument('-@', '--threads', type=int, metavar='<int>', default=4,
+        help='Use <int> threads [default: %(default)s].')
     exe_args.add_argument('-b', '--bwa', metavar='<path>', default='bwa',
         help='Path to BWA executable [default: %(default)s].')
     exe_args.add_argument('--seed-len', type=int, metavar='<int>', default=16,
