@@ -81,9 +81,6 @@ class MultiChromTree:
         for overlap in tree.overlap(region.start, region.end):
             yield overlap.data
 
-    def overlap_iter(self, region):
-        return (self._objects[i] for i in self.overlap_ixs(region))
-
     def overlap_size(self, region):
         tree = self._trees.get(region.chrom_id)
         return 0 if tree is None else len(tree.overlap(region.start, region.end))
@@ -105,7 +102,7 @@ class MultiNonOverlTree:
                 if curr_objects:
                     for _ in range(len(self._trees), curr_chrom_id):
                         self._trees.append(None)
-                    self._trees.append(NonOverlTree(curr_objects, start_getter, end_getter))
+                    self._trees.append(NonOverlTree(list(curr_objects), start_getter, end_getter))
                     curr_objects.clear()
 
                 curr_objects.append(obj)
@@ -114,7 +111,7 @@ class MultiNonOverlTree:
         if curr_objects:
             for _ in range(len(self._trees), curr_chrom_id):
                 self._trees.append(None)
-            self._trees.append(NonOverlTree(curr_objects, start_getter, end_getter))
+            self._trees.append(NonOverlTree(list(curr_objects), start_getter, end_getter))
 
     def overlap_iter(self, region):
         tree = None if region.chrom_id >= len(self._trees) else self._trees[region.chrom_id]

@@ -578,7 +578,7 @@ def join_vcf_files(in_filenames, out_filename, genome, tabix, merge_duplicates=F
         with pysam.VariantFile(in_filename) as vcf:
             if header is None:
                 header = vcf.header
-            records.extend(vcf.fetch())
+            records.extend(vcf)
 
     records.sort(key=variants_.vcf_record_key(genome))
     if merge_duplicates:
