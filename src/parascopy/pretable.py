@@ -333,7 +333,7 @@ def align_to_genome(regions, genome, args, wdir, out):
 def write_header(genome, out, argv):
     if argv:
         out.write('# {}\n'.format(common.command_to_str(argv)))
-    out.write('# {} {}\n'.format(__pkg_name__, __version__))
+    out.write('# {} v{}\n'.format(__pkg_name__, __version__))
     out.write('# Genomic intervals (columns 2-3 and 6-7) are 0-based, semi-inclusive.\n')
     out.write('# In CIGAR: columns 1-3 represent reference and columns 5-7 represent reads.\n')
     out.write('# Info fields:\n')

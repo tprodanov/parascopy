@@ -490,6 +490,33 @@ class Cigar:
             elif op.consumes_ref():
                 ref_pos += length
 
+    def ref_region(self, read_start, read_end):
+        cigar_start, ref_pos, read_pos = self._index.find_by_read(read_start)
+        ref_start = None
+
+        for length, op in itertools.islice(self._tuples, cigar_start, len(self._tuples)):
+            if read_pos == read_end:
+                assert ref_start is not None
+                return ref_start, ref_pos
+
+            cons_ref = op.consumes_ref()
+            if op.consumes_read():
+                if read_pos <= read_start < read_pos + length:
+                    assert ref_start is None
+                    ref_start = ref_pos + (read_start - read_pos if cons_ref else 1)
+                if read_pos <= read_end < read_pos + length:
+                    assert ref_start is not None
+                    ref_end = ref_pos + (read_end - read_pos if cons_ref else 1)
+                    return ref_start, ref_end
+                read_pos += length
+
+            if cons_ref:
+                ref_pos += length
+
+        assert read_end == read_pos
+        assert ref_start is not None
+        return ref_start, ref_pos
+
     def read_region(self, ref_start, ref_end):
         cigar_start, ref_pos, read_pos = self._index.find_by_ref(ref_start)
         read_start = None

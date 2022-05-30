@@ -366,14 +366,26 @@ class Interval:
     def intersects(self, other):
         return self._chrom_id == other._chrom_id and self._start < other._end and self._end > other._start
 
-    def intersection(self, other):
-        assert self.intersects(other)
-        return Interval(self._chrom_id, max(self._start, other._start), min(self._end, other._end))
-
     def intersection_size(self, other):
         if self._chrom_id != other._chrom_id:
             return 0
         return max(0, min(self._end, other._end) - max(self._start, other._start))
+
+    def intersect(self, other):
+        assert self.intersects(other)
+        return Interval(self._chrom_id, max(self._start, other._start), min(self._end, other._end))
+
+    def subtract(self, other):
+        if not self.intersects(other):
+            return self
+        if self._start < other._start:
+            # assert other._start < self._end
+            return Interval(self._chrom_id, self._start, other._start)
+        if other._end < self._end:
+            # assert self._start < other._end
+            return Interval(self._chrom_id, other._end, self._end)
+        # assert other.contains(self)
+        return None
 
     def forward_order(self, other, strict_order):
         if self._chrom_id != other._chrom_id:

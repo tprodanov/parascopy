@@ -262,7 +262,7 @@ def _write_windows(dupl_hierarchy, genome, outp):
 
 def _write_summary(results, region_name, genome, samples, summary_out):
     summary_out.write('## {}\n'.format(common.command_to_str()))
-    summary_out.write('## {} {}\n'.format(__pkg_name__, __version__))
+    summary_out.write('## {} v{}\n'.format(__pkg_name__, __version__))
     summary_out.write('#chrom\tstart\tend\tlocus\tsample\tagCN_filter\tagCN\tagCN_qual\t'
         'psCN_filter\tpsCN\tpsCN_qual\tinfo\thomologous_regions\n')
     for res_entry in results:

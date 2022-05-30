@@ -1229,7 +1229,7 @@ def write_matrix_summary(results, region_name, genome, samples, out):
         return
 
     out.write('## {}\n'.format(common.command_to_str()))
-    out.write('## {} {}\n'.format(__pkg_name__, __version__))
+    out.write('## {} v{}\n'.format(__pkg_name__, __version__))
     out.write('## For each sample 7 values are stored: agCN, agCN_filter, agCN_qual; '
         'psCN, psCN_filter, psCN_qual; overlap.\n')
     out.write('## overlap - percentage of the region covered by the sample entries.\n')
@@ -1425,7 +1425,7 @@ def summary_to_paralog_bed(in_filename, out_filename, genome, samples, tabix):
 
     with common.open_possible_gzip(out_filename, 'w', bgzip=True) as out:
         out.write('## {}\n'.format(common.command_to_str()))
-        out.write('## {} {}\n'.format(__pkg_name__, __version__))
+        out.write('## {} v{}\n'.format(__pkg_name__, __version__))
         out.write('#chrom\tstart\tend\tsample\tfilter\tcopy_num\tqual\tmain_region\n')
         for entry in all_entries:
             out.write(entry.to_str(genome, samples))
