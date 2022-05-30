@@ -258,10 +258,10 @@ def main(prog_name=None, in_argv=None):
 # Program:  homologytools msa
 # Rundate:  %s
 # Command:  %s
-########################################\n''' % (datetime.now().strftime('%b %d %Y %H:%M:%S'), ' '.join(sys.argv)))
+########################################\n''' % (datetime.now().strftime('%b %d %Y %H:%M:%S'), common.command_to_str()))
 
         if outp_csv:
-            outp_csv.write('# %s\n' % ' '.join(sys.argv))
+            outp_csv.write('# {}\n'.format(common.command_to_str()))
             outp_csv.write('chrom2\tpos2\tchrom1\tpos1\tnt1\tnt2\n')
 
         excl_dupl = parse_expression(args.exclude)

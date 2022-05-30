@@ -517,7 +517,7 @@ def all_files_depth(bam_wrappers, windows, fetch_regions, genome_filename, threa
 def _write_means_header(out_means, windows, params, tail_windows):
     common.log('Calculate background depth')
     window_size = len(windows[0])
-    out_means.write('# command: {}\n'.format(' '.join(sys.argv)))
+    out_means.write('# command: {}\n'.format(common.command_to_str()))
     out_means.write('# window size: {}\n'.format(window_size))
     out_means.write('# number of windows: {}\n'.format(len(windows)))
     out_means.write('# low MAPQ threshold: {}\n'.format(params.low_mapq_thresh))
@@ -687,7 +687,7 @@ def check_duplicated_samples(bam_wrappers):
 
 
 def _concat_files(bam_wrappers, prefix, out):
-    out.write('# {}\n'.format(' '.join(sys.argv)).encode())
+    out.write('# {}\n'.format(common.command_to_str()).encode())
     out.write(b'sample\twindow_ix\tdepth1\tdepth2\tlow_mapq\tclipped\tunpaired\tuse\n')
 
     all_samples = set()

@@ -13,6 +13,7 @@ import pysam
 import shutil
 from scipy.special import logsumexp
 import argparse
+import shlex
 
 from .genome import Interval, NamedInterval
 from . import errors
@@ -43,7 +44,7 @@ def gc_content(seq):
 
 def log(string, out=sys.stderr):
     elapsed = str(timedelta(seconds=perf_counter() - log._timer_start))[:-5]
-    out.write('%s  %s\n' % (elapsed, string))
+    out.write('{}  {}\n'.format(elapsed, string))
     out.flush()
 
 log._timer_start = perf_counter()
@@ -88,7 +89,7 @@ class Process:
 
     @property
     def command_str(self):
-        return ' '.join(('"%s"' % entry if ' ' in entry else entry) for entry in self._command)
+        return command_to_str(self._command, basename=False)
 
     def finish(self, zero_code_stderr=True):
         """
@@ -97,15 +98,15 @@ class Process:
         out, err = self._process.communicate()
 
         if self._process.returncode != 0:
-            log('ERROR: %s returned code %d' % (self.command_str, self._process.returncode))
+            log('ERROR: {} returned code {}'.format(self.command_str, self._process.returncode))
             if out:
-                log('    Stdout: %s' % _normalize_output(out))
+                log('    Stdout: {}'.format(_normalize_output(out)))
             if err:
-                log('    Stderr: %s' % _normalize_output(err))
+                log('    Stderr: {}'.format(_normalize_output(err)))
             return False
         elif err and zero_code_stderr:
-            log('Process %s finished with code 0, but has non empty stderr: %s'
-                % (self.command_str, _normalize_output(err)))
+            log('Process {} finished with code 0, but has non empty stderr: {}'
+                .format(self.command_str, _normalize_output(err)))
         return True
 
     def terminate(self):
@@ -268,21 +269,13 @@ def record_ord_key(rec1):
     return (rec1.reference_id, rec1.reference_start)
 
 
-def str_count(count, word):
-    """
-    str_count(10, 'word') -> '10 words'
-    str_count(1, 'word') -> '1 word'
-    """
-    return '%d %s%s' % (count, word, '' if count == 1 else 's')
-
-
 def fmt_len(length):
     if length < 1000:
-        return '%dbp' % length
+        return '{}bp'.format(length)
     elif length < 1000000:
-        return '%.1f Kb' % (length / 1000)
+        return '{:.1f} kb'.format(length / 1000)
     else:
-        return '%.1f Mb' % (length / 1e6)
+        return '{:.1f} Mb'.format(length / 1e6)
 
 
 def letter_suffix(index, chars=string.ascii_lowercase):
@@ -389,3 +382,20 @@ def checked_fetch(fetch_file, region, genome):
 
 def non_empty_file(filename):
     return os.path.isfile(filename) and os.path.getsize(filename) > 0
+
+
+def command_to_str(command=None, basename=True, quote=True, sep=' '):
+    '''
+    Converts command into string.
+        Replaces first argument with its basename, if `basename` is True.
+        Quotes arguments, if needed and `quote` is True.
+
+    If command is None, uses sys.argv.
+    '''
+    command = list(sys.argv) if command is None else list(command)
+    if basename:
+        command[0] = os.path.basename(command[0])
+    if quote:
+        for i in range(len(command)):
+            command[i] = shlex.quote(command[i])
+    return sep.join(command)

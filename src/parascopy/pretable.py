@@ -332,7 +332,7 @@ def align_to_genome(regions, genome, args, wdir, out):
 
 def write_header(genome, out, argv):
     if argv:
-        out.write('# {}\n'.format(' '.join(argv)))
+        out.write('# {}\n'.format(common.command_to_str(argv)))
     out.write('# {} {}\n'.format(__pkg_name__, __version__))
     out.write('# Genomic intervals (columns 2-3 and 6-7) are 0-based, semi-inclusive.\n')
     out.write('# In CIGAR: columns 1-3 represent reference and columns 5-7 represent reads.\n')
@@ -382,13 +382,14 @@ def _sort_output(in_path, out, args, genome, bgzip_output, wdir):
     if sort_returncode != 0:
         if sort_err is None:
             sort_err = sort_process.stderr.read()
-        common.log('ERROR: Command "{}" finished with non-zero code {}'.format(' '.join(sort_command), sort_returncode))
+        common.log('ERROR: Command "{}" finished with non-zero code {}'.format(
+            common.command_to_str(sort_command), sort_returncode))
         common.log('Stderr:\n{}'.format(sort_err.decode()[:1000].strip()))
         raise RuntimeError('Bedtools finished with non-zero code')
 
     if bgzip_output and bgzip_process.returncode:
         common.log('ERROR: Command "{}" finished with non-zero code {}'.format(
-            ' '.join(bgzip_command), bgzip_process.returncode))
+            common.command_to_str(bgzip_command), bgzip_process.returncode))
         common.log('Stderr:\n{}'.format(bgzip_err.decode()[:1000].strip()))
         raise RuntimeError('Bgzip finished with non-zero code')
 

@@ -892,7 +892,7 @@ class VariantReadObservations:
         for i in range(2):
             # First pooled, second un-pooled.
             vcf_header = pysam.VariantHeader()
-            vcf_header.add_line('##command="{}"'.format(' '.join(argv)))
+            vcf_header.add_line('##command="{}"'.format(common.command_to_str(argv)))
             for name, length in genome.names_lengths():
                 vcf_header.add_line('##contig=<ID={},length={}>'.format(name, length))
 

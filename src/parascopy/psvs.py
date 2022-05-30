@@ -128,7 +128,7 @@ class _Psv:
 def create_vcf_header(genome, chrom_ids=None, argv=None):
     vcf_header = pysam.VariantHeader()
     if argv is not None:
-        vcf_header.add_line('##command="{}"'.format(' '.join(argv)))
+        vcf_header.add_line('##command="{}"'.format(common.command_to_str(argv)))
     for chrom_id in (chrom_ids or range(genome.n_chromosomes)):
         vcf_header.add_line('##contig=<ID={},length={}>'
             .format(genome.chrom_name(chrom_id), genome.chrom_len(chrom_id)))
