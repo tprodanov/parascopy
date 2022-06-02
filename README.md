@@ -133,6 +133,8 @@ You can use the following precomputed data:
     [hg38 (11 Mb)](https://dl.dropboxusercontent.com/s/5fsohggje778dlb/models_v1.2.5.tar.gz).
     Model parameters were calculated using 2504 samples from the 1000 genomes project
     (661 AFR, 503 EUR, 504 EAS, 489 SAS, 347 AMR samples).
+    Model parameters require the homology table
+    [v1.2.2](https://dl.dropboxusercontent.com/s/okzeedb6gze6zzs/homology_table_hg38.tar).
 
 Compatible reference genomes can be dowloaded from
 - [UCSC (hg19 and hg38)](https://hgdownload.soe.ucsc.edu/downloads.html#human),
