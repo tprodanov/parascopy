@@ -139,7 +139,7 @@ draw_matrix <- function(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
     # ------ Cluster samples ------
     sample_clust <- if (n_samples > 1) {
         sample_dist <- dist(t(ref_fracs))
-        sample_dist <- replace_na(sample_dist, 1.1 * max(sample_dist, na.rm = T))
+        sample_dist[is.na(sample_dist)] <- 1.1 * max(sample_dist, na.rm = T)
         hclust(sample_dist)
     } else {
       NULL
@@ -160,13 +160,14 @@ draw_matrix <- function(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
     # ------ Rounding ref. fractions ------
     n_copies <- length(strsplit(obs_gts[1], ',', fixed=T)[[1]])
     ref_fracs_round <- apply(ref_fracs * 2 * n_copies, 2,
-                            function(x) sprintf('%.0f', x)) |> matrix(ncol = n_samples)
+                            function(x) sprintf('%.0f / %.0f', x, 2 * n_copies)) |>
+        matrix(ncol = n_samples)
     if (n_psvs <= 200) {
         rownames(ref_fracs_round) <- rownames(ref_fracs)
     }
     colnames(ref_fracs_round) <- colnames(ref_fracs)
-    ref_fracs_round[ref_fracs_round %in% c('NA', 'NaN')] <- NA
-    ref_frac_values <- sprintf('%.0f', seq(0, 2 * n_copies, 1))
+    ref_fracs_round[grepl('^NA', ref_fracs_round, ignore.case = T)] <- NA
+    ref_frac_values <- sprintf('%.0f / %.0f', seq(0, 2 * n_copies, 1), 2 * n_copies)
     ref_fracs_colors <- structure(viridis(length(ref_frac_values)), names = ref_frac_values)
 
     # ------ Bottom annotation (samples) ------
@@ -194,7 +195,7 @@ draw_matrix <- function(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
     scale <- 1.8
     png(out_filename, width=2000 * scale, height=1000 * scale, res=100 * scale)
     h = Heatmap(ref_fracs_round,
-        name = '~ Allele 1\nfraction',
+        name = 'Allele 1\nfraction',
         col = ref_fracs_colors,
         use_raster = TRUE,
         column_names_gp = grid::gpar(fontsize = 5.5, col = sample_colors),
