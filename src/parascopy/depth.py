@@ -763,7 +763,7 @@ def main(prog_name, in_argv):
             'with less than <int> windows [default: %(default)s].')
     depth_args.add_argument('--low-mapq', metavar='<int>', type=int, default=_DEFAULT_LOW_MAPQ,
         help='Read mapping quality under <int> is considered as low [default: %(default)s].')
-    depth_args.add_argument('--mate-dist', metavar='<int>', type=int, default=pool_reads.DEFAULT_MATE_DIST,
+    depth_args.add_argument('--mate-dist', metavar='<int>', type=int, default=pool_reads.DEFAULT_MATE_DISTANCE,
         help='Insert size (~ distance between read mates) is expected to be under <int> [default: %(default)s].')
 
     opt_args = parser.add_argument_group('Optional arguments')
