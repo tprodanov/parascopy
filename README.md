@@ -79,7 +79,7 @@ parascopy table -i pretable.bed.gz -f genome.fa -o table.bed.gz
 Note, that the reference genome should be indexed with both `samtools faidx` and `bwa index`.
 Alternatively, you can download a [precomputed homology table](#precomputed-data).
 
-In order to find aggregate and paralog-specific copy number profiles (agCN and psCN), you can run the following commands:
+In order to find aggregate and paralog-specific copy number profiles (*agCN* and *psCN*), you can run the following commands:
 ```bash
 # Calculate background read depth.
 parascopy depth -I input.list -g hg38 -f genome.fa -o depth
@@ -104,6 +104,24 @@ Additionally, you can provide/override sample names with
 ```
 in1.bam sampleA
 in2.bam sampleB
+```
+
+### Modifying reference copy number
+
+After agCN estimation, parascopy searches for reliable PSVs.
+However, only samples that are consistent with the reference copy number are used (in a two-copy duplication,
+only samples with agCN = 4 will be used).
+Additionally, by default, sex chromosomes X and Y are treated as regular chromosomes.
+To solve both issues, one can use `--modify-ref` argument and provide updated reference copy numbers for some samples
+and some regions.
+
+The BED file can contain the following lines:
+```
+#CHROM  START    END  SAMPLES  CN  # This line is not necessary.
+chr1    10000  20000  *         0  # It is known that the region is missing from all samples.
+chrX        0    inf  SAMPLE1,SAMPLE2,SAMPLE3  1  # Male samples have one chrX and one chrY.
+chrY        0    inf  SAMPLE1,SAMPLE2,SAMPLE3  1
+chrY        0    inf  SAMPLE4,SAMPLE5,SAMPLE6  0  # Female samples are missing chrY.
 ```
 
 Visualizing output

@@ -35,7 +35,7 @@ load <- function(name, comment.char='#', ...) {
 }
 
 fmt_pos <- function(x) {
-  sprintf('%s kb', format(x / 1e3, big.mark=',', digits=0, scientific=F))
+  sprintf('%s kb', format(round(x / 1e3), big.mark=',', scientific=F))
 }
 
 # ------ Aggregation ------
@@ -164,7 +164,7 @@ if (args$no_title) {
 
 # ------ Draw raw normalized read depth (all windows) ------
 
-windows <- load('windows.bed', comment.char='') %>% rename(chrom = X.chrom)
+windows <- load('windows.bed', comment.char='') |> rename(chrom = X.chrom)
 if ('in_viterbi' %in% colnames(windows)) {
   windows <- rename(windows, in_hmm = in_viterbi)
 }
@@ -179,7 +179,7 @@ if (is.null(args$positions)) {
 windows <- filter(windows, window_ix >= min_window & window_ix <= max_window)
 windows$middle <- (windows$start + windows$end) / 2
 
-depth <- load('depth') %>% select(window_ix, sample, depth1, norm_cn1)
+depth <- load('depth') |> select(window_ix, sample, depth1, norm_cn1)
 depth <- filter(depth, window_ix >= min_window & window_ix <= max_window)
 depth <- left_join(depth,
                    select(windows, window_ix, region_ix, region_group, in_hmm),
@@ -227,13 +227,13 @@ local({
 hmm_states <- pivot_longer(hmm_states,
     !c('region_group', 'iteration', 'window_ix', 'ix', 'middle'),
     names_to='sample', values_to='pred_cn')
-hmm_states_first <- group_by(hmm_states, window_ix, sample) %>%
-  slice_head(n = 1) %>% ungroup()
-hmm_states_last <- group_by(hmm_states, window_ix, sample) %>%
-  slice_tail(n = 1) %>% ungroup()
+hmm_states_first <- group_by(hmm_states, window_ix, sample) |>
+  slice_head(n = 1) |> ungroup()
+hmm_states_last <- group_by(hmm_states, window_ix, sample) |>
+  slice_tail(n = 1) |> ungroup()
 
 hmm_params <- load('hmm_params')
-hmm_params <- group_by(hmm_params, window_ix) %>% slice_tail(n = 1) %>% ungroup()
+hmm_params <- group_by(hmm_params, window_ix) |> slice_tail(n = 1) |> ungroup()
 
 # ------ Draw normalized read depth for good windows ------
 
@@ -322,8 +322,8 @@ text_pos <- get_text_pos(hmm_states_last)
 
 if (any(hmm_states_first$iteration != 'v')) {
   hmm_states_first$pred_cn_round <- round(hmm_states_first$pred_cn)
-  sample_counts <- filter(hmm_states_first, ix %in% text_pos) %>%
-    aggregate(sample ~ middle + ix + pred_cn_round, ., length)
+  sample_counts <- aggregate(sample ~ middle + ix + pred_cn_round,
+    filter(hmm_states_first, ix %in% text_pos), length)
   ggplot(hmm_states_first) +
     locus_annotation +
     geom_line(aes(middle, copy_num), data=windows_v, size=4, color='gray70') +
@@ -342,8 +342,8 @@ if (any(hmm_states_first$iteration != 'v')) {
   ggsave(sprintf('%se_hmm_first.png', output), width=8, height=5)
 }
 
-sample_counts <- filter(hmm_states_last, ix %in% text_pos) %>%
-  aggregate(sample ~ middle + ix + pred_cn, ., length)
+sample_counts <- aggregate(sample ~ middle + ix + pred_cn,
+    filter(hmm_states_last, ix %in% text_pos), length)
 ggplot(hmm_states_last) +
   locus_annotation +
   geom_line(aes(middle, copy_num), data=windows_v, size=4, color='gray70') +

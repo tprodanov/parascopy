@@ -472,7 +472,7 @@ class Interval:
         return 'Region(chrom_id={}, start={:,}, end={:,})'.format(self._chrom_id, self._start, self._end)
 
     @staticmethod
-    def combine_overlapping(intervals, max_dist=0):
+    def combine_overlapping(intervals, max_dist=1):
         res = []
         for interval in sorted(intervals):
             if not res or res[-1].distance(interval) > max_dist:

@@ -75,6 +75,33 @@ def open_possible_empty(filename, *args, **kwargs):
     return EmptyContextManager()
 
 
+def file_or_str_list(l, arg_name=None):
+    """
+    Input may consist of strings and files with strings (filename should contain "/").
+    If arg_name is not None, include it in case of an error.
+    """
+    def format_command():
+        s = ''
+        if arg_name is not None:
+            s += arg_name
+        for val in l:
+            s += ' ' + shlex.quote(val)
+        return s
+
+    res = []
+    for val in l:
+        if '/' in val or '\\' in val:
+            if not os.path.isfile(val):
+                raise ValueError('File {} does not exist: {}'.format(val, format_command()))
+            with open(val) as inp:
+                res.extend(map(str.strip, inp))
+        else:
+            res.append(val)
+    if not res:
+        raise ValueError('Failed parsing "{}": resulting list is empty'.format(format_command()))
+    return res
+
+
 def _normalize_output(text, max_len=2000):
     text = text.decode('utf-8', 'replace')
     if len(text) > max_len:

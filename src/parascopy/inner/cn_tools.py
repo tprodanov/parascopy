@@ -581,14 +581,12 @@ class RegionGroupExtra:
         self._hmm_windows = [window for window in self._group_windows if window.in_hmm]
         self._windows_searcher = itree.NonOverlTree(self._group_windows, itree.region1_start, itree.region1_end)
         self._hmm_windows_searcher = itree.NonOverlTree(self._hmm_windows, itree.region1_start, itree.region1_end)
+        self._sample_const_regions = None
 
         psvs = dupl_hierarchy.psvs
         self._region_psvs = [psvs[i] for i in region_group.psv_ixs]
         self._psv_searcher = itree.NonOverlTree(self._region_psvs, itree.start, itree.variant_end)
         self._psv_read_counts = [psv_read_counts[i] for i in region_group.psv_ixs]
-
-        self._sample_const_regions = None
-        self._sample_reliable_regions = None
 
         self._psv_infos = paralog_cn.create_psv_infos(self._region_psvs, self._region_group, n_samples, genome)
         self._psv_f_values = None
@@ -629,17 +627,12 @@ class RegionGroupExtra:
     def psv_read_counts(self):
         return self._psv_read_counts
 
-    def set_viterbi_res(self, sample_const_regions, sample_reliable_regions):
+    def set_viterbi_res(self, sample_const_regions):
         self._sample_const_regions = sample_const_regions
-        self._sample_reliable_regions = sample_reliable_regions
 
     @property
     def sample_const_regions(self):
         return self._sample_const_regions
-
-    @property
-    def sample_reliable_regions(self):
-        return self._sample_reliable_regions
 
     def set_f_values(self, f_values):
         self._psv_f_values = f_values
@@ -688,8 +681,8 @@ class RegionGroupExtra:
                 support_row = sample_info.support_rows.get(sample_cn)
                 if support_row is None:
                     continue
-                n_copies = len(precomp_data.sample_genotypes[0])
-                _, pscn, pscn_qual = paralog_cn.calculate_marginal_probs(precomp_data.sample_genotypes, support_row,
+                n_copies = len(precomp_data.poss_pscns[0])
+                _, pscn, pscn_qual = paralog_cn.calculate_marginal_probs(precomp_data.poss_pscns, support_row,
                     n_copies, sample_cn)
                 pscn, pscn_qual, any_known = paralog_cn.paralog_cn_str(pscn, pscn_qual)
                 if any_known:

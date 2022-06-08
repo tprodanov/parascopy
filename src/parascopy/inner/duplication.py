@@ -628,9 +628,26 @@ class Duplication:
         Cigar.extend(new_cigar, iter(cigar_ext))
         return end1 - pos1_sub
 
+    def subregion1(self, start2, end2):
+        """
+        Return Interval - part of region1 that corresponds to interval start2 - end2.
+        Returns None if the subregion is empty.
+        """
+        if self._strand:
+            reg2_start = self._region2.start
+            start1, end1 = self._full_cigar.ref_region(start2 - reg2_start, end2 - reg2_start)
+        else:
+            reg2_end = self._region2.end
+            start1, end1 = self._full_cigar.ref_region(reg2_end - end2, reg2_end - start2)
+        if start1 >= end1:
+            return None
+
+        reg1_start = self._region1.start
+        return Interval(self._region1.chrom_id, reg1_start + start1, reg1_start + end1)
+
     def subregion2(self, start1, end1):
         """
-        Return Interval - part of region2 that corresponds to the region1[start1:end1].
+        Return Interval - part of region2 that corresponds to interval start1 - end1.
         Returns None if the subregion is empty.
         """
         reg_start1 = self._region1.start

@@ -188,14 +188,14 @@ class _PrecomputedData:
         self.n_alleles = max(alleles) + 1
         self.cn = cn
 
-        self.sample_genotypes = all_gt_counts(self.n_copies, cn)
+        self.poss_pscns = all_gt_counts(self.n_copies, cn)
         self.psv_genotypes = all_gt_counts(self.n_alleles, cn)
         self.n_psv_genotypes = len(self.psv_genotypes)
         self.f_combinations, f_comb_ixs = _all_f_combinations(self.n_copies, cn)
 
         self.poly_matrices = []
         self.f_ix_converts = []
-        for sample_gt in self.sample_genotypes:
+        for sample_gt in self.poss_pscns:
             f_powers, x_powers, res_poly = polynomials.multiply_polynomials_f_values(alleles, sample_gt)
             f_modulo = x_powers[0]
 
@@ -239,7 +239,7 @@ def _fill_psv_gts(sample_id, cns, cn_weights, psv_infos, psv_counts, psv_start_i
             if precomp_data is None:
                 precomp_data = _PrecomputedData(psv_info.allele_corresp, sample_cn)
                 psv_info.precomp_datas[sample_cn] = precomp_data
-            if len(precomp_data.sample_genotypes) <= max_genotypes:
+            if len(precomp_data.poss_pscns) <= max_genotypes:
                 _, probs = genotype_likelihoods(sample_cn, counts.allele_counts, gt_counts=precomp_data.psv_genotypes)
                 sample_info.psv_gt_probs[sample_cn] = probs
 
@@ -487,7 +487,8 @@ class VariantReadObservations:
         for _ in range(n_part_obs):
             sample_id = sample_conv[int.from_bytes(reader.read(2), byteorder)]
             count = int.from_bytes(reader.read(2), byteorder)
-            self.other_observations[sample_id] = count
+            if sample_id is not None:
+                self.other_observations[sample_id] = count
 
         while True:
             allele_ix = ord(reader.read(1))
@@ -502,6 +503,8 @@ class VariantReadObservations:
             is_first_mate = read_hash & 1
             read_hash -= is_first_mate
 
+            if sample_id is None:
+                continue
             # Read with the same hash is present (most probably read mate, collisions should be extremely rare).
             if read_hash in self.observations[sample_id]:
                 if self.observations[sample_id][read_hash].allele_ix != allele_ix:
@@ -935,11 +938,11 @@ def read_freebayes_binary(ra_reader, samples, vcf_file, dupl_pos_finder):
     n_samples = len(samples)
     n_in_samples = int.from_bytes(ra_reader.read(2), byteorder)
 
-    # Converter between sample IDs sample_conv[sample_id from input] = sample_id in parascopy.
-    sample_conv = np.zeros(n_in_samples, dtype=np.uint16)
+    # Converter between sample IDs sample_conv[sample_id from input] = sample_id in `samples`.
+    sample_conv = [None] * n_in_samples
     for i in range(n_in_samples):
         sample = _read_string(ra_reader)
-        sample_conv[i] = samples.id(sample)
+        sample_conv[i] = samples.id_or_none(sample)
 
     positions = []
     vcf_record = _next_or_none(vcf_file)

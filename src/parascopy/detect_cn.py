@@ -338,7 +338,7 @@ def _validate_read_groups(pooled_bam, read_groups_dict, samples):
             .format(len(ixs), samples[ixs[0]]))
 
 
-def analyze_region(interval, data, samples, bg_depth, model_params):
+def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref_cns):
     subdir = os.path.join(data.args.output, interval.os_name)
     duplications = []
     skip_regions = []
@@ -416,8 +416,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
     if not model_params.is_loaded:
         extra_files.update(dict(
             psv_f_values='em_f_values.csv', interm_psv_f_values='em_interm_f_values.csv',
-            em_likelihoods='em_likelihoods.csv', em_sample_gts='em_sample_gts.csv',
-            use_psv_sample='em_use_psv_sample.csv', psv_filtering='em_psv_filtering.txt',
+            em_pscn='em_psCN.csv', use_psv_sample='em_use_psv_sample.csv', psv_filtering='em_psv_filtering.txt',
         ))
 
     results = []
@@ -462,7 +461,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
             common.log('[{}] Region group {}'.format(interval.name, group_name))
             cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
                 min_samples=args.min_samples, agcn_range=args.agcn_range, agcn_jump=args.agcn_jump,
-                min_trans_prob=args.transition_prob * np.log(10), use_multipliers=args.use_multipliers,
+                min_trans_prob=args.transition_prob * common.LOG10, use_multipliers=args.use_multipliers,
                 update_agcn_qual=args.update_agcn)
             out.flush()
 
@@ -473,8 +472,9 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
                 group_extra.set_from_model_params(model_params, len(samples))
             else:
                 time_log.log('Group {}: Run EM to find reliable PSVs'.format(group_name))
-                paralog_cn.find_reliable_psvs(group_extra, samples, genome, out, args.min_samples,
-                    args.reliable_threshold[1], args.pscn_bound[0])
+                paralog_cn.find_reliable_psvs(group_extra, samples, genome, modified_ref_cns, out,
+                    min_samples=args.min_samples, reliable_threshold=args.reliable_threshold[1],
+                    max_agcn=args.pscn_bound[0])
                 model_params.set_psv_f_values(group_extra, genome)
             group_extra.set_reliable_psvs(*args.reliable_threshold)
 
@@ -503,7 +503,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params):
     return model_params
 
 
-def single_region(region_ix, region, data, samples, bg_depth, model_params):
+def single_region(region_ix, region, data, samples, bg_depth, model_params, modified_ref_cns):
     """
     Returns tuple (region_ix, exc).
     This is needed because multithreading callback needs to know, how each region finished.
@@ -525,7 +525,7 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params):
 
     common.log('Analyzing region {}'.format(region.full_name(data.genome)))
     try:
-        model_params = analyze_region(region, data, samples, bg_depth, model_params)
+        model_params = analyze_region(region, data, samples, bg_depth, model_params, modified_ref_cns)
         filename = os.path.join(data.args.output, 'model', '{}.gz'.format(region.os_name))
         with gzip.open(filename, 'wt') as model_out:
             model_params.write_to(model_out, data.genome)
@@ -590,7 +590,7 @@ def join_vcf_files(in_filenames, out_filename, genome, tabix, merge_duplicates=F
         common.Process([tabix, '-p', 'vcf', out_filename]).finish()
 
 
-def run(regions, data, samples, bg_depth, models):
+def run(regions, data, samples, bg_depth, models, modified_ref_cns):
     n_regions = len(regions)
     if models is None:
         models = [None] * n_regions
@@ -600,7 +600,7 @@ def run(regions, data, samples, bg_depth, models):
     if threads == 1:
         common.log('Using 1 thread')
         for region_ix, (region, model_params) in enumerate(zip(regions, models)):
-            results.append(single_region(region_ix, region, data, samples, bg_depth, model_params))
+            results.append(single_region(region_ix, region, data, samples, bg_depth, model_params, modified_ref_cns))
 
     else:
         def callback(res):
@@ -614,7 +614,7 @@ def run(regions, data, samples, bg_depth, models):
         pool = multiprocessing.Pool(threads)
         for region_ix, (region, model_params) in enumerate(zip(regions, models)):
             pool.apply_async(single_region,
-                args=(region_ix, region, data.copy(), samples, bg_depth, model_params),
+                args=(region_ix, region, data.copy(), samples, bg_depth, model_params, modified_ref_cns),
                 callback=callback, error_callback=err_callback)
         pool.close()
         pool.join()
@@ -779,6 +779,48 @@ def filter_regions(regions, loaded_models, regions_subset):
     return regions, loaded_models
 
 
+def _get_modified_ref_cn(filename, genome, samples):
+    from .inner import itree
+    n_samples = len(samples)
+    if filename is None:
+        return None
+
+    sample_regions = [[] for _ in range(n_samples)]
+    with common.open_possible_gzip(filename) as inp:
+        for line in inp:
+            if line.startswith('#'):
+                continue
+            chrom, start, end, sample_list, cn = line.strip().split()[:5]
+            chrom_id = genome.chrom_id(chrom)
+            if end == 'inf':
+                end = genome.chrom_len(chrom_id)
+            else:
+                end = int(end)
+            pair = (Interval(chrom_id, int(start), end), int(cn))
+
+            if sample_list == '*':
+                sample_ids = range(n_samples)
+            else:
+                sample_ids = []
+                for sample in sample_list.split(','):
+                    if sample in samples:
+                        sample_ids.append(samples.id(sample))
+                    else:
+                        common.log('ERROR: Unknown sample {} in file "{}"'.format(sample, filename))
+            for sample_id in sample_ids:
+                sample_regions[sample_id].append(pair)
+
+    trees = []
+    region_getter = operator.itemgetter(0)
+    for regions in sample_regions:
+        if not regions:
+            trees.append(None)
+        else:
+            regions.sort()
+            trees.append(itree.MultiNonOverlTree(regions, region_getter))
+    return trees
+
+
 def parse_args(prog_name, in_argv, is_new):
     assert prog_name is not None
     usage = ('{prog} {model}(-i <bam> [...] | -I <bam-list>) -t <table> -f <fasta> '
@@ -830,6 +872,11 @@ def parse_args(prog_name, in_argv, is_new):
         reg_args.add_argument('-R', '--regions-file', nargs='+', metavar='<file> [<file> ...]',
             help='Input bed[.gz] file(s) containing regions (tab-separated, 0-based semi-exclusive).\n'
                 'Optional fourth column will be used as a region name.')
+        reg_args.add_argument('--modify-ref', metavar='<bed>',
+            help='Modify reference copy number: bed file with columns "chrom start end samples copy_num".\n'
+                'Fourth column can be a single sample name; list of sample names separated by ",";\n'
+                'or "*" to indicate all samples.\n'
+                'Modified reference copy numbers are used for paralog-specific copy number detection.')
     reg_args.add_argument('--regions-subset', nargs='+', metavar='<str> [<str> ...]',
         help='Additionally filter input regions: only use regions with names that are in this list.\n'
             'If the first argument is "!", only use regions not in this list.')
@@ -927,6 +974,8 @@ def parse_args(prog_name, in_argv, is_new):
             sys.stderr.write('Unexpected number of arguments for --pscn-bound\n\n')
             parser.print_usage(sys.stderr)
             exit(1)
+    else:
+        args.modify_ref = None
     return args
 
 
@@ -936,22 +985,24 @@ def main(prog_name=None, in_argv=None, is_new=None):
 
     data = DataStructures(args)
     data.prepare()
-    data.genome.compare_with_other(ChromNames.from_table(data.table), args.table)
+    genome = data.genome
+    genome.compare_with_other(ChromNames.from_table(data.table), args.table)
 
     directory = args.output
     common.log('Using output directory "{}"'.format(directory))
     common.mkdir(directory)
     _write_command(os.path.join(directory, 'command.txt'))
 
-    regions, loaded_models = get_regions(args, data.genome, load_models=not args.is_new)
+    regions, loaded_models = get_regions(args, genome, load_models=not args.is_new)
     if loaded_models:
         args.min_samples = None
     common.mkdir_clear(os.path.join(directory, 'model'), args.rerun == 'full')
     regions, loaded_models = filter_regions(regions, loaded_models, args.regions_subset)
 
-    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, data.genome)
+    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome)
     data.set_bam_wrappers(bam_wrappers)
     depth_.check_duplicated_samples(bam_wrappers)
+    modified_ref_cns = _get_modified_ref_cn(args.modify_ref, genome, samples)
 
     if loaded_models:
         bg_depth = depth_.Depth.from_filenames(args.depth, samples)
@@ -959,7 +1010,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
         bg_depth = depth_.Depth.from_filenames(args.depth, samples, window_filtering_mult=args.window_filtering)
         common.log(bg_depth.params.describe() + '    ============')
 
-    run(regions, data, samples, bg_depth, loaded_models)
+    run(regions, data, samples, bg_depth, loaded_models, modified_ref_cns)
     data.close()
 
 

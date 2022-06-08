@@ -115,6 +115,9 @@ class Samples:
     def id(self, sample_name):
         return self._sample_ids[sample_name]
 
+    def id_or_none(self, sample_name):
+        return self._sample_ids.get(sample_name)
+
     def __iter__(self):
         return iter(self._samples)
 
@@ -175,6 +178,7 @@ class RecordCoord:
         CertCorrect = 2
 
     IS_PAIRED   = 0b00000001
+    IS_REVERSE  = 0b00000010
     LOC_INFO_SHIFT = 6
     MAX_U16 = 0xffff
     byte_struct = None
@@ -202,6 +206,7 @@ class RecordCoord:
         self.aln_region = None
         self.location_info = RecordCoord.LocationInfo.Unknown
         self.is_paired = False
+        self.is_reverse = False
         self.other_entries = None
 
     def add_entry(self, other):
@@ -230,6 +235,7 @@ class RecordCoord:
         # print('From pooled record: hash {} {}'.format(record.query_name, self.read_hash))
         self.seq_len = len(record.query_sequence)
         self.is_paired = record.is_paired
+        self.is_reverse = record.is_reverse
 
         if not record.is_unmapped:
             chrom_a = genome.chrom_id(record.reference_name)
@@ -276,6 +282,8 @@ class RecordCoord:
         flag = 0
         if self.is_paired:
             flag |= RecordCoord.IS_PAIRED
+        if self.is_reverse:
+            flag |= RecordCoord.IS_REVERSE
         flag |= self.location_info.value << RecordCoord.LOC_INFO_SHIFT
 
         out.write(RecordCoord.byte_struct.pack(
@@ -295,6 +303,7 @@ class RecordCoord:
         self.seq_len = seq_len
         self.aln_region = Interval(chrom_id, start, start + region_len)
         self.is_paired = bool(flag & RecordCoord.IS_PAIRED)
+        self.is_reverse = bool(flag & RecordCoord.IS_REVERSE)
         self.location_info = RecordCoord.LocationInfo(flag >> RecordCoord.LOC_INFO_SHIFT)
         return self
 
@@ -303,12 +312,11 @@ class RecordCoord:
             self.aln_region.to_str(genome) if genome else repr(self.aln_region), self.location_info)
 
 
-def write_record_coordinates(in_bam, samples, unique_tree, genome, out_filename):
+def write_record_coordinates(in_bam, samples, unique_tree, genome, out_filename, comment_dict):
     n_samples = len(samples)
     read_groups = {}
     for read_group, sample in get_read_groups(in_bam):
-        read_groups[read_group] = samples.id(sample)
-    comment_dict = get_comment_items(in_bam)
+        read_groups[read_group] = samples.id_or_none(sample)
 
     with tempfile.TemporaryDirectory(prefix='parascopy') as wdir:
         tmp_files = []
@@ -318,7 +326,8 @@ def write_record_coordinates(in_bam, samples, unique_tree, genome, out_filename)
             for record in in_bam:
                 coord = RecordCoord.from_pooled_record(record, unique_tree, genome)
                 sample_id = read_groups[record.get_tag('RG')]
-                coord.write_binary(tmp_files[sample_id])
+                if sample_id is not None:
+                    coord.write_binary(tmp_files[sample_id])
         finally:
             for f in tmp_files:
                 f.close()

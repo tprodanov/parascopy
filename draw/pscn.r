@@ -50,7 +50,7 @@ colors_to_ramp <- function(colors, min_v=NULL, max_v=NULL, data=NULL) {
     colorRamp2(seq(min_v, max_v, length = n), colors)
 }
 
-yellow_colors <- colors_to_ramp(brewer.pal(9, 'YlOrRd'), 0.0, 1.0)
+yellow_colors <- colors_to_ramp(brewer.pal(9, 'YlOrRd'), 0, 100)
 white_colors <- colorRamp2(c(0, 1), c('white', 'white'))
 
 # ------ Argument parser ------
@@ -83,6 +83,7 @@ ref_frac_matrix <- local({
     use_matrix <- use_matrix[ , 3:ncol(use_matrix), drop = F] |> as.matrix() == '++'
     use_matrix <- use_matrix[rowSums(use_matrix) > 0, , drop = F]
 
+    Sys.setenv("VROOM_CONNECTION_SIZE" = 131072 * 10)
     psvs_vcf <- suppressMessages(read_delim(file.path(input, 'psvs.vcf.gz'), '\t', comment = '##'))
     names(psvs_vcf)[1:6] <- c('chrom', 'pos', 'ID', 'ref', 'alt', 'qual')
     vcf_samples <- colnames(psvs_vcf)[10:ncol(psvs_vcf)]
@@ -111,13 +112,12 @@ ref_frac_matrix <- local({
 
 # ------ Load other files ------
 
-all_sample_gts <- load('extra/em_sample_gts')
-all_likelihoods <- load('extra/em_likelihoods')
+all_likelihoods <- load('extra/em_psCN')
 all_f_values <- load('extra/em_f_values')
 
 # ------ Draw PSV matrices ------
 
-draw_matrix <- function(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
+draw_matrix <- function(sample_pscn, sample_pscn_qual, ref_fracs, f_matrix,
                         title, out_filename) {
     n_psvs <- dim(ref_fracs)[1]
     if (n_psvs == 0) {
@@ -126,15 +126,15 @@ draw_matrix <- function(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
 
     # ------ Subset samples ------
     ref_fracs <- ref_fracs[, colSums(!is.na(ref_fracs)) > 0, drop = F]
-    samples <- intersect(names(sample_gts), colnames(ref_fracs))
+    samples <- intersect(names(sample_pscn), colnames(ref_fracs))
     n_samples <- length(samples)
     if (n_samples == 0) {
         return()
     }
 
     ref_fracs <- ref_fracs[, samples, drop = F]
-    sample_gts <- sample_gts[samples]
-    sample_gt_probs <- sample_gt_probs[samples]
+    sample_pscn <- sample_pscn[samples]
+    sample_pscn_qual <- sample_pscn_qual[samples]
 
     # ------ Cluster samples ------
     sample_clust <- if (n_samples > 1) {
@@ -146,35 +146,42 @@ draw_matrix <- function(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
     }
 
     # ------ Sample genotype colors ------
-    obs_gts <- sort(unique(sample_gts))
-    n_gts <- length(obs_gts)
-    gt_colors <- if (n_gts > 20) {
-        viridis(n_gts, option = 'B')
-    } else if (n_gts > 10) {
-        tableau_color_pal('Tableau 20')(n_gts)
+    obs_pscn <- sort(unique(sample_pscn))
+    n_pscn <- length(obs_pscn)
+    pscn_colors <- if (n_pscn > 20) {
+        viridis(n_pscn, option = 'B')
+    } else if (n_pscn > 10) {
+        tableau_color_pal('Tableau 20')(n_pscn)
     } else {
-        tableau_color_pal('Tableau 10')(n_gts)
+        tableau_color_pal('Tableau 10')(n_pscn)
     }
-    gt_colors <- structure(gt_colors, names = obs_gts)
+    pscn_colors <- structure(pscn_colors, names = obs_pscn)
 
     # ------ Rounding ref. fractions ------
-    n_copies <- length(strsplit(obs_gts[1], ',', fixed=T)[[1]])
-    ref_fracs_round <- apply(ref_fracs * 2 * n_copies, 2,
-                            function(x) sprintf('%.0f / %.0f', x, 2 * n_copies)) |>
-        matrix(ncol = n_samples)
-    if (n_psvs <= 200) {
-        rownames(ref_fracs_round) <- rownames(ref_fracs)
+    ref_fracs_draw <- ref_fracs
+    if (n_psvs > 200) {
+        rownames(ref_fracs_draw) <- NULL
     }
-    colnames(ref_fracs_round) <- colnames(ref_fracs)
-    ref_fracs_round[grepl('^NA', ref_fracs_round, ignore.case = T)] <- NA
-    ref_frac_values <- sprintf('%.0f / %.0f', seq(0, 2 * n_copies, 1), 2 * n_copies)
-    ref_fracs_colors <- structure(viridis(length(ref_frac_values)), names = ref_frac_values)
+    ref_fracs_colors <- colors_to_ramp(viridis(100), 0, 1)
+
+    # # Discrete heatmap.
+    # # n_copies <- length(strsplit(obs_pscn[1], ',', fixed=T)[[1]])
+    # max_copies <- 10
+    # ref_fracs_draw <- apply(ref_fracs, 2, function(x) sprintf('%.0f / %.0f', x * max_copies, max_copies)) |>
+    #     matrix(ncol = n_samples)
+    # if (n_psvs <= 200) {
+    #     rownames(ref_fracs_draw) <- rownames(ref_fracs)
+    # }
+    # colnames(ref_fracs_draw) <- colnames(ref_fracs)
+    # ref_fracs_draw[grepl('^NA', ref_fracs_draw, ignore.case = T)] <- NA
+    # ref_frac_values <- sprintf('%.0f / %.0f', seq(0, max_copies, 1), max_copies)
+    # ref_fracs_colors <- structure(viridis(length(ref_frac_values)), names = ref_frac_values)
 
     # ------ Bottom annotation (samples) ------
     sample_annot <- HeatmapAnnotation(
-        Genotype = sample_gts,
-        Weight = sample_gt_probs,
-        col = list(Genotype = gt_colors, Weight = yellow_colors),
+        Genotype = sample_pscn,
+        Weight = sample_pscn_qual,
+        col = list(Genotype = pscn_colors, Weight = yellow_colors),
         which = 'column'
         )
 
@@ -183,8 +190,8 @@ draw_matrix <- function(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
     psv_annot <- HeatmapAnnotation(
         Reliable = anno_simple(rep(0, n_psvs),
             pch = ifelse(min_fval >= reliable_threshold, '*', NA), col = white_colors),
-        Weight = f_matrix,
-        col = list('Weight' = yellow_colors),
+        Weight = f_matrix * 100,
+        col = list(Weight = yellow_colors),
         which = 'row',
         show_annotation_name = T
         )
@@ -194,7 +201,7 @@ draw_matrix <- function(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
     {
     scale <- 1.8
     png(out_filename, width=2000 * scale, height=1000 * scale, res=100 * scale)
-    h = Heatmap(ref_fracs_round,
+    h = Heatmap(ref_fracs_draw,
         name = 'Allele 1\nfraction',
         col = ref_fracs_colors,
         use_raster = TRUE,
@@ -219,7 +226,6 @@ draw_region_group <- function(group) {
     cat(sprintf('[%s: %s] Start\n', locus, group))
 
     # ------ Subset data for the current region group ------
-    possible_sample_gts <- filter(all_sample_gts, region_group == group)
     likelihoods <- filter(all_likelihoods, region_group == group)
     psv_names <- intersect(filter(all_f_values, region_group == group)$psv,
                         rownames(ref_frac_matrix))
@@ -234,21 +240,25 @@ draw_region_group <- function(group) {
     last_iter_lik <- likelihoods |> group_by(cluster) |> slice_tail(n = 1) |> ungroup()
     best_cluster <- last_iter_lik[which.max(last_iter_lik$likelihood),]$cluster[1]
     likelihoods <- filter(likelihoods, cluster == best_cluster)
-    last_iteration <- tail(likelihoods, 1)$iteration
-    last_likelihood <- tail(likelihoods, 1)$likelihood
+    last_values <- tail(likelihoods, 1)
+    last_iteration <- last_values$iteration
+    last_likelihood <- last_values$likelihood
 
     # ------ Extract best sample genotypes and their probabilities ------
-    possible_sample_gts <- filter(possible_sample_gts, cluster == best_cluster & iteration == last_iteration)
-    possible_sample_gts <- possible_sample_gts[, !is.na(possible_sample_gts[1,])]
-    samples <- colnames(possible_sample_gts)[6:ncol(possible_sample_gts)]
+    n_cols <- ncol(last_values)
+    sample_pscn <- last_values[8:n_cols]
+    samples <- colnames(last_values)[8:n_cols]
+    samples <- samples[sample_pscn != '*']
+    sample_pscn <- sample_pscn[sample_pscn != '*']
     n_samples <- length(samples)
     if (n_samples == 0) {
         cat(sprintf('[%s: %s] No samples present.\n', locus, group))
         return()
     }
-    all_gts <- possible_sample_gts$genotype
-    sample_gts <- all_gts[apply(possible_sample_gts[samples], 2, which.max)] |> setNames(samples)
-    sample_gt_probs <- (10 ^ apply(possible_sample_gts[samples], 2, max)) |> setNames(samples)
+    sample_pscn_split <- strsplit(sample_pscn, ':')
+    sample_pscn <- sapply(sample_pscn_split, `[`, 1) |> setNames(samples)
+    sample_pscn_qual <- pmin(as.numeric(sapply(sample_pscn_split, `[`, 2)), 100) |>
+        setNames(samples)
 
     # ------ Reformat f-values matrix ------
     stopifnot(psv_names == f_values$psv)
@@ -265,18 +275,18 @@ draw_region_group <- function(group) {
     # ------ Draw matrices ------
     ref_fracs <- ref_frac_matrix[psv_names, samples, drop = F]
 
-    draw_matrix(sample_gts, sample_gt_probs, ref_fracs, f_matrix,
+    draw_matrix(sample_pscn, sample_pscn_qual, ref_fracs, f_matrix,
         title = sprintf(title, 'All PSVs'),
         out_filename = sprintf('%s%s.1_all.png', output, group))
 
     psv_ixs <- min_fval >= semirel_threshold
-    draw_matrix(sample_gts, sample_gt_probs,
+    draw_matrix(sample_pscn, sample_pscn_qual,
                 ref_fracs[psv_ixs, , drop = F], f_matrix[psv_ixs, , drop = F],
                 title = sprintf(title, 'Semi-reliable PSVs'),
                 out_filename = sprintf('%s%s.2_semirel.png', output, group))
 
     psv_ixs <- min_fval >= reliable_threshold
-    draw_matrix(sample_gts, sample_gt_probs,
+    draw_matrix(sample_pscn, sample_pscn_qual,
                 ref_fracs[psv_ixs, , drop = F], f_matrix[psv_ixs, , drop = F],
                 title = sprintf(title, 'Reliable PSVs'),
                 out_filename = sprintf('%s%s.3_reliable.png', output, group))

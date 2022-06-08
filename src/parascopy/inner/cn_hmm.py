@@ -964,14 +964,12 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
 
     common.log('    Finalizing total copy number predictions')
     sample_const_regions = []
-    sample_reliable_regions = []
     for sample_id in range(n_samples):
         sample_path = paths[sample_paths[sample_id]]
         sample_path = _split_path_by_probs(sample_path, model.gammas[sample_id], model, windows, window_boundaries)
 
         sample_const_regions.append(_get_sample_const_regions(sample_id, sample_path, model, update_agcn_qual))
-        sample_reliable_regions.append(_get_sample_reliable_region(sample_path))
-    region_group_extra.set_viterbi_res(sample_const_regions, sample_reliable_regions)
+    region_group_extra.set_viterbi_res(sample_const_regions)
 
     if not model_params.is_loaded:
         common.log('    Saving HMM parameters to model parameters')
@@ -1063,33 +1061,3 @@ def _get_sample_const_regions(sample_id, main_path, model, update_agcn_qual):
         cn_pred.info['region_ix'] = segment.const_region_ix
         res.append(cn_pred)
     return res
-
-
-def _get_sample_reliable_region(path, min_reliable_windows=5):
-    best_region = None
-    best_key = (0, 0)
-    rel_regions = [[]]
-    for segment in path:
-        if segment.cn == segment.dupl_region.cn:
-            rel_regions[-1].append(segment)
-        else:
-            rel_regions.append([])
-
-    best_region = None
-    best_key = (0, 0)
-    for i, subsegments in enumerate(rel_regions):
-        if not subsegments:
-            continue
-        first = subsegments[0]
-        last = subsegments[-1]
-        n_windows = last.end_ix - first.start_ix
-        if n_windows < min_reliable_windows:
-            continue
-
-        region = Interval(first.dupl_region.region1.chrom_id, first.dupl_region.region1.start,
-            last.dupl_region.region1.end)
-        key = (n_windows, len(region))
-        if key > best_key:
-            best_region = region
-            best_key = key
-    return best_region

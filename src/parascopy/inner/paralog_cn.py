@@ -34,73 +34,81 @@ def _get_f_prior(f_values):
     return logsumexp(beta_cdfs, b=(1, -1))
 
 
-def _e_step(psv_infos, psv_f_values, genotype_priors, n_samples):
+def _e_step(psv_infos, psv_f_values, all_genotype_priors):
     """
     Returns
         - total ln likelihood,
-        - matrix of P(sample_genotype | allele_counts, psvs), size = (n_samples, n_sample_genotypes).
+        - list of lists of P(sample_genotype | allele_counts, psvs),
+            outer size = n_samples; inner size = len(all_genotype_priors[i]).
     """
     n_psvs = len(psv_infos)
-    n_sample_genotypes = len(genotype_priors)
-    prob_matrix = np.zeros((n_samples, n_sample_genotypes))
-    usable_samples = np.zeros(n_samples, dtype=np.bool)
-    total_f_prior = 0
+    prob_matrix = [None] * len(all_genotype_priors)
+    for sample_id, genotype_priors in enumerate(all_genotype_priors):
+        if genotype_priors is not None:
+            prob_matrix[sample_id] = genotype_priors.copy()
 
+    total_f_prior = 0
     for psv_info in psv_infos:
         if not psv_info.in_em:
             continue
-        sample_ids = psv_info.sample_ids
-        usable_samples[sample_ids] = True
 
-        precomp_data = psv_info.precomp_data_ref_cn
-        psv_gt_probs = psv_info.em_psv_gt_probs
         exponent = psv_info.info_content
-
-        psv_ix = psv_info.psv_ix
-        f_values = psv_f_values[psv_ix]
+        f_values = psv_f_values[psv_info.psv_ix]
         total_f_prior += _get_f_prior(f_values)
-        f_pow_combs = precomp_data.f_power_combinations(f_values)
-        all_psv_gt_coefs = precomp_data.eval_poly_matrices(f_pow_combs)
 
-        for sample_gt_ix, psv_gt_coefs in enumerate(all_psv_gt_coefs):
-            curr_probs = exponent * logsumexp(psv_gt_coefs + psv_gt_probs, axis=1)
-            prob_matrix[sample_ids, sample_gt_ix] += curr_probs
+        all_psv_gt_coefs = {}
+        for agcn in psv_info.em_agcns:
+            precomp_data = psv_info.precomp_datas[agcn]
+            f_pow_combs = precomp_data.f_power_combinations(f_values)
+            all_psv_gt_coefs[agcn] = precomp_data.eval_poly_matrices(f_pow_combs)
 
-    with np.errstate(invalid='ignore'):
-        prob_matrix += genotype_priors[np.newaxis, :]
-        prob_matrix[~usable_samples] = np.nan
-        row_sums = logsumexp(prob_matrix, axis=1)
-        total_lik = np.sum(row_sums[usable_samples]) + total_f_prior
-        prob_matrix -= row_sums[:, np.newaxis]
+        for sample_id in psv_info.em_sample_ids:
+            agcn, psv_gt_probs = psv_info.em_psv_gt_probs[sample_id]
+            for sample_pscn_ix, psv_gt_coefs in enumerate(all_psv_gt_coefs[agcn]):
+                prob_matrix[sample_id][sample_pscn_ix] += exponent * logsumexp(psv_gt_coefs + psv_gt_probs)
+
+    total_lik = total_f_prior
+    for sample_row in prob_matrix:
+        if sample_row is not None:
+            s = logsumexp(sample_row)
+            total_lik += s
+            sample_row -= s
     return total_lik, prob_matrix
 
 
-def _minus_lik_fn(gt_probs_regular, precomp_data, psv_gt_probs):
-    n_samples, n_genotypes = gt_probs_regular.shape
+def _minus_lik_fn(psv_info, sample_pscn_probs, sample_ids):
+    em_agcns = psv_info.em_agcns
+    reg_pscn_probs = []
+    for sample_id in sample_ids:
+        reg_pscn_probs.append(np.exp(sample_pscn_probs[sample_id]))
 
     def fn(f_values):
-        beta_prior = -_get_f_prior(f_values)
-        if np.isinf(beta_prior):
-            return beta_prior
+        min_lik = -_get_f_prior(f_values)
+        if np.isinf(min_lik):
+            return min_lik
 
-        inner_term = np.full((n_samples, n_genotypes), np.nan)
-        f_pow_combs = precomp_data.f_power_combinations(f_values)
-        all_psv_gt_coefs = precomp_data.eval_poly_matrices(f_pow_combs)
+        all_psv_gt_coefs = {}
+        for agcn in em_agcns:
+            precomp_data = psv_info.precomp_datas[agcn]
+            f_pow_combs = precomp_data.f_power_combinations(f_values)
+            all_psv_gt_coefs[agcn] = precomp_data.eval_poly_matrices(f_pow_combs)
 
-        for sample_gt_ix, psv_gt_coefs in enumerate(all_psv_gt_coefs):
-            inner_term[:, sample_gt_ix] = logsumexp(psv_gt_coefs + psv_gt_probs, axis=1)
-        return -np.sum(inner_term * gt_probs_regular) + beta_prior
+        for sample_id, curr_reg_pscn_probs in zip(sample_ids, reg_pscn_probs):
+            agcn, psv_gt_probs = psv_info.em_psv_gt_probs[sample_id]
+            for sample_pscn_ix, psv_gt_coefs in enumerate(all_psv_gt_coefs[agcn]):
+                min_lik -= logsumexp(psv_gt_coefs + psv_gt_probs) * curr_reg_pscn_probs[sample_pscn_ix]
+        return min_lik
     return fn
 
 
-def _m_step(sample_gt_probs, psv_infos, psv_ixs, prev_psv_f_values):
+def _m_step(sample_pscn_probs, psv_infos, psv_ixs, prev_psv_f_values):
     """
     Returns
         - matrix with f-values (n_psvs x n_copies),
         - total_likelihood.
     """
     n_psvs = len(psv_infos)
-    n_samples, n_genotypes = sample_gt_probs.shape
+    n_samples = len(sample_pscn_probs)
     n_copies = prev_psv_f_values.shape[1]
     psv_f_values = np.full_like(prev_psv_f_values, np.nan)
 
@@ -110,19 +118,14 @@ def _m_step(sample_gt_probs, psv_infos, psv_ixs, prev_psv_f_values):
     min_bound = np.clip(1 / n_samples, 1e-6, 1 / 10)
     bounds = ((min_bound, 1 - min_bound),) * n_copies
 
-    sample_gt_probs_regular = np.exp(sample_gt_probs)
     total_lik = 0
     for psv_ix in psv_ixs:
         psv_info = psv_infos[psv_ix]
-        sample_ids = psv_info.sample_ids
+        sample_ids = psv_info.em_sample_ids
         assert len(sample_ids) > 0
 
-        sample_gt_probs_subset = sample_gt_probs_regular[sample_ids]
-        precomp_data = psv_info.precomp_data_ref_cn
-        psv_gt_probs = psv_info.em_psv_gt_probs
         prev_f_values = prev_psv_f_values[psv_ix]
-
-        minus_lik = _minus_lik_fn(sample_gt_probs_subset, precomp_data, psv_gt_probs)
+        minus_lik = _minus_lik_fn(psv_info, sample_pscn_probs, sample_ids)
         sol = optimize.minimize(minus_lik, x0=prev_f_values, bounds=bounds, options=OPTS, method=METHOD)
 
         total_lik -= sol.fun
@@ -160,32 +163,63 @@ def _match_psv_alleles(psv, regions2, genome):
     return tuple(res)
 
 
-def _select_psv_sample_pairs(region_group_extra, samples, outp, min_samples):
+def _get_ref_region(sample_regions, ref_agcn):
+    if ref_agcn is None:
+        return None
+    best_region = None
+    best_sum_len = 0
+    curr_region = None
+    curr_sum_len = 0
+
+    for sample_region in sample_regions:
+        if sample_region.pred_cn != ref_agcn:
+            if curr_sum_len > best_sum_len:
+                best_region = curr_region
+                best_sum_len = curr_sum_len
+            curr_region = None
+            curr_sum_len = 0
+        elif curr_region is None:
+            curr_region = sample_region.region1
+            curr_sum_len = len(sample_region.region1)
+        else:
+            curr_region = curr_region.combine(sample_region.region1)
+            curr_sum_len += len(sample_region.region1)
+
+    if curr_sum_len > best_sum_len:
+        best_region = curr_region
+        best_sum_len = curr_sum_len
+    return best_region
+
+
+def _select_psv_sample_pairs(region_group_extra, samples, out, min_samples, sample_ref_agcns, sample_ref_pscns):
     group = region_group_extra.region_group
-    psv_infos = region_group_extra.psv_infos
-    sample_reliable_regions = region_group_extra.sample_reliable_regions
     group_name = group.name
+    psv_infos = region_group_extra.psv_infos
+    sample_const_regions = region_group_extra.sample_const_regions
     n_psvs = len(psv_infos)
     n_samples = len(samples)
 
-    outp.write('# Group {}. Sample regions with agCN = refCN = {}:\n'.format(group_name, group.cn))
-    reliable_regions = [None] * n_samples
+    out.write('# Group {}:\n'.format(group_name))
+    reliable_regions = []
     n_reliable = 0
     for sample_id, sample in enumerate(samples):
-        sample_region = sample_reliable_regions[sample_id]
+        sample_region = _get_ref_region(sample_const_regions[sample_id], sample_ref_agcns[sample_id])
+        reliable_regions.append(sample_region)
         if sample_region is None:
-            continue
-        outp.write('#    {}: {:,}-{:,}\n'.format(sample, sample_region.start + 1, sample_region.end))
-        n_reliable += 1
+            sample_ref_agcns[sample_id] = sample_ref_pscns[sample_id] = None
+        else:
+            out.write('#    {}: {:,}-{:,}   agCN {}\n'.format(
+                sample, sample_region.start + 1, sample_region.end, sample_ref_agcns[sample_id]))
+            n_reliable += 1
 
     if n_reliable < min_samples:
-        outp.write('# Too few samples ({} < {}).\n'.format(n_reliable, min_samples))
+        out.write('# Too few samples ({} < {}).\n'.format(n_reliable, min_samples))
         return
 
     for psv_ix, psv_info in enumerate(psv_infos):
         info_str = ''
         use_samples = np.zeros(n_samples, dtype=np.bool)
-        for sample_id, sample_region in enumerate(sample_reliable_regions):
+        for sample_id, sample_region in enumerate(reliable_regions):
             good_obs = psv_info.sample_infos[sample_id] is not None
             is_ref = sample_region is not None \
                 and sample_region.start <= psv_info.start and psv_info.end <= sample_region.end
@@ -194,7 +228,7 @@ def _select_psv_sample_pairs(region_group_extra, samples, outp, min_samples):
 
         psv_info.set_use_samples(use_samples)
         psv_info.in_em = psv_info.n_used_samples >= min_samples
-        outp.write('{}\t{}:{}\t{}{}\n'.format(group_name, psv_info.chrom, psv_info.start + 1,
+        out.write('{}\t{}:{}\t{}{}\n'.format(group_name, psv_info.chrom, psv_info.start + 1,
             psv_info.n_used_samples, info_str))
 
 
@@ -213,26 +247,25 @@ class _PsvInfo:
         self.start = psv.start
         self.end = psv.start + len(psv.ref)
         self.is_indel = len(set(map(len, psv.alleles))) != 1
+        self.n_alleles = len(psv.alleles)
         self.allele_corresp = _match_psv_alleles(psv, region_group.regions2, genome)
-        self.ref_cn = region_group.cn
 
         self.info_content = np.nan
-        self.n_used_samples = 0
         self.in_em = False
-        self.sample_ids = None
+        self.em_sample_ids = None
+        self.n_used_samples = 0
 
         # keys: agCN values.
         self.precomp_datas = {}
-        # self.sample_cns = [None] * n_samples
-        # self.psv_gt_probs = [None] * n_samples
+        # (sample agCN, psv GT probs) for each sample.
         self.em_psv_gt_probs = None
-        self.precomp_data_ref_cn = None
-        # self.support_matrix = None
+        # Tuple with possible agCN values during the EM-step.
+        self.em_agcns = None
         self.sample_infos = [None] * n_samples
 
     def set_use_samples(self, use_samples):
-        self.sample_ids = np.where(use_samples)[0]
-        self.n_used_samples = len(self.sample_ids)
+        self.em_sample_ids = np.where(use_samples)[0]
+        self.n_used_samples = len(self.em_sample_ids)
 
     def distance(self, other):
         if other.psv_ix < self.psv_ix:
@@ -271,41 +304,51 @@ class _PsvInfo:
         if len(set(after_psv)) == 1:
             self.in_em = False
 
-    def create_em_psv_gt_probs(self, ref_cn):
+    def create_em_psv_gt_probs(self, sample_ref_agcns):
         if not self.n_used_samples:
             return
-        self.precomp_data_ref_cn = self.precomp_datas[self.ref_cn]
-        self.em_psv_gt_probs = np.zeros((self.n_used_samples, self.precomp_data_ref_cn.n_psv_genotypes))
-        for i, sample_id in enumerate(self.sample_ids):
+        em_agcns = set()
+        self.em_psv_gt_probs = [(None, None)] * len(sample_ref_agcns)
+        for sample_id in self.em_sample_ids:
+            agcn = sample_ref_agcns[sample_id]
+            em_agcns.add(agcn)
             sample_info = self.sample_infos[sample_id]
-            assert sample_info is not None and ref_cn in sample_info.psv_gt_probs
-            self.em_psv_gt_probs[i] = sample_info.psv_gt_probs[ref_cn]
+            self.em_psv_gt_probs[sample_id] = (agcn, sample_info.psv_gt_probs[agcn])
+        self.em_agcns = tuple(em_agcns)
 
 
-def _calculate_psv_info_content(group_name, psv_infos, min_samples, outp):
-    outp.write('Region group {}\n'.format(group_name))
+def _calculate_psv_info_content(group_name, psv_infos, min_samples, out):
+    out.write('Region group {}\n'.format(group_name))
     for psv_info in psv_infos:
         if not psv_info.n_used_samples:
-            outp.write('{}   no applicable samples, skipping.\n'.format(psv_info))
+            out.write('{}   no applicable samples, skipping.\n'.format(psv_info))
             continue
 
-        precomp_data = psv_info.precomp_data_ref_cn
-        psv_gt_probs = psv_info.em_psv_gt_probs
-        n_alleles = precomp_data.n_alleles
-        gt_mult = np.fromiter((n_alleles - gt.count(0) - 1 for gt in precomp_data.psv_genotypes),
-            np.int16, len(precomp_data.psv_genotypes))
+        # Cache of genotype multipliers based on the aggregate CN.
+        n_alleles_m1 = psv_info.n_alleles - 1
+        rn_alleles_m1 = 1 / n_alleles_m1
+        gt_mult_dict = {}
+        for agcn in psv_info.em_agcns:
+            psv_genotypes = psv_info.precomp_datas[agcn].psv_genotypes
+            gt_mult = np.fromiter((n_alleles_m1 - gt.count(0) for gt in psv_genotypes),
+                np.float64, len(psv_genotypes)) \
+                * rn_alleles_m1
+            gt_mult_dict[agcn] = gt_mult
+        threshold = 0.8 * rn_alleles_m1
 
         sum_info_content = 0.0
         inform_samples = 0
-        for i in range(psv_info.n_used_samples):
-            curr_info_content = np.sum(np.exp(psv_gt_probs[i]) * gt_mult)
+        for agcn, psv_gt_probs in psv_info.em_psv_gt_probs:
+            if agcn is None:
+                continue
+            curr_info_content = np.sum(np.exp(psv_gt_probs) * gt_mult_dict[agcn])
             sum_info_content += curr_info_content
-            if curr_info_content >= 0.8:
+            if curr_info_content >= threshold:
                 inform_samples += 1
-        outp.write('{}   informative: {}/{} samples. '.format(psv_info, inform_samples, psv_info.n_used_samples))
 
-        psv_info.info_content = sum_info_content / psv_info.n_used_samples / (n_alleles - 1)
-        outp.write('Information content: {:.4f}\n'.format(psv_info.info_content))
+        psv_info.info_content = sum_info_content / psv_info.n_used_samples
+        out.write('{}   informative: {}/{} samples. Information content: {:.4f}\n'.format(
+            psv_info, inform_samples, psv_info.n_used_samples, psv_info.info_content))
         if psv_info.info_content < 1e-6:
             psv_info.in_em = False
 
@@ -340,19 +383,41 @@ def _filter_close_psvs(psv_infos, outp, close_psv_dist):
     outp.write('    = {:5} retained PSVs\n'.format(n_psvs - removed_b))
 
 
-def _define_sample_gt_priors(n_copies, sample_genotypes):
-    # Sample priors are distributed by distance to the reference genotypes.
-    # Minimal prior is for (4,0) or (6,0,0) ..., and it is 1e-6.
-    MIN_PRIOR = -6 * np.log(10)
+def _define_sample_pscn_priors(n_copies, ref_agcns, ref_pscns):
+    """
+    Returns two lists of size = n_samples.
+        First list  = possible sample psCN values for each sample as strings.
+        Second list = sample sample psCN priors for each sample.
+    """
+    # Sample priors are distributed by distance to the reference paralog-specific copy numbers.
+    # Distance will be always divisible by two.
+    # psCN (4, 0) will have prior 1e-6 compared to reference psCN (2, 2).
+    DIST_MULT = -1.5 * common.LOG10
+    cache = {}
+    all_poss_pscns = []
+    all_priors = []
+    for sample_id, agcn in enumerate(ref_agcns):
+        if agcn is None:
+            all_poss_pscns.append(None)
+            all_priors.append(None)
+            continue
 
-    ref_gt = np.full(n_copies, 2)
-    max_dist = 2 * (n_copies - 1)
-    priors = np.full(len(sample_genotypes), np.nan)
-    for i, gt in enumerate(sample_genotypes):
-        dist_to_ref = np.sum(np.abs(ref_gt - gt)) // 2
-        priors[i] = MIN_PRIOR * dist_to_ref / max_dist
-    priors -= logsumexp(priors)
-    return priors
+        pscn = ref_pscns[sample_id]
+        poss_pscns_str, priors = cache.get(pscn, (None, None))
+        if priors is None:
+            poss_pscns = variants_.all_gt_counts(n_copies, agcn)
+            ref_pscn = np.array(pscn)
+            priors = np.full(len(poss_pscns), np.nan)
+            poss_pscns_str = []
+            for i, curr_pscn in enumerate(poss_pscns):
+                poss_pscns_str.append(','.join(map(str, curr_pscn)))
+                priors[i] = np.sum(np.abs(ref_pscn - curr_pscn)) * DIST_MULT
+            priors -= logsumexp(priors)
+            cache[pscn] = (poss_pscns_str, priors)
+
+        all_poss_pscns.append(poss_pscns_str)
+        all_priors.append(priors)
+    return all_poss_pscns, all_priors
 
 
 def _cluster_psvs(psv_infos, psv_counts, n_samples):
@@ -362,7 +427,7 @@ def _cluster_psvs(psv_infos, psv_counts, n_samples):
     for psv_info in psv_infos:
         allele_corresp = psv_info.allele_corresp
         mult = len(allele_corresp) / allele_corresp.count(0)
-        for sample_id in psv_info.sample_ids:
+        for sample_id in psv_info.em_sample_ids:
             allele_counts = psv_counts[psv_info.psv_ix][sample_id].allele_counts
             ref_fractions[psv_info.psv_ix, sample_id] = allele_counts[0] / sum(allele_counts) * mult
 
@@ -431,9 +496,7 @@ def _cluster_psvs(psv_infos, psv_counts, n_samples):
 
 
 _BestCluster = collections.namedtuple('_BestCluster',
-    'cluster_i n_reliable info_content likelihood psv_f_values sample_gt_probs')
-
-_SMALLEST_COPY_NUM = 2
+    'cluster_i n_reliable info_content likelihood psv_f_values poss_pscn_probs')
 
 
 def write_headers(out, samples, args):
@@ -449,9 +512,9 @@ def write_headers(out, samples, args):
     out.checked_write('interm_psv_f_values', 'region_group\tcluster\titeration\tpsv\tinfo_content\t' + col_copies)
     out.checked_write('psv_f_values', 'region_group\tpsv\tn_samples\tuse_in_em\tinfo_content\t' + col_copies)
 
-    out.checked_write('em_likelihoods',
-        'region_group\tcluster\titeration\ttime\tlikelihood\tn_reliable\treliable_info\n')
-    out.checked_write('em_sample_gts', 'region_group\tcluster\titeration\tgenotype\tprior\t' + samples_str)
+    out.checked_write('em_pscn', '# Format for each sample: "psCN:qual"\n')
+    out.checked_write('em_pscn',
+        'region_group\tcluster\titeration\ttime\tlikelihood\tn_reliable\treliable_info\t' + samples_str)
 
     out.checked_write('paralog_cn', 'region_group\tsample\tregion1\tgenotypes\tmarginal_probs\n')
     out.checked_write('gene_conversion',
@@ -462,27 +525,104 @@ def create_psv_infos(psvs, region_group, n_samples, genome):
     return [_PsvInfo(psv_ix, psv, region_group, n_samples, genome) for psv_ix, psv in enumerate(psvs)]
 
 
-def find_reliable_psvs(region_group_extra, samples, genome, out, min_samples,
-        reliable_threshold, max_agcn):
+def _get_ref_pscns(samples, region_group, const_regions, modified_ref_cns, max_agcn):
+    """
+    Looks up modified reference CNs and returns two lists
+       - reference agCNs for all samples,
+       - reference psCNs for all samples.
+    If for some reason the sample is not appropriate for the EM-algorithm, both entries would be None.
+    """
+    n_samples = len(samples)
+    n_copies = 1 + len(region_group.regions2)
+    def_agcn = 2 * n_copies
+    def_pscn = (2,) * n_copies
+
+    if modified_ref_cns is None:
+        if def_agcn > max_agcn:
+            return ([None] * n_samples,) * 2
+        return [def_agcn] * n_samples, [def_pscn] * n_samples
+
+    undefined = object()
+    ref_agcns = [undefined] * n_samples
+    ref_pscns = [undefined] * n_samples
+
+    for i, region_ix in enumerate(region_group.region_ixs):
+        const_region = const_regions[region_ix]
+        regions = [const_region.region1]
+        for region2, _ in const_region.regions2:
+            regions.append(region2)
+
+        for sample_id in range(n_samples):
+            if ref_pscns[sample_id] is None:
+                continue
+
+            tree = modified_ref_cns[sample_id]
+            if tree is None:
+                pscn = def_pscn
+            else:
+                pscn = []
+                err = False
+                for region in regions:
+                    cn_regions = list(tree.overlap_iter(region))
+                    if len(cn_regions) == 0:
+                        pscn.append(2)
+                    elif len(cn_regions) > 1:
+                        common.log('ERROR: Modified reference CNs contain several entries for sample {} and group {}'
+                            .format(samples[sample_id], region_group.name))
+                        pscn = None
+                        break
+                    elif not cn_regions[0][0].contains(region):
+                        common.log('ERROR: Modified reference CNs do not match for sample {} and group {}'
+                            .format(samples[sample_id], region_group.name))
+                        pscn = None
+                        break
+                    else:
+                        pscn.append(cn_regions[0][1])
+                if pscn is None:
+                    ref_agcns[sample_id] = ref_pscns[sample_id] = None
+                    continue
+                pscn = tuple(pscn)
+
+            if i > 0:
+                if ref_pscns[sample_id] != pscn:
+                    common.log('ERROR: Modified reference CNs do not match for sample {} and group {}'
+                        .format(samples[sample_id], region_group.name))
+                    ref_agcns[sample_id] = ref_pscns[sample_id] = None
+                continue
+
+            agcn = sum(pscn)
+            if agcn < 2 or agcn > max_agcn or sum(map(bool, pscn)) <= 1:
+                ref_agcns[sample_id] = ref_pscns[sample_id] = None
+            else:
+                ref_agcns[sample_id] = agcn
+                ref_pscns[sample_id] = pscn
+    return ref_agcns, ref_pscns
+
+
+def find_reliable_psvs(region_group_extra, samples, genome, modified_ref_cns, out, *,
+        min_samples, reliable_threshold, max_agcn):
     # ===== Setting up variables =====
     psvs = region_group_extra.psvs
     n_psvs = len(psvs)
     region_group = region_group_extra.region_group
+    const_regions = region_group_extra.dupl_hierarchy.const_regions
     group_name = region_group.name
-    cn = region_group.cn
-    n_copies = cn // 2
+    n_copies = 1 + len(region_group.regions2)
     n_samples = len(samples)
-    if not n_psvs or n_copies < _SMALLEST_COPY_NUM or n_copies > max_agcn // 2:
+    if not n_psvs or n_copies <= 1:
         return
 
     # ===== Selecting a set of PSVs used in the EM algorithm =====
-    _select_psv_sample_pairs(region_group_extra, samples, out.use_psv_sample, min_samples)
+    ref_agcns, ref_pscns = _get_ref_pscns(samples, region_group, const_regions, modified_ref_cns, max_agcn)
+    if not any(ref_agcns):
+        return
+    _select_psv_sample_pairs(region_group_extra, samples, out.use_psv_sample, min_samples, ref_agcns, ref_pscns)
 
     psv_infos = region_group_extra.psv_infos
     region_sequence = region_group.region1.get_sequence(genome)
     for psv_info in psv_infos:
         psv_info.check_complicated_pos(region_group.region1, region_sequence)
-        psv_info.create_em_psv_gt_probs(cn)
+        psv_info.create_em_psv_gt_probs(ref_agcns)
     if not any(psv_info.in_em for psv_info in psv_infos):
         return
 
@@ -494,11 +634,8 @@ def find_reliable_psvs(region_group_extra, samples, genome, out, min_samples,
         return
 
     common.log('    Searching for reliable PSVs')
-    sample_genotypes = variants_.all_gt_counts(n_copies, cn)
-    sample_genotypes_str = [','.join(map(str, gt)) for gt in sample_genotypes]
-    sample_genotype_priors = _define_sample_gt_priors(n_copies, sample_genotypes)
-
     # ===== EM iterations, try several clusters =====
+    poss_pscns_str, poss_pscn_priors = _define_sample_pscn_priors(n_copies, ref_agcns, ref_pscns)
     best_cluster = None
     psv_clusters = _cluster_psvs(psv_infos, region_group_extra.psv_read_counts, n_samples)
     for cluster_i, cluster in enumerate(psv_clusters, start=1):
@@ -508,7 +645,7 @@ def find_reliable_psvs(region_group_extra, samples, genome, out, min_samples,
         total_lik = -np.inf
         for iteration in range(1, 101):
             if iteration > 1:
-                psv_f_values, _ = _m_step(sample_gt_probs, psv_infos, em_psv_ixs, psv_f_values)
+                psv_f_values, _ = _m_step(poss_pscn_probs, psv_infos, em_psv_ixs, psv_f_values)
             for psv_ix in em_psv_ixs:
                 psv_info = psv_infos[psv_ix]
                 out.interm_psv_f_values.write('{}\t{}\t{}\t{}:{}\t{:.6f}\t{}\n'.format(group_name, cluster_i,
@@ -516,13 +653,7 @@ def find_reliable_psvs(region_group_extra, samples, genome, out, min_samples,
                     '\t'.join(map('{:.6f}'.format, psv_f_values[psv_ix]))))
 
             old_lik = total_lik
-            total_lik, sample_gt_probs = _e_step(psv_infos, psv_f_values, sample_genotype_priors, n_samples)
-            for gt_i, gt in enumerate(sample_genotypes_str):
-                out.em_sample_gts.write('{}\t{}\t{}\t{}\t{:.3f}\t'.format(group_name, cluster_i, iteration, gt,
-                    sample_genotype_priors[gt_i] / common.LOG10))
-                out.em_sample_gts.write('\t'.join(map('{:.3f}'.format, sample_gt_probs[:, gt_i] / common.LOG10)))
-                out.em_sample_gts.write('\n')
-
+            total_lik, poss_pscn_probs = _e_step(psv_infos, psv_f_values, poss_pscn_priors)
             common.log('        Cluster {}, iteration {:2}, EM likelihood: {:,.3f}'.format(
                 cluster_i, iteration, total_lik / common.LOG10))
             with np.errstate(invalid='ignore'):
@@ -530,18 +661,27 @@ def find_reliable_psvs(region_group_extra, samples, genome, out, min_samples,
 
             n_reliable = len(curr_reliable)
             mean_info_content = np.mean([psv_infos[i].info_content for i in curr_reliable]) if n_reliable else 0.0
-            out.em_likelihoods.write('{}\t{}\t{}\t{}\t{:.7f}\t{}\t{:.6f}\n'.format(group_name, cluster_i, iteration,
-                str(timedelta(seconds=perf_counter() - timer_start))[:-5], total_lik / common.LOG10,
-                n_reliable, mean_info_content))
+            elapsed_time = str(timedelta(seconds=perf_counter() - timer_start))[:-5]
+            out.em_pscn.write('{}\t{}\t{}\t{}\t{:.7f}\t{}\t{:.6f}'.format(group_name, cluster_i, iteration,
+                elapsed_time, total_lik / common.LOG10, n_reliable, mean_info_content))
+            for sample_id, curr_pscn_probs in enumerate(poss_pscn_probs):
+                if curr_pscn_probs is None:
+                    out.em_pscn.write('\t*')
+                    continue
+                best_pscn_i = np.argmax(curr_pscn_probs)
+                pscn_qual = common.phred_qual(curr_pscn_probs, best_pscn_i)
+                out.em_pscn.write('\t{}:{:.0f}'.format(poss_pscns_str[sample_id][best_pscn_i], pscn_qual))
+            out.em_pscn.write('\n')
+
             if total_lik < old_lik + 0.01:
                 break
         if best_cluster is None or best_cluster.likelihood < total_lik:
             best_cluster = _BestCluster(cluster_i, n_reliable, mean_info_content, total_lik,
-                psv_f_values, sample_gt_probs)
+                psv_f_values, poss_pscn_probs)
 
     # ===== Save results from the last cluster =====
     psv_f_values = best_cluster.psv_f_values
-    sample_gt_probs = best_cluster.sample_gt_probs
+    poss_pscn_probs = best_cluster.poss_pscn_probs
     if len(psv_clusters) > 1:
         common.log('    === Best cluster {}: likelihood {:.3f},  {} reliable PSVs with mean information content {:.3f}'
             .format(best_cluster.cluster_i, best_cluster.likelihood / common.LOG10,
@@ -552,7 +692,7 @@ def find_reliable_psvs(region_group_extra, samples, genome, out, min_samples,
     discarded_psvs = np.array([psv_info.psv_ix for psv_info in psv_infos
         if not psv_info.in_em and psv_info.n_used_samples > 0])
     if len(discarded_psvs):
-        oth_f_values, _ = _m_step(sample_gt_probs, psv_infos, discarded_psvs, np.full((n_psvs, n_copies), 0.5))
+        oth_f_values, _ = _m_step(poss_pscn_probs, psv_infos, discarded_psvs, np.full((n_psvs, n_copies), 0.5))
         psv_f_values[discarded_psvs, :] = oth_f_values[discarded_psvs, :]
     for psv_info in psv_infos:
         out.psv_f_values.write('{}\t{}:{}\t{}\t{}\t{:.6f}\t{}\n'.format(group_name, psv_info.chrom,
@@ -581,11 +721,12 @@ def _single_sample_e_step(sample_id, agcn, psv_infos, psv_weights=None):
     If it is impossible to estimate genotype probabilities (one of the PSV does not have necessary values),
         return (None, None).
     """
+    # NOTE: Should we set paralog-specific priors?
     precomp_data = psv_infos[0].precomp_datas.get(agcn)
     if precomp_data is None:
         return None, None
-    sample_genotypes = precomp_data.sample_genotypes
-    gt_probs = np.zeros(len(sample_genotypes))
+    poss_pscns = precomp_data.poss_pscns
+    gt_probs = np.zeros(len(poss_pscns))
 
     if psv_weights is None:
         psv_weights = itertools.repeat(1.0)
@@ -594,7 +735,7 @@ def _single_sample_e_step(sample_id, agcn, psv_infos, psv_weights=None):
         if support_row is None:
             return None, None
         gt_probs += support_row * psv_weight
-    return sample_genotypes, gt_probs
+    return poss_pscns, gt_probs
 
 
 class _WeightedCN:
@@ -755,11 +896,11 @@ class GeneConversionHmm(cn_hmm.HmmModel):
 GeneConversion = collections.namedtuple('GeneConversion', 'start end main_gt replacement_gt qual n_psvs')
 
 
-def _detect_gene_conversion(sample_id, sample_cn, genotypes_str, sample_gt_probs, psv_infos, semirel_psv_ixs):
+def _detect_gene_conversion(sample_id, sample_cn, genotypes_str, poss_pscn_probs, psv_infos, semirel_psv_ixs):
     n_psvs = len(semirel_psv_ixs)
     n_genotypes = len(genotypes_str)
 
-    best_gt = np.argmax(sample_gt_probs)
+    best_gt = np.argmax(poss_pscn_probs)
     model = GeneConversionHmm(best_gt, n_genotypes, n_psvs)
 
     emission_matrix = np.zeros((1, n_genotypes, n_psvs))
@@ -819,18 +960,18 @@ def _create_sample_results_from_agcn(sample_id, region_group_extra):
     return sample_results, linked_ranges
 
 
-def _genotypes_str(sample_genotypes, genotypes_str_cache):
+def _genotypes_str(poss_pscns, genotypes_str_cache):
     """
     Returns
         - string representations of sample genotypes,
         - string representations of various marginal probabilities in form (0??, 1??, ..., ?0?, ...).
     """
-    n_copies = len(sample_genotypes[0])
-    sample_cn = sum(sample_genotypes[0])
+    n_copies = len(poss_pscns[0])
+    sample_cn = sum(poss_pscns[0])
     if sample_cn in genotypes_str_cache:
         return genotypes_str_cache[sample_cn]
 
-    sample_genotypes_str = [','.join(map(str, gt)) for gt in sample_genotypes]
+    poss_pscns_str = [','.join(map(str, gt)) for gt in poss_pscns]
     marginal_str = []
     if n_copies > 2:
         gt_str = ['?'] * n_copies
@@ -839,7 +980,7 @@ def _genotypes_str(sample_genotypes, genotypes_str_cache):
                 gt_str[copy] = str(curr_copy_cn)
                 marginal_str.append(''.join(gt_str))
             gt_str[copy] = '?'
-    res = (sample_genotypes_str, marginal_str)
+    res = (poss_pscns_str, marginal_str)
     genotypes_str_cache[sample_cn] = res
     return res
 
@@ -894,10 +1035,10 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
             sample_cn = pre_sample_cn
 
         # ===== Run E-step once again to calculate psCN =====
-        sample_genotypes, sample_gt_probs = _single_sample_e_step(sample_id, sample_cn, rel_psv_infos)
-        marginal_probs, paralog_cn, paralog_qual = calculate_marginal_probs(sample_genotypes, sample_gt_probs,
+        poss_pscns, poss_pscn_probs = _single_sample_e_step(sample_id, sample_cn, rel_psv_infos)
+        marginal_probs, paralog_cn, paralog_qual = calculate_marginal_probs(poss_pscns, poss_pscn_probs,
             n_copies, sample_cn)
-        sample_genotypes_str, marginal_str = _genotypes_str(sample_genotypes, genotypes_str_cache)
+        poss_pscns_str, marginal_str = _genotypes_str(poss_pscns, genotypes_str_cache)
 
         # ===== Detect gene conversion =====
         GENE_CONV_QUAL_THRESHOLD = 20
@@ -905,7 +1046,7 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
         semirel_psv_ixs = psv_ixs[region_group_extra.psv_is_semirel[psv_ixs]]
 
         if np.all(paralog_qual >= GENE_CONV_QUAL_THRESHOLD) and len(semirel_psv_ixs) >= MIN_SEMIREL_PSVS:
-            gene_conv = _detect_gene_conversion(sample_id, sample_cn, sample_genotypes_str, sample_gt_probs,
+            gene_conv = _detect_gene_conversion(sample_id, sample_cn, poss_pscns_str, poss_pscn_probs,
                 psv_infos, semirel_psv_ixs)
             for entry in gene_conv:
                 out.gene_conversion.write('{}\t{}\t{}\t'.format(region_chrom, entry.start, entry.end))
@@ -918,7 +1059,7 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
             curr_results[0].region1.start, curr_results[-1].region1.end).to_str(genome)
         outp.write('{}\t{}\t{}\t'.format(group_name, sample_name, region1))
         outp.write('  '.join(map('%s=%.1f'.__mod__,
-            zip(sample_genotypes_str, np.abs(sample_gt_probs / common.LOG10)))))
+            zip(poss_pscns_str, np.abs(poss_pscn_probs / common.LOG10)))))
         outp.write('\t')
         if n_copies > 2:
             outp.write('  '.join(map('%s=%.1f'.__mod__,
@@ -1141,7 +1282,7 @@ class ResultEntry:
 
     @classmethod
     def from_dict(cls, row, genome, samples):
-        sample_id = samples.id(row['sample'])
+        sample_id = samples.id_or_none(row['sample'])
         region1 = Interval(genome.chrom_id(row['chrom']), int(row['start']), int(row['end']))
 
         hom_regions = row['homologous_regions']
@@ -1305,7 +1446,8 @@ class CopyNumProfiles:
             reader = csv.DictReader(inp, fieldnames, delimiter='\t')
             for row in reader:
                 entry = ResultEntry.from_dict(row, genome, samples)
-                self._cn_profiles[entry.sample_id].append(entry)
+                if entry.sample_id is not None:
+                    self._cn_profiles[entry.sample_id].append(entry)
 
         self._search_chrom_id = search_chrom_id
         self._searchers = None

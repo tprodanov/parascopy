@@ -17,37 +17,52 @@ from .view import parse_expression
 from . import long_version
 
 
-def _create_record(name, seq, qual, start, cigar_tuples, header, old_record, read_groups, status, max_mate_dist):
+def _create_record(orig_record, header, read_groups, status, max_mate_dist,
+        *, dupl_strand=True, start=None, cigar_tuples=None, seq=None, qual=None):
+    """
+    Creates a new record by taking the orig_record as a template.
+    If start, cigar_tuples, seq, qual are not provided, take them frmo the original record.
+    """
+    
     record = pysam.AlignedSegment(header)
-    record.query_name = name
-    record.query_sequence = seq
-    record.query_qualities = qual
+    record.query_name = orig_record.query_name
+    record.query_sequence = common.cond_rev_comp(orig_record.query_sequence, strand=dupl_strand) \
+        if seq is None else seq
+    record.query_qualities = common.cond_reverse(orig_record.query_qualities, strand=dupl_strand) \
+        if qual is None else qual
+
+    if cigar_tuples is None:
+        assert dupl_strand
+        cigar_tuples = orig_record.cigartuples
+    # This is either input cigar_tuples, or orig_record.cigartuples.
     if cigar_tuples:
         record.reference_id = 0
-        record.reference_start = start
+        record.reference_start = orig_record.reference_start if start is None else start
         record.mapping_quality = 60
         record.cigartuples = cigar_tuples
+        if orig_record.is_reverse != dupl_strand:
+            record.is_reverse = True
     else:
         record.is_unmapped = True
 
-    read_group = old_record.get_tag('RG') if old_record.has_tag('RG') else None
+    read_group = orig_record.get_tag('RG') if orig_record.has_tag('RG') else None
     new_read_group = read_groups[read_group][0]
     record.set_tag('RG', new_read_group)
 
-    if old_record.is_paired:
+    if orig_record.is_paired:
         record.is_paired = True
-        if old_record.is_read1:
+        if orig_record.is_read1:
             record.is_read1 = True
         else:
             record.is_read2 = True
 
-        if old_record.is_proper_pair and old_record.reference_id == old_record.next_reference_id \
-                and abs(old_record.reference_start - old_record.next_reference_start) <= max_mate_dist:
+        if orig_record.is_proper_pair and orig_record.reference_id == orig_record.next_reference_id \
+                and abs(orig_record.reference_start - orig_record.next_reference_start) <= max_mate_dist:
             record.is_proper_pair = True
 
-    oa_tag = '{},{},{},{},{},{};'.format(old_record.reference_name, old_record.reference_start + 1,
-        '-' if old_record.is_reverse else '+', old_record.cigarstring, old_record.mapping_quality,
-        old_record.get_tag('NM') if old_record.has_tag('NM') else '')
+    oa_tag = '{},{},{},{},{},{};'.format(orig_record.reference_name, orig_record.reference_start + 1,
+        '-' if orig_record.is_reverse else '+', orig_record.cigarstring, orig_record.mapping_quality,
+        orig_record.get_tag('NM') if orig_record.has_tag('NM') else '')
     record.set_tag('OA', oa_tag)
     record.set_tag('st', status.value)
     return record
@@ -71,9 +86,7 @@ def _extract_reads(in_bam, out_bam, read_groups, region, genome, out_header, rea
         curr_read_pos = read_positions[record.query_name]
         assert curr_read_pos.add_realigned_pos(record.is_read2, record.reference_start)
         curr_read_pos.record_mate_pos(record, genome, max_mate_dist)
-        new_rec = _create_record(record.query_name, record.query_sequence, record.query_qualities,
-            record.reference_start, record.cigartuples, out_header, record, read_groups, bam_file_.ReadStatus.SameLoc,
-            max_mate_dist)
+        new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.SameLoc, max_mate_dist)
         out_bam.write(new_rec)
 
 
@@ -130,14 +143,13 @@ def _extract_reads_and_realign(in_bam, out_bam, read_groups, dupl, genome, out_h
 
         orig_aln = Alignment.from_record(record, genome)
         read_seq, reg1_aln = dupl.align_read(record.query_sequence, orig_aln, weights, calc_score=False)
-        new_pos = reg1_aln.ref_interval.start
-        if not read_positions[record.query_name].add_realigned_pos(record.is_read2, new_pos):
+        new_start = reg1_aln.ref_interval.start
+        if not read_positions[record.query_name].add_realigned_pos(record.is_read2, new_start):
             continue
 
         cigar_tuples = reg1_aln.cigar.to_pysam_tuples() if reg1_aln.cigar is not None else None
-        new_rec = _create_record(record.query_name, read_seq,
-            common.cond_reverse(record.query_qualities, strand=dupl.strand),
-            new_pos, cigar_tuples, out_header, record, read_groups, bam_file_.ReadStatus.Realigned, max_mate_dist)
+        new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.Realigned, max_mate_dist,
+            dupl_strand=dupl.strand, seq=read_seq, cigar_tuples=cigar_tuples, start=new_start)
         read_positions[record.query_name].record_mate_pos(record, genome, max_mate_dist)
         out_bam.write(new_rec)
 
@@ -185,17 +197,14 @@ def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_group
             if key not in mate_names:
                 continue
             mate_names.remove(key)
-
-            new_rec = _create_record(record.query_name, record.query_sequence, record.query_qualities,
-                record.reference_start, record.cigartuples, out_header, record, read_groups,
-                bam_file_.ReadStatus.ReadMate, max_mate_dist)
+            new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.ReadMate, max_mate_dist)
             out_bam.write(new_rec)
 
 
-MATE_DISTANCE = 5000
+DEFAULT_MATE_DISTANCE = 5000
 
 def pool(bam_wrappers, out_path, interval, duplications, genome, *,
-        samtools='samtools', weights=None, max_mate_dist=MATE_DISTANCE, verbose=True, time_log=None):
+        samtools='samtools', weights=None, max_mate_dist=DEFAULT_MATE_DISTANCE, verbose=True, time_log=None):
     if weights is None:
         weights = Weights()
     if verbose:
@@ -208,7 +217,7 @@ def pool(bam_wrappers, out_path, interval, duplications, genome, *,
     with pysam.AlignmentFile(tmp_path, 'wb', header=out_header) as tmp_bam:
         for bam_index, bam_wrapper in enumerate(bam_wrappers, 1):
             if verbose:
-                common.log('    Extracting reads from {:3d}: {}'.format(bam_index, bam_wrapper.filename))
+                common.log('    [{:3d} / {}]  {}'.format(bam_index, len(bam_wrappers), bam_wrapper.filename))
             read_positions = defaultdict(_ReadPositions)
 
             read_groups = bam_wrapper.read_groups()
@@ -387,7 +396,7 @@ def main(prog_name=None, in_argv=None):
         help='Exclude duplications for which the expression is true\n[default: %(default)s].')
 
     opt_args = parser.add_argument_group('Optional arguments')
-    opt_args.add_argument('-m', '--mate-dist', metavar='<int>|infinity', type=float, default=MATE_DISTANCE,
+    opt_args.add_argument('-m', '--mate-dist', metavar='<int>|infinity', type=float, default=DEFAULT_MATE_DISTANCE,
         help='Output read mates even if they are outside of the duplication,\n'
             'if the distance between mates is less than <int> [default: %(default)s].\n'
             'Use 0 to skip all mates outside the duplicated regions.\n'
