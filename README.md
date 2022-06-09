@@ -27,7 +27,7 @@ Citing Parascopy
 ----------------
 
 If you use Parascopy, please cite:
-* Prodanov, T. & Bansal, V. Robust and accurate estimation of paralog-specific copy number for duplicated genes using whole-genome sequencing. *Nature Communications* (2022).
+* Prodanov, T. & Bansal, V. Robust and accurate estimation of paralog-specific copy number for duplicated genes using whole-genome sequencing. *Nature Communications* **13**, 3221 (2022). https://doi.org/10.1038/s41467-022-30930-3
 
 Installation
 ------------
