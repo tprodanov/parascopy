@@ -807,14 +807,13 @@ def _identify_best_cn(sample_id, weighted_cns, psv_infos):
     return agcn, agcn_str, qual
 
 
-def _get_psv_subset(results, psv_searcher, psv_infos, sample_id, agcn, update_best_cn=False):
+def _get_psv_subset(results, psv_searcher, psv_infos, sample_id, agcn):
     psv_ixs = []
     for subresults in results:
         for psv_ix in range(*psv_searcher.contained_ixs(subresults.region1.start, subresults.region1.end)):
             sample_info = psv_infos[psv_ix].sample_infos[sample_id]
             if sample_info is not None:
-                if update_best_cn:
-                    sample_info.best_cn = agcn
+                sample_info.best_cn = agcn
                 if agcn in sample_info.psv_gt_probs:
                     psv_ixs.append(psv_ix)
     return np.array(psv_ixs)
@@ -1024,8 +1023,7 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
             for subresults in curr_results:
                 subresults.sample_const_region.update_pred_cn(sample_cn, sample_cn_str, cn_qual)
             if sample_cn != pre_sample_cn:
-                psv_ixs = _get_psv_subset(curr_results, psv_searcher, psv_infos, sample_id,
-                    sample_cn, update_best_cn=True)
+                psv_ixs = _get_psv_subset(curr_results, psv_searcher, psv_infos, sample_id, sample_cn)
                 reliable_psv_ixs = psv_ixs[region_group_extra.psv_is_reliable[psv_ixs]]
                 if len(reliable_psv_ixs) == 0:
                     _add_paralog_filter(curr_results, Filter.NoReliable)
@@ -1456,6 +1454,10 @@ class CopyNumProfiles:
             for sample_entries in self._cn_profiles:
                 curr_sample_entries = [entry for entry in sample_entries if entry.region1.chrom_id == search_chrom_id]
                 self._searchers.append(itree.NonOverlTree(curr_sample_entries, itree.region1_start, itree.region1_end))
+
+    @property
+    def n_samples(self):
+        return len(self._cn_profiles)
 
     def sample_profiles(self, sample_id):
         return self._cn_profiles[sample_id]

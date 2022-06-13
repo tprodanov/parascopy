@@ -448,6 +448,9 @@ class _SkipPosition(Exception):
 
 class VariantReadObservations:
     def __init__(self, start, alleles, n_samples):
+        """
+        n_samples is None when this is a shallow copy
+        """
         self.start = start
         # Alleles from the binary input.
         self.tmp_alleles = alleles
@@ -465,6 +468,7 @@ class VariantReadObservations:
             self.observations = None
             self.other_observations = None
         self.use_samples = None
+        self.variant_pscns = None
 
         # List of instances of VariantReadObservations (because there could be several PSVs within one variant).
         self.psv_observations = None
@@ -555,13 +559,15 @@ class VariantReadObservations:
         old_alleles = self.tmp_alleles
         self.tmp_alleles = None
         new_alleles = tuple(variant.alleles)
+        if new_alleles != old_alleles:
+            allele_corresp = self._simple_allele_corresp(old_alleles, new_alleles)
+            self._update_observations(allele_corresp)
 
-        if new_alleles == old_alleles:
-            # No need to change any alleles.
-            return
-
-        allele_corresp = self._simple_allele_corresp(old_alleles, new_alleles)
-        self._update_observations(allele_corresp)
+    def set_variant_pscns(self, cn_profiles):
+        variant_pscns = []
+        for sample_id in range(cn_profiles.n_samples):
+            variant_pscns.append(VariantParalogCN(self, sample_id, cn_profiles))
+        self.variant_pscns = tuple(variant_pscns)
 
     def copy_obs(self):
         """
@@ -623,7 +629,7 @@ class VariantReadObservations:
             var_sub_alleles.append(sub_allele)
         return VariantReadObservations._simple_allele_corresp(var_sub_alleles, psv_alleles)
 
-    def set_psv(self, psv: _PsvPos, varcall_params):
+    def set_psv(self, psv: _PsvPos, cn_profiles, varcall_params):
         if len(self.variant_positions) != len(psv.psv_positions):
             common.log('WARNING: Failed to initialize PSV {}:{}. '.format(self.variant.chrom, psv.start + 1) +
                 'Most likely, because of the boundary of a duplication')
@@ -634,12 +640,16 @@ class VariantReadObservations:
         full_match = np.all(np.arange(len(self.variant.alleles)) == allele_corresp)
         self._update_psv_paralog_priors(psv, allele_corresp, varcall_params)
 
-        new_psv_obs = self.shallow_copy_obs() if full_match else self.copy_obs()
-        if not full_match:
+        if full_match:
+            new_psv_obs = self.shallow_copy_obs()
+        else:
+            new_psv_obs = self.copy_obs()
             new_psv_obs._update_observations(allele_corresp)
+
         new_psv_obs.variant = psv
         new_psv_obs.variant_positions = [psv_pos.to_variant_pos(new_psv_obs.variant.alleles)
             for psv_pos in new_psv_obs.variant.psv_positions]
+        new_psv_obs.set_variant_pscns(cn_profiles)
         new_psv_obs.parent = self
         self.psv_observations.append(new_psv_obs)
         return new_psv_obs
@@ -814,7 +824,7 @@ class VariantReadObservations:
                     # Not a shallow copy.
                     psv_observations.set_use_samples(max_other_obs_frac, min_read_depth)
 
-    def get_psv_usability(self, sample_id, sample, cn_profiles, varcall_params, psv_gt_out):
+    def get_psv_usability(self, sample_id, sample, varcall_params, psv_gt_out):
         psv_gt_out.write('{}\t{}\t{}\t'.format(sample, self.variant.start + 1, self.variant.status.short_str()))
         assert self.parent is not None
         if not self.use_samples[sample_id]:
@@ -822,7 +832,7 @@ class VariantReadObservations:
             psv_gt_out.write('*\t*\t*\t*\t*\t*\tF\tunexp_obs\n')
             return False
 
-        variant_pscn = VariantParalogCN(self, sample_id, cn_profiles)
+        variant_pscn = self.variant_pscns[sample_id]
         if variant_pscn.ext_pos_cn is None:
             # Skip PSV -- paralog-specific copy number is unknown.
             psv_gt_out.write('*\t*\t*\t*\t*\t*\tF\tunknown_pscn\n')
@@ -933,7 +943,7 @@ def _next_or_none(iter):
         return None
 
 
-def read_freebayes_binary(ra_reader, samples, vcf_file, dupl_pos_finder):
+def read_freebayes_binary(ra_reader, samples, vcf_file, dupl_pos_finder, cn_profiles):
     byteorder = 'big' if ord(ra_reader.read(1)) else 'little'
     n_samples = len(samples)
     n_in_samples = int.from_bytes(ra_reader.read(2), byteorder)
@@ -944,7 +954,7 @@ def read_freebayes_binary(ra_reader, samples, vcf_file, dupl_pos_finder):
         sample = _read_string(ra_reader)
         sample_conv[i] = samples.id_or_none(sample)
 
-    positions = []
+    all_read_allele_obs = []
     vcf_record = _next_or_none(vcf_file)
     while vcf_record is not None:
         try:
@@ -956,17 +966,18 @@ def read_freebayes_binary(ra_reader, samples, vcf_file, dupl_pos_finder):
                 #     There is a variant without any read-allele observations (no reads that cover the PSV?)
                 continue
             read_allele_obs.set_variant(vcf_record, dupl_pos_finder)
-            positions.append(read_allele_obs)
+            read_allele_obs.set_variant_pscns(cn_profiles)
+            all_read_allele_obs.append(read_allele_obs)
             vcf_record = _next_or_none(vcf_file)
         except StopIteration:
             break
         except _SkipPosition as exc:
             if exc.start == vcf_record.start:
                 vcf_record = _next_or_none(vcf_file)
-    return positions
+    return all_read_allele_obs
 
 
-def add_psv_variants(locus, all_read_allele_obs, psv_records, genome, varcall_params):
+def add_psv_variants(locus, all_read_allele_obs, psv_records, genome, cn_profiles, varcall_params):
     searcher = itree.NonOverlTree(all_read_allele_obs, itree.start, itree.variant_end)
     psv_read_allele_obs = []
     n_psvs = [0] * len(PsvStatus)
@@ -989,7 +1000,7 @@ def add_psv_variants(locus, all_read_allele_obs, psv_records, genome, varcall_pa
         variant_ix = (i, len(all_read_allele_obs[i].psv_observations))
         psv = _PsvPos(psv, genome, psv_ix, variant_ix, varcall_params)
         n_psvs[psv.status.value] += 1
-        curr_psv_obs = all_read_allele_obs[i].set_psv(psv, varcall_params)
+        curr_psv_obs = all_read_allele_obs[i].set_psv(psv, cn_profiles, varcall_params)
         assert len(psv_read_allele_obs) == psv_ix
         psv_read_allele_obs.append(curr_psv_obs)
 
@@ -1586,11 +1597,11 @@ class VariantParalogCN:
 
 
 class VariantGenotypePred:
-    def __init__(self, sample_id, sample, variant_obs, variant_pscn, varcall_params):
+    def __init__(self, sample_id, sample, variant_obs, varcall_params):
         self.sample_id = sample_id
         self.sample = sample
         self.variant_obs = variant_obs
-        self.variant_pscn = variant_pscn
+        self.variant_pscn = variant_obs.variant_pscns[sample_id]
 
         n_alleles = len(self.variant_obs.variant.alleles)
         self.all_allele_counts = np.zeros(n_alleles, dtype=np.uint16)
@@ -1608,7 +1619,7 @@ class VariantGenotypePred:
 
     def init_genotypes(self, varcall_params, out):
         if self.variant_pscn.cn_estimate is None:
-            self._init_pooled_genotypes(varcall_params, out)
+            self._init_pooled_genotypes(varcall_params, out, return_best=False)
             return
         pooled_genotypes, self.remaining_prob = self._init_pooled_genotypes(varcall_params, out)
 
