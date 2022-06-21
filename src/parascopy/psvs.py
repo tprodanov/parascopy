@@ -42,11 +42,36 @@ class _Psv:
             self.reg2.append(reg2)
         self.active_dupl = None
 
+    def overlaps_boundary(self, duplications):
+        for region2 in self.reg2:
+            dupl = duplications[region2.dupl_index]
+            if self.start < dupl.region1.start or dupl.region1.end < self.end:
+                return True
+        return False
+
+    def to_complex_record(self, vcf_header, chrom_name, duplications):
+        record = vcf_header.new_record()
+        record.chrom = chrom_name
+        record.start = self.start
+        record.stop = self.end
+        record.alts = ('<COMPLEX>',)
+        record.qual = 0
+        record.filter.add('BOUNDARY')
+
+        for region2 in self.reg2:
+            dupl = duplications[region2.dupl_index]
+            dupl_start1 = dupl.region1.start
+            if dupl_start1 <= self.start and self.end <= dupl.region1.end:
+                record.ref = dupl.seq1[self.start - dupl_start1 : self.end - dupl_start1]
+                break
+        return record
+
     def to_record(self, vcf_header, chrom_name, duplications, genome, aligned_pos):
         record = vcf_header.new_record()
         record.chrom = chrom_name
         record.start = self.start
         alleles = []
+        alleles_dict = {}
 
         # Defined here because self.active_dupl will change.
         need_allele = len(self.active_dupl) > 1
@@ -57,14 +82,16 @@ class _Psv:
 
             if not alleles:
                 start1 = dupl.region1.start
-                alleles.append(dupl.padded_subseq1(self.start - start1, self.end - start1))
+                ref = dupl.padded_subseq1(self.start - start1, self.end - start1)
+                alleles.append(ref)
+                alleles_dict[ref] = 0
 
             alt = dupl.padded_subseq2(region2.start, region2.end)
-            try:
-                allele_ix = alleles.index(alt)
-            except ValueError:
+            allele_ix = alleles_dict.get(alt)
+            if allele_ix is None:
                 allele_ix = len(alleles)
                 alleles.append(alt)
+                alleles_dict[alt] = allele_ix
             pos2 = dupl.region2.start + region2.start if dupl.strand else dupl.region2.end - region2.end
             pos2_info.append((dupl.region2.chrom_id, pos2 + 1, dupl.strand_str, allele_ix))
 
@@ -132,6 +159,8 @@ def create_vcf_header(genome, chrom_ids=None, argv=None):
     for chrom_id in (chrom_ids or range(genome.n_chromosomes)):
         vcf_header.add_line('##contig=<ID={},length={}>'
             .format(genome.chrom_name(chrom_id), genome.chrom_len(chrom_id)))
+    vcf_header.add_line('##ALT=<ID=COMPLEX,Description="Long and complex PSV.">')
+    vcf_header.add_line('##FILTER=<ID=BOUNDARY,Description="PSV overlaps boundary of a duplication.">')
     vcf_header.add_line('##INFO=<ID=pos2,Number=.,Type=String,Description="Second positions of the PSV. '
         'Format: chrom:pos:strand[:allele]">')
     return vcf_header
@@ -143,17 +172,19 @@ def duplication_differences(region1, reg1_seq, reg2_seq, full_cigar, dupl_i, psv
     psvs.append(_Psv(reg1_start, None, (dupl_i, True)))
     psvs.append(_Psv(region1.end, None, (dupl_i, False)))
 
-    for (start1, end1, start2, end2) in full_cigar.find_differences():
-        if end1 - start1 != end2 - start2:
+    for start1, end1, start2, end2 in full_cigar.find_differences():
+        psv_size = max(end1 - start1, end2 - start2)
+        if psv_size < variants_.MAX_SHIFT_VAR_SIZE and end1 - start1 != end2 - start2:
             assert start1 >= 0 and start2 >= 0
             ref = reg1_seq[start1:end1]
             alt = reg2_seq[start2:end2]
             psv_start = reg1_start + start1
             new_start = variants_.move_left(psv_start, ref, (alt,), reg1_seq, reg1_start, skip_alleles=True)
-            if new_start is not None:
-                print(region1, psv_start, new_start, ref, alt)
-                raise RuntimeError('Variant/PSV is not in a canonical representation: must be moved left')
-                # shift = psv_start - new_start
+            shift = 0 if new_start is None else psv_start - new_start
+            if shift:
+                print(region1, psv_start + 1, new_start + 1, ref, alt)
+                raise RuntimeError(
+                    'Variant/PSV is not in a canonical representation: must be moved left by {} bp'.format(shift))
                 # start1 -= shift
                 # end1 -= shift
                 # start2 -= shift
@@ -161,8 +192,7 @@ def duplication_differences(region1, reg1_seq, reg2_seq, full_cigar, dupl_i, psv
 
         psv_start = reg1_start + start1
         psv_end = reg1_start + end1
-        if psv_start < in_region.end and in_region.start < psv_end and \
-                tangled_searcher.overlap_size(psv_start, psv_end) == 0:
+        if tangled_searcher.overlap_size(psv_start, psv_end) == 0:
             psvs.append(_Psv(psv_start, psv_end, _SecondRegion(start2, end2, dupl_i)))
 
     curr_aligned_pos = []
@@ -245,7 +275,10 @@ def create_psv_records(duplications, genome, vcf_header, in_region, tangled_regi
     psv_records = []
     duplication_starts1 = [dupl.region1.start for dupl in duplications]
     for pre_psv in combine_psvs(psvs, aligned_pos, duplication_starts1):
-        psv_records.append(pre_psv.to_record(vcf_header, chrom_name, duplications, genome, aligned_pos))
+        if pre_psv.overlaps_boundary(duplications):
+            psv_records.append(pre_psv.to_complex_record(vcf_header, chrom_name, duplications))
+        else:
+            psv_records.append(pre_psv.to_record(vcf_header, chrom_name, duplications, genome, aligned_pos))
     psv_records.sort(key=operator.attrgetter('start'))
     return psv_records
 
@@ -264,16 +297,16 @@ def main(prog_name=None, in_argv=None):
     parser = argparse.ArgumentParser(
         description='Output PSVs (paralogous-sequence variants) between homologous regions.',
         formatter_class=argparse.RawTextHelpFormatter, add_help=False,
-        usage='{} -i <table> -f <fasta> (-r <region> | -R <bed>) -o <vcf> [arguments]'.format(prog_name))
+        usage='{} -t <table> -f <fasta> (-r <region> | -R <bed>) -o <vcf> [arguments]'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
-    io_args.add_argument('-i', '--input', metavar='<file>', required=True,
+    io_args.add_argument('-t', '--table', metavar='<file>', required=True,
         help='Input indexed bed.gz homology table.')
     io_args.add_argument('-f', '--fasta-ref', metavar='<file>', required=True,
         help='Input reference fasta file.')
     io_args.add_argument('-o', '--output', metavar='<file>', required=True,
         help='Output vcf[.gz] file.')
 
-    reg_args = parser.add_argument_group('Region arguments (optional)')
+    reg_args = parser.add_argument_group('Region arguments (required)')
     reg_args.add_argument('-r', '--regions', nargs='+', metavar='<region>',
         help='Region(s) in format "chr" or "chr:start-end").\n'
             'Start and end are 1-based inclusive. Commas are ignored.')
@@ -289,7 +322,7 @@ def main(prog_name=None, in_argv=None):
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
     args = parser.parse_args(in_argv)
 
-    with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.input, parser=pysam.asTuple()) as table:
+    with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
         regions = Interval.combine_overlapping(common.get_regions(args, genome))
         chrom_ids = sorted(set(map(operator.attrgetter('chrom_id'), regions)))
         vcf_header = create_vcf_header(genome, chrom_ids, sys.argv)

@@ -390,6 +390,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
     psv_header = psvs_.create_vcf_header(genome)
     _update_vcf_header(psv_header, samples)
     psv_records = psvs_.create_psv_records(duplications, genome, psv_header, interval, skip_regions)
+    psv_records = [record for record in psv_records if record.qual > 0]
 
     window_size = bg_depth.window_size
     const_regions = cn_tools.find_const_regions(duplications, interval, skip_regions, genome,

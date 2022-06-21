@@ -293,12 +293,19 @@ class CopyNumHmm(HmmModel):
         return pred_cn - self._ref_copy_num + self.left_states
 
     def format_cn(self, pred_cn):
+        """
+        Returns pair pred_cn, pred_cn_str.
+        In most cases, out pred_cn == in pred_cn, and pred_cn_str = str(pred_cn).
+        However, in certain cases, pred_cn is too high or too low. In such cases,
+        return pair (None, pred_cn_str), where pred_cn_str is ">N" or "<N".
+        """
         diff = pred_cn - self._ref_copy_num
-        if -diff == self._left_states and pred_cn != 0:
-            return '<{}'.format(pred_cn + 1)
+        assert -self.left_states <= diff <= self._right_states
+        if diff == -self._left_states and pred_cn != 0:
+            return None, '<{}'.format(pred_cn + 1)
         if diff == self._right_states:
-            return '>{}'.format(pred_cn - 1)
-        return str(pred_cn)
+            return None, '>{}'.format(pred_cn - 1)
+        return pred_cn, str(pred_cn)
 
     def middle_state_transitions(self):
         """
@@ -991,8 +998,8 @@ def _write_detailed_cn(model, samples, windows, genome, out):
             best_cn = model.get_copy_num(best_state)
             second_cn = model.get_copy_num(second_state)
             out.write('\t{}:{:.3f} {}:{:.3f}'.format(
-                model.format_cn(best_cn), abs(probs[best_state] / common.LOG10),
-                model.format_cn(second_cn), abs(probs[second_state] / common.LOG10)))
+                model.format_cn(best_cn)[1], abs(probs[best_state] / common.LOG10),
+                model.format_cn(second_cn)[1], abs(probs[second_state] / common.LOG10)))
         out.write('\n')
 
 

@@ -213,9 +213,9 @@ def main(prog_name=None, in_argv=None):
     parser = argparse.ArgumentParser(
         description='Visualize multiple sequence alignment of homologous regions.',
         formatter_class=argparse.RawTextHelpFormatter, add_help=False,
-        usage='{} -i <table> -f <fasta> (-r <region> | -R <bed>) [-o <clustal>] [arguments]'.format(prog_name))
+        usage='{} -t <table> -f <fasta> (-r <region> | -R <bed>) [-o <clustal>] [arguments]'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
-    io_args.add_argument('-i', '--input', metavar='<file>', required=True,
+    io_args.add_argument('-t', '--table', metavar='<file>', required=True,
         help='Input indexed bed.gz homology table.')
     io_args.add_argument('-f', '--fasta-ref', metavar='<file>', required=True,
         help='Input reference fasta file.')
@@ -248,7 +248,7 @@ def main(prog_name=None, in_argv=None):
     args = parser.parse_args(in_argv)
 
     with Genome(args.fasta_ref) as genome, \
-            pysam.TabixFile(args.input, parser=pysam.asTuple()) as table, \
+            pysam.TabixFile(args.table, parser=pysam.asTuple()) as table, \
             common.open_possible_gzip(args.output, 'w') as outp, \
             common.open_possible_empty(args.out_csv, 'w') as outp_csv:
 

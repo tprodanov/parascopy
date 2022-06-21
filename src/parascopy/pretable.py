@@ -326,7 +326,10 @@ def align_to_genome(regions, genome, args, wdir, out):
         out.write(dupl.to_str(genome))
         out.write('\n')
         if args.symmetric and not dupl.is_tangled_region:
-            out.write(dupl.revert().to_str(genome))
+            dupl_rev = dupl.revert()
+            if not dupl_rev.strand and not dupl_rev.info['DIFF'].endswith(',0,0'):
+                dupl_rev.canonize()
+            out.write(dupl_rev.to_str(genome))
             out.write('\n')
 
 
@@ -434,11 +437,14 @@ def main(prog_name=None, in_argv=None):
     opt_args.add_argument('-a', '--asymmetric', action='store_false', dest='symmetric',
         help='Create an asymmetric homology table.')
 
-    exe_args = parser.add_argument_group('Executable arguments')
+    exe_args = parser.add_argument_group('Execution arguments')
     exe_args.add_argument('-F', '--force', action='store_true',
         help='Force overwrite output file.')
     exe_args.add_argument('-@', '--threads', type=int, metavar='<int>', default=4,
         help='Use <int> threads [default: %(default)s].')
+    exe_args.add_argument('--tmp-dir', metavar='<dir>',
+        help='Puts temporary files in the following directory (does not remove temporary\n'
+            'files after finishing). Otherwise, creates a temporary directory.')
     exe_args.add_argument('-b', '--bwa', metavar='<path>', default='bwa',
         help='Path to BWA executable [default: %(default)s].')
     exe_args.add_argument('--seed-len', type=int, metavar='<int>', default=16,
@@ -463,11 +469,15 @@ def main(prog_name=None, in_argv=None):
     common.log('Using {} threads'.format(args.threads))
 
     if not args.force and os.path.exists(args.output):
-        sys.stderr.write('Output file "{}" exists, please use --force to overwrite.\n'.format(args.output))
+        sys.stderr.write('Output file "{}" exists, please use -F/--force to overwrite.\n'.format(args.output))
         exit(1)
 
-    with Genome(args.fasta_ref) as genome, open(args.output, 'wb') as out, \
-            tempfile.TemporaryDirectory(prefix='parascopy') as wdir:
+    wdir_context = tempfile.TemporaryDirectory(prefix='parascopy') if args.tmp_dir is None \
+        else common.EmptyContextManager()
+    with Genome(args.fasta_ref) as genome, open(args.output, 'wb') as out, wdir_context as wdir:
+        if wdir is None:
+            wdir = args.tmp_dir
+            common.mkdir(wdir)
         common.log('Using temporary directory {}'.format(wdir))
         try:
             regions = common.get_regions(args, genome, only_unique=False)

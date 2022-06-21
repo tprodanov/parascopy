@@ -34,11 +34,13 @@ Commands:
                 homologous regions.
     psvs        Output PSVs (paralogous-sequence variants)
                 between homologous regions.
+    examine     Split input regions by reference copy number
+                and write homologous regions.
 
 \033[32m[ General help ]\033[0m
-    help            Show this help message.
-    version         Show version.
-    cite            Show citation information.
+    help        Show this help message.
+    version     Show version.
+    cite        Show citation information.
 '''
     usage = usage.format(version=long_version(), prog_name=prog_name)
     return usage
@@ -133,9 +135,14 @@ def main():
         return _process_exceptions(msa.main, inner_prog, inner_argv)
 
     valid_commands.append('psvs')
-    if command == 'psvs':
+    if command == 'psvs' or command == 'psv':
         from . import psvs
         return _process_exceptions(psvs.main, inner_prog, inner_argv)
+
+    valid_commands.append('examine')
+    if command == 'examine':
+        from . import examine_dupl
+        return _process_exceptions(examine_dupl.main, inner_prog, inner_argv)
 
     # valid_commands.append('call')
     if command == 'call':

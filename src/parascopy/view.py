@@ -3,13 +3,13 @@
 import argparse
 import pysam
 import re
-import errno
 
 from simpleeval import simple_eval
 
 from .inner import common
-from .inner.genome import ChromNames
+from .inner.genome import ChromNames, Interval
 from .inner.duplication import Duplication
+from .inner import itree
 from . import long_version
 
 
@@ -85,6 +85,11 @@ def main(prog_name=None, in_argv=None):
             'Start and end are 1-based inclusive. Commas are ignored.')
     reg_args.add_argument('-R', '--regions-file', nargs='+', metavar='<file>',
         help='Input bed[.gz] file(s) containing regions (tab-separated, 0-based semi-exclusive).')
+    reg_args.add_argument('--r2', '--regions2', nargs='+', metavar='<region>', dest='regions2',
+        help='Second region must overlap region(s) in format "chr" or "chr:start-end").\n'
+            'Start and end are 1-based inclusive. Commas are ignored.')
+    reg_args.add_argument('--R2', '--regions2-file', nargs='+', metavar='<file>', dest='regions2_file',
+        help='Second region must overlap regions from the input bed[.gz] file(s).')
 
     filt_args = parser.add_argument_group('Duplications filtering arguments')
     filt_args.add_argument('-i', '--include', metavar='<expr>',
@@ -110,6 +115,13 @@ def main(prog_name=None, in_argv=None):
         exclude = parse_expression(args.exclude) if args.exclude else None
         skip_tangled = args.skip_tangled
 
+        regions2_tree = None
+        if args.regions2 or args.regions2_file:
+            regions2 = common.get_regions_explicit(args.regions2, args.regions2_file, genome, only_unique=False)
+            regions2.sort()
+            regions2 = Interval.combine_overlapping(regions2)
+            regions2_tree = itree.MultiNonOverlTree(regions2)
+
         for tup in common.fetch_iterator(table, args, genome):
             dupl = Duplication.from_tuple(tup, genome)
             if dupl.is_tangled_region:
@@ -118,6 +130,8 @@ def main(prog_name=None, in_argv=None):
             elif include and not include(dupl, genome):
                 continue
             elif exclude and exclude(dupl, genome):
+                continue
+            elif not dupl.is_tangled_region and regions2_tree and regions2_tree.overlap_size(dupl.region2) == 0:
                 continue
             if args.pretty:
                 outp.write(dupl.to_str_pretty(genome))

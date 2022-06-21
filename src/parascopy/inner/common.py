@@ -173,15 +173,15 @@ def open_vcf(filename, mode='r', can_be_none=False, **kwargs): # TODO: Use more.
     return pysam.VariantFile(filename, mode=mode, **kwargs)
 
 
-def get_regions(args, genome, only_unique=True):
+def get_regions_explicit(regions, regions_file, genome, only_unique=True):
     """
     Returns a list `[NamedInterval]`.
     """
     intervals = []
-    for region in args.regions or ():
+    for region in regions or ():
         intervals.append(NamedInterval.parse(region, genome))
 
-    for filename in args.regions_file or ():
+    for filename in regions_file or ():
         with open_possible_gzip(filename) as inp:
             for line in inp:
                 if line.startswith('#'):
@@ -219,6 +219,10 @@ def get_regions(args, genome, only_unique=True):
         raise errors.EmptyResult(
             'No regions provided! Please specify -r <region> [<region> ...] or -R <file> [<file> ...]')
     return intervals
+
+
+def get_regions(args, genome, only_unique=True):
+    return get_regions_explicit(args.regions, args.regions_file, genome, only_unique)
 
 
 def _fetch_regions_wo_duplicates(obj, regions, genome, start_attr):

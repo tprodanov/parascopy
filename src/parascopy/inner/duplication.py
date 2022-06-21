@@ -523,7 +523,8 @@ class Duplication:
 
         seq1 = self._seq1[start1 : exp_pos1]
 
-        new_cigar = _move_everything_left(new_cigar, start1=start1, seq1=seq1, start2=0, seq2=read_seq, move_dupl=False)
+        new_cigar = _move_everything_left(new_cigar, start1=start1, seq1=seq1, start2=0, seq2=read_seq,
+            from_full_cigar=False)
         new_cigar = _replace_del_ins_signature(new_cigar, read_seq, seq1, parasail_args)
 
         # Right clipping
@@ -687,6 +688,13 @@ class Duplication:
             dupl._info['DIFF'] = '{},{},{}'.format(mism, insertions, deletions)
         return dupl
 
+    def canonize(self):
+        """
+        Canonizes insertions and deletions in the duplication.
+        seq1 and seq2 must be present.
+        """
+        self._full_cigar = Cigar.from_tuples(_move_everything_left(self._full_cigar, 0, self._seq1, 0, self._seq2))
+
 
 def _replace_del_ins_signature(cigar, read_seq, ref_seq, parasail_args):
     """
@@ -822,17 +830,17 @@ def _glue_segments(cigar, aln_fun, seq1, seq2, shift1, shift2, a_end1, a_end2, b
         Cigar.append(cigar, b_start2 - a_end2, Operation.Insertion)
 
 
-def _move_everything_left(cigar, start1, seq1, start2, seq2, move_dupl=True):
+def _move_everything_left(cigar, start1, seq1, start2, seq2, from_full_cigar=True):
     pos1 = move_stop1 = shift1 = start1
     pos2 = shift2 = start2
     new_cigar = []
-    match_op = Operation.SeqMatch if move_dupl else Operation.AlnMatch
+    match_op = Operation.SeqMatch if from_full_cigar else Operation.AlnMatch
 
     for length, op in cigar:
         if op.consumes_both():
             pos1 += length
             pos2 += length
-            if move_dupl:
+            if from_full_cigar:
                 if op != Operation.SeqMatch:
                     # -1 because we can allow insertions/deletions that start with a mismatch.
                     move_stop1 = pos1 - 1

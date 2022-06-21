@@ -738,73 +738,33 @@ def _single_sample_e_step(sample_id, agcn, psv_infos, psv_weights=None):
     return poss_pscns, gt_probs
 
 
-class _WeightedCN:
-    def __init__(self, agcn, agcn_str):
-        self.agcn = agcn
-        self.agcn_str = agcn_str
-        self.weight = 0.0
-
-    def __lt__(self, oth):
-        return self.weight.__lt__(oth.weight)
-
-
-def _subresults_get_cn_weights(results):
-    agcn_set = None
-    for entry in results:
-        curr_set = set(map(operator.itemgetter(0), entry.sample_const_region.probable_cns))
-        if agcn_set is None:
-            agcn_set = curr_set
-        else:
-            agcn_set &= curr_set
-    assert agcn_set
-    if len(agcn_set) == 1:
-        agcn0 = next(iter(agcn_set))
-        return (_WeightedCN(agcn0, None),)
-
-    weighted_cns = {}
-    rem_weight = 0.0
-    for entry in results:
-        curr_used = []
-        for agcn, agcn_str, agcn_weight in entry.sample_const_region.probable_cns:
-            if agcn not in agcn_set:
-                continue
-            curr_used.append(agcn_weight)
-            if agcn not in weighted_cns:
-                weighted_cns[agcn] = _WeightedCN(agcn, agcn_str)
-            weighted_cns[agcn].weight += agcn_weight
-        rem_weight += common.log1minus(curr_used)
-
-    weighted_cns = sorted(weighted_cns.values(), reverse=True)
-    all_weights = [rem_weight]
-    all_weights.extend(map(operator.attrgetter('weight'), weighted_cns))
-    sum_weight = logsumexp(all_weights)
-    for weighted_cn in weighted_cns:
-        weighted_cn.weight -= sum_weight
-    return weighted_cns
-
-
-def _identify_best_cn(sample_id, weighted_cns, psv_infos):
-    n_cns = len(weighted_cns)
+def _identify_best_agcn(sample_id, probable_cns, remaining_prob, psv_infos):
+    """
+    Finds best AggregateCN based on ParalogCN estimates. Possible AggregateCN values are taken from probable_cns.
+    Returns pair (AggregateCN, quality).
+    """
+    n_cns = len(probable_cns)
     assert n_cns > 1
     psv_weights = _create_psv_weights(psv_infos, neighb_radius=500)
     agcn_probs = np.full(n_cns, -np.inf)
-    initial_weights = []
-    for i, weighted_cn in enumerate(weighted_cns):
+    initial_probs = []
+    for i, weighted_cn in enumerate(probable_cns):
         if weighted_cn.agcn is not None:
             _, gt_probs = _single_sample_e_step(sample_id, weighted_cn.agcn, psv_infos, psv_weights)
             if gt_probs is not None:
-                agcn_probs[i] = logsumexp(gt_probs) + weighted_cn.weight
-                initial_weights.append(weighted_cn.weight)
+                agcn_probs[i] = logsumexp(gt_probs) + weighted_cn.prob
+                initial_probs.append(weighted_cn.prob)
     assert np.isfinite(agcn_probs[0])
 
     # Total sum will be the same as the initial sum of weights.
-    sum_initial = logsumexp(initial_weights)
     agcn_probs -= logsumexp(agcn_probs)
     best = np.argmax(agcn_probs)
-    qual = common.extended_phred_qual(agcn_probs, best, sum_prob=sum_initial, max_value=1000)
-    agcn = weighted_cns[best].agcn
-    agcn_str = weighted_cns[best].agcn_str
-    return agcn, agcn_str, qual
+    remaining_prob = max(remaining_prob, common.log1minus(initial_probs))
+    qual = common.extended_phred_qual(agcn_probs, best, rem_prob=remaining_prob, max_value=1000)
+
+    agcn = probable_cns[best].agcn
+    assert str(agcn) == probable_cns[best].agcn_str
+    return agcn, qual
 
 
 def _get_psv_subset(results, psv_searcher, psv_infos, sample_id, agcn):
@@ -895,7 +855,7 @@ class GeneConversionHmm(cn_hmm.HmmModel):
 GeneConversion = collections.namedtuple('GeneConversion', 'start end main_gt replacement_gt qual n_psvs')
 
 
-def _detect_gene_conversion(sample_id, sample_cn, genotypes_str, poss_pscn_probs, psv_infos, semirel_psv_ixs):
+def _detect_gene_conversion(sample_id, sample_agcn, genotypes_str, poss_pscn_probs, psv_infos, semirel_psv_ixs):
     n_psvs = len(semirel_psv_ixs)
     n_genotypes = len(genotypes_str)
 
@@ -906,7 +866,7 @@ def _detect_gene_conversion(sample_id, sample_cn, genotypes_str, poss_pscn_probs
     HMM_SAMPLE_ID = 0
     for i, psv_ix in enumerate(semirel_psv_ixs):
         sample_info = psv_infos[psv_ix].sample_infos[sample_id]
-        assert sample_info.best_cn == sample_cn
+        assert sample_info.best_cn == sample_agcn
         emission_matrix[HMM_SAMPLE_ID, :, i] = sample_info.support_rows[sample_info.best_cn]
     model.set_emission_matrices(emission_matrix)
     prob, states_vec = model.viterbi(HMM_SAMPLE_ID)
@@ -932,9 +892,7 @@ def _detect_gene_conversion(sample_id, sample_cn, genotypes_str, poss_pscn_probs
 
 def _create_sample_results_from_agcn(sample_id, region_group_extra):
     sample_results = []
-    linked_ranges = []
     group_name = region_group_extra.region_group.name
-
     for sample_const_region in region_group_extra.sample_const_regions[sample_id]:
         entry = ResultEntry(sample_id, sample_const_region)
         entry.info['group'] = group_name
@@ -949,14 +907,8 @@ def _create_sample_results_from_agcn(sample_id, region_group_extra):
         entry.info['indep_psvs'] = np.sum(region_group_extra.psv_in_em[psv_start_ix : psv_end_ix])
         entry.info['rel_psvs'] = np.sum(region_group_extra.psv_is_reliable[psv_start_ix : psv_end_ix])
         entry.info['semirel_psvs'] = np.sum(region_group_extra.psv_is_reliable[psv_start_ix : psv_end_ix])
-
-        curr_res_ix = len(sample_results)
-        if sample_results and sample_results[-1].pred_cn == entry.pred_cn:
-            linked_ranges[-1][1] = curr_res_ix + 1
-        else:
-            linked_ranges.append([curr_res_ix, curr_res_ix + 1])
         sample_results.append(entry)
-    return sample_results, linked_ranges
+    return sample_results
 
 
 def _genotypes_str(poss_pscns, genotypes_str_cache):
@@ -966,26 +918,61 @@ def _genotypes_str(poss_pscns, genotypes_str_cache):
         - string representations of various marginal probabilities in form (0??, 1??, ..., ?0?, ...).
     """
     n_copies = len(poss_pscns[0])
-    sample_cn = sum(poss_pscns[0])
-    if sample_cn in genotypes_str_cache:
-        return genotypes_str_cache[sample_cn]
+    sample_agcn = sum(poss_pscns[0])
+    if sample_agcn in genotypes_str_cache:
+        return genotypes_str_cache[sample_agcn]
 
     poss_pscns_str = [','.join(map(str, gt)) for gt in poss_pscns]
     marginal_str = []
     if n_copies > 2:
         gt_str = ['?'] * n_copies
         for copy in range(n_copies):
-            for curr_copy_cn in range(sample_cn + 1):
+            for curr_copy_cn in range(sample_agcn + 1):
                 gt_str[copy] = str(curr_copy_cn)
                 marginal_str.append(''.join(gt_str))
             gt_str[copy] = '?'
     res = (poss_pscns_str, marginal_str)
-    genotypes_str_cache[sample_cn] = res
+    genotypes_str_cache[sample_agcn] = res
     return res
 
 
-def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, region_group_extra, genome,
-        out, genotypes_str_cache):
+def _refine_agcn_probs(sample_id, sample_results, region_group_extra):
+    psv_searcher = region_group_extra.psv_searcher
+    psv_infos = region_group_extra.psv_infos
+
+    for entry in sample_results:
+        const_region = entry.sample_const_region
+        probable_cns = const_region.probable_cns
+        if len(probable_cns) < 2:
+            continue
+
+        agcn1 = probable_cns[0].agcn
+        psv_ixs = _get_psv_subset((entry,), psv_searcher, psv_infos, sample_id, agcn1)
+        if len(psv_ixs) == 0:
+            continue
+        reliable_psv_ixs = psv_ixs[region_group_extra.psv_is_reliable[psv_ixs]]
+        n_rel = len(reliable_psv_ixs)
+        if n_rel == 0:
+            continue
+        rel_psv_infos = [psv_infos[psv_ix] for psv_ix in reliable_psv_ixs]
+        agcn2, agcn2_qual = _identify_best_agcn(sample_id, probable_cns, const_region.remaining_prob, rel_psv_infos)
+        const_region.update_pred_cn(agcn2, agcn2_qual)
+        entry.info['agCN_psvs'] = n_rel
+
+
+def _link_sample_results(sample_results):
+    linked_ranges = []
+    prev_entry = None
+    for entry_ix, entry in enumerate(sample_results):
+        if prev_entry is not None and prev_entry.pred_cn == entry.pred_cn:
+            linked_ranges[-1][1] = entry_ix + 1
+        else:
+            linked_ranges.append([entry_ix, entry_ix + 1])
+        prev_entry = entry
+    return linked_ranges
+
+
+def _single_sample_pscn(sample_id, sample_name, sample_results, region_group_extra, genome, out, genotypes_str_cache):
     # ====== Defining useful variables ======
     psv_infos = region_group_extra.psv_infos
     n_psvs = len(psv_infos)
@@ -997,17 +984,17 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
     psv_searcher = region_group_extra.psv_searcher
 
     # ====== Calculate psCN for a set of consecutive regions with the same agCN ======
+    linked_ranges = _link_sample_results(sample_results)
     for link_ix, (start_ix, end_ix) in enumerate(linked_ranges):
         curr_results = sample_results[start_ix:end_ix]
-        weighted_cns = _subresults_get_cn_weights(curr_results)
-        pre_sample_cn = weighted_cns[0].agcn
-        if pre_sample_cn == 0:
+        sample_agcn = curr_results[0].pred_cn
+        if sample_agcn == 0:
             continue
         if not curr_results[0].sample_const_region.cn_is_known:
             _add_paralog_filter(curr_results, Filter.UncertainCN)
             continue
 
-        psv_ixs = _get_psv_subset(curr_results, psv_searcher, psv_infos, sample_id, pre_sample_cn)
+        psv_ixs = _get_psv_subset(curr_results, psv_searcher, psv_infos, sample_id, sample_agcn)
         if len(psv_ixs) == 0:
             _add_paralog_filter(curr_results, Filter.NoGoodPSVs)
             continue
@@ -1017,25 +1004,10 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
             continue
         rel_psv_infos = [psv_infos[psv_ix] for psv_ix in reliable_psv_ixs]
 
-        # ===== Find the best aggregate CN based on the PSVs =====
-        if len(weighted_cns) > 1:
-            sample_cn, sample_cn_str, cn_qual = _identify_best_cn(sample_id, weighted_cns, rel_psv_infos)
-            for subresults in curr_results:
-                subresults.sample_const_region.update_pred_cn(sample_cn, sample_cn_str, cn_qual)
-            if sample_cn != pre_sample_cn:
-                psv_ixs = _get_psv_subset(curr_results, psv_searcher, psv_infos, sample_id, sample_cn)
-                reliable_psv_ixs = psv_ixs[region_group_extra.psv_is_reliable[psv_ixs]]
-                if len(reliable_psv_ixs) == 0:
-                    _add_paralog_filter(curr_results, Filter.NoReliable)
-                    continue
-                rel_psv_infos = [psv_infos[psv_ix] for psv_ix in reliable_psv_ixs]
-        else:
-            sample_cn = pre_sample_cn
-
         # ===== Run E-step once again to calculate psCN =====
-        poss_pscns, poss_pscn_probs = _single_sample_e_step(sample_id, sample_cn, rel_psv_infos)
+        poss_pscns, poss_pscn_probs = _single_sample_e_step(sample_id, sample_agcn, rel_psv_infos)
         marginal_probs, paralog_cn, paralog_qual = calculate_marginal_probs(poss_pscns, poss_pscn_probs,
-            n_copies, sample_cn)
+            n_copies, sample_agcn)
         poss_pscns_str, marginal_str = _genotypes_str(poss_pscns, genotypes_str_cache)
 
         # ===== Detect gene conversion =====
@@ -1044,7 +1016,7 @@ def _single_sample_pscn(sample_id, sample_name, sample_results, linked_ranges, r
         semirel_psv_ixs = psv_ixs[region_group_extra.psv_is_semirel[psv_ixs]]
 
         if np.all(paralog_qual >= GENE_CONV_QUAL_THRESHOLD) and len(semirel_psv_ixs) >= MIN_SEMIREL_PSVS:
-            gene_conv = _detect_gene_conversion(sample_id, sample_cn, poss_pscns_str, poss_pscn_probs,
+            gene_conv = _detect_gene_conversion(sample_id, sample_agcn, poss_pscns_str, poss_pscn_probs,
                 psv_infos, semirel_psv_ixs)
             for entry in gene_conv:
                 out.gene_conversion.write('{}\t{}\t{}\t'.format(region_chrom, entry.start, entry.end))
@@ -1102,7 +1074,7 @@ def estimate_paralog_cn(region_group_extra, samples, genome, out, max_agcn):
 
     results = []
     for sample_id in range(len(samples)):
-        sample_results, linked_ranges = _create_sample_results_from_agcn(sample_id, region_group_extra)
+        sample_results = _create_sample_results_from_agcn(sample_id, region_group_extra)
         results.extend(sample_results)
         if not has_reliable_psvs:
             if n_copies > max_agcn // 2:
@@ -1111,8 +1083,9 @@ def estimate_paralog_cn(region_group_extra, samples, genome, out, max_agcn):
                 _add_paralog_filter(sample_results, Filter.NoReliable)
             continue
 
-        _single_sample_pscn(sample_id, samples[sample_id], sample_results, linked_ranges, region_group_extra,
-            genome, out, genotypes_str_cache)
+        _refine_agcn_probs(sample_id, sample_results, region_group_extra)
+        _single_sample_pscn(sample_id, samples[sample_id], sample_results, region_group_extra, genome, out,
+            genotypes_str_cache)
     return results
 
 
@@ -1130,20 +1103,7 @@ class Filter(Enum):
     def __str__(self):
         if self == Filter.Pass:
             return 'PASS'
-        if self == Filter.HighCN:
-            return 'HighCN'
-        if self == Filter.NoReliable:
-            return 'NoReliable'
-        if self == Filter.FewReliable:
-            return 'FewReliable'
-        if self == Filter.NoComplReliable:
-            return 'NoComplReliable'
-        if self == Filter.LowInfoContent:
-            return 'LowInfoCont'
-        if self == Filter.UncertainCN:
-            return 'UncertainCN'
-        if self == Filter.NoGoodPSVs:
-            return 'NoGoodPSVs'
+        return self.name
 
     @classmethod
     def from_str(cls, s):
@@ -1157,7 +1117,7 @@ class Filter(Enum):
             return Filter.FewReliable
         if s == 'NoComplReliable':
             return Filter.NoComplReliable
-        if s == 'LowInfoCont':
+        if s == 'LowInfoCont' or s == 'LowInfoContent':
             return Filter.LowInfoContent
         if s == 'UncertainCN':
             return Filter.UncertainCN
@@ -1167,54 +1127,62 @@ class Filter(Enum):
 
 class Filters:
     def __init__(self):
-        self.filters = None
+        self._filters = None
 
     @classmethod
-    def from_str(cls, s):
+    def from_str(cls, subcls, s):
         self = Filters()
+        return self.update_str(subcls, s)
+
+    def update_str(self, subcls, s):
         if s == '*' or s == 'PASS':
             return self
         for filt in s.split(';'):
-            self.add(Filter.from_str(filt))
+            self.add(subcls.from_str(filt))
         return self
 
     def add(self, filt):
-        if self.filters is None:
-            self.filters = set()
-        self.filters.add(filt)
+        if self._filters is None:
+            self._filters = set()
+        self._filters.add(filt)
+
+    def map(self, fn):
+        if self._filters is None:
+            return ()
+        return map(fn, self._filters)
 
     def union(self, other):
         new = Filters()
-        if self.filters is None and other.filters is None:
-            new.filters = None
-        elif self.filters is None:
-            new.filters = other.filters.copy()
-        elif other.filters is None:
-            new.filters = self.filters.copy()
+        if self._filters is None and other._filters is None:
+            new._filters = None
+        elif self._filters is None:
+            new._filters = other._filters.copy()
+        elif other._filters is None:
+            new._filters = self._filters.copy()
         else:
-            new.filters = self.filters | other.filters
+            new._filters = self._filters | other._filters
         return new
 
-    def to_str(self, value_defined):
-        if not self.filters:
-            return 'PASS' if value_defined else '*'
-        return ';'.join(map(str, self.filters))
+    def to_str(self, default_pass=True):
+        if not self._filters:
+            return 'PASS' if default_pass else '*'
+        return ';'.join(map(str, self._filters))
 
     def to_tuple(self):
-        if not self.filters:
+        if not self._filters:
             return ('PASS',)
-        return tuple(map(str, self.filters))
+        return tuple(map(str, self._filters))
 
     def __len__(self):
-        return 0 if self.filters is None else len(self.filters)
+        return 0 if self._filters is None else len(self._filters)
 
     def __bool__(self):
-        return bool(self.filters)
+        return bool(self._filters)
 
     def copy(self):
         res = Filters()
-        if self.filters:
-            res.filters = self.filters.copy()
+        if self._filters:
+            res._filters = self._filters.copy()
         return res
 
 
@@ -1241,7 +1209,7 @@ class ResultEntry:
     def copy_num_to_str(self):
         if self.pred_cn is None:
             return (self.agcn_filter.to_str(False), '?', '*')
-        return (self.agcn_filter.to_str(True), self.sample_const_region.pred_cn_str,
+        return (self.agcn_filter.to_str(), self.sample_const_region.pred_cn_str,
             '{:.2f}'.format(self.sample_const_region.qual))
 
     def paralog_to_str(self):
@@ -1487,7 +1455,7 @@ class ParalogEntry:
         self = cls.__new__(cls)
         self.region = Interval(genome.chrom_id(tup[0]), int(tup[1]), int(tup[2]))
         self.sample_id = samples.id(tup[3])
-        self.filter = Filters.from_str(tup[4])
+        self.filter = Filters.from_str(Filter, tup[4])
         self.copy_num = int(tup[5])
         self.min_qual = float(tup[6])
         self.main_region = Interval.parse(tup[7], genome)
@@ -1530,7 +1498,7 @@ class ParalogEntry:
 
     def to_str(self, genome, samples):
         return '{}\t{}\t{}\t{}\t{:.0f}\t{}\n'.format(
-            self.region.to_bed(genome), samples[self.sample_id], self.filter.to_str(True),
+            self.region.to_bed(genome), samples[self.sample_id], self.filter.to_str(),
             self.copy_num, self.min_qual, self.main_region.to_str(genome))
 
     @classmethod

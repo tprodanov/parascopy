@@ -189,37 +189,76 @@ class RegionGroup(DuplRegion):
         return self._window_ixs
 
 
+class WeightedCN:
+    def __init__(self, agcn, agcn_str, prob):
+        self._agcn = agcn
+        self._agcn_str = agcn_str
+        self._prob = prob
+
+    def copy(self, new_prob=None):
+        return WeightedCN(self._agcn, self._agcn_str, self._prob if new_prob is None else new_prob)
+
+    @property
+    def agcn(self):
+        return self._agcn
+
+    @property
+    def agcn_str(self):
+        return self._agcn_str
+
+    @property
+    def prob(self):
+        return self._prob
+
+    def __lt__(self, oth):
+        return self.prob.__lt__(oth.prob)
+
+    def __str__(self):
+        return '{}:{:.4g}'.format(self.agcn_str, np.exp(self.prob))
+
+
 class CopyNumPrediction(DuplRegion):
-    def __init__(self, region1, regions2, pred_cn, pred_cn_str, pred_cn_qual):
+    def __init__(self, region1, regions2, pred_cn, pred_cn_str, pred_cn_qual, pred_cn_prob=None):
         super().__init__(None, region1, regions2)
+        if pred_cn is not None:
+            assert pred_cn_str == str(pred_cn)
         self._pred_cn = pred_cn
         self._pred_cn_str = pred_cn_str
         self._qual = pred_cn_qual
-        self._probable_cns = ((pred_cn, pred_cn_str, 0),)
+
+        # _probable_cns - tuple of WeightedCN - possible AggregateCN values and their log-probabilities.
+        # _rem_prob     - remaining log-probability, not accounted in the _probable_cns.
+        self._rem_prob = -0.1 * pred_cn_qual * common.LOG10
+        if pred_cn_prob is None:
+            pred_cn_prob = logsumexp((0, self._rem_prob), b=(1, -1))
+        self._probable_cns = (WeightedCN(pred_cn, pred_cn_str, pred_cn_prob),)
         self._info = {}
 
     @classmethod
     def create(cls, region1, regions2, pred_cns, cn_probs, model, update_agcn_qual):
-        pred_cn = pred_cns[0]
+        pred_cn, pred_cn_str = model.format_cn(pred_cns[0])
         pred_cn_qual = common.phred_qual(cn_probs, best_ix=0)
-        self = cls(region1, regions2, pred_cn, model.format_cn(pred_cn), pred_cn_qual)
+        self = cls(region1, regions2, pred_cn, pred_cn_str, pred_cn_qual, pred_cn_prob=cn_probs[0])
+
         if pred_cn_qual < update_agcn_qual:
             thresh_prob = (-0.1 * update_agcn_qual - 1) * common.LOG10
             ixs = np.where(cn_probs >= thresh_prob)[0]
             if len(ixs) < 2:
                 ixs = np.argsort(-cn_probs)[:2]
             if len(ixs) > 1:
-                self._probable_cns = tuple((pred_cns[i], model.format_cn(pred_cns[i]), cn_probs[i]) for i in ixs)
-                self.info['agCN_probs'] = \
-                    ','.join('{}:{:.4g}'.format(cn_str, np.exp(prob)) for _, cn_str, prob in self._probable_cns)
+                probable_cns = [WeightedCN(*model.format_cn(pred_cns[i]), cn_probs[i]) for i in ixs]
+                probable_cns.sort(reverse=True)
+                self._probable_cns = tuple(probable_cns)
+                self._rem_prob = common.log1minus(cn_probs[ixs])
+                self.info['agCN_probs'] = ','.join(map(str, self._probable_cns))
         return self
 
-    def update_pred_cn(self, cn, cn_str, cn_qual):
+    def update_pred_cn(self, cn, cn_qual):
         if self._pred_cn == cn and self._qual >= cn_qual:
             return
         self._info['init_agCN'] = '{}:{:.0f}'.format(self._pred_cn_str, self._qual)
         self._pred_cn = cn
-        self._pred_cn_str = cn_str
+        self._pred_cn_str = str(cn)
         self._qual = cn_qual
 
     @property
@@ -239,12 +278,16 @@ class CopyNumPrediction(DuplRegion):
         return self._probable_cns
 
     @property
+    def remaining_prob(self):
+        return self._rem_prob
+
+    @property
     def region_ix(self):
         return self._region_ix
 
     @property
     def cn_is_known(self):
-        return self._pred_cn is not None and self._pred_cn_str[0].isdigit()
+        return self._pred_cn is not None
 
     @property
     def info(self):
