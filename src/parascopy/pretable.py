@@ -434,8 +434,8 @@ def main(prog_name=None, in_argv=None):
         help='Artificial read length [default: %(default)s].')
     opt_args.add_argument('--step-size', type=int, metavar='<int>', default=150,
         help='Artificial reads step size [default: %(default)s].')
-    opt_args.add_argument('-a', '--asymmetric', action='store_false', dest='symmetric',
-        help='Create an asymmetric homology table.')
+    opt_args.add_argument('-s', '--symmetric', action='store_true', dest='symmetric',
+        help='Create a symmetric homology table (may be unstable).')
 
     exe_args = parser.add_argument_group('Execution arguments')
     exe_args.add_argument('-F', '--force', action='store_true',

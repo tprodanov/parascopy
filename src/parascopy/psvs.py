@@ -167,28 +167,27 @@ def create_vcf_header(genome, chrom_ids=None, argv=None):
 
 
 def duplication_differences(region1, reg1_seq, reg2_seq, full_cigar, dupl_i, psvs, aligned_pos,
-        in_region, tangled_searcher):
+        in_region, tangled_searcher, check_psvs=False):
     reg1_start = region1.start
     psvs.append(_Psv(reg1_start, None, (dupl_i, True)))
     psvs.append(_Psv(region1.end, None, (dupl_i, False)))
 
     for start1, end1, start2, end2 in full_cigar.find_differences():
         psv_size = max(end1 - start1, end2 - start2)
-        if psv_size < variants_.MAX_SHIFT_VAR_SIZE and end1 - start1 != end2 - start2:
+        if check_psvs and psv_size < variants_.MAX_SHIFT_VAR_SIZE and end1 - start1 != end2 - start2:
             assert start1 >= 0 and start2 >= 0
             ref = reg1_seq[start1:end1]
             alt = reg2_seq[start2:end2]
             psv_start = reg1_start + start1
-            new_start = variants_.move_left(psv_start, ref, (alt,), reg1_seq, reg1_start, skip_alleles=True)
-            shift = 0 if new_start is None else psv_start - new_start
-            if shift:
-                print(region1, psv_start + 1, new_start + 1, ref, alt)
-                raise RuntimeError(
-                    'Variant/PSV is not in a canonical representation: must be moved left by {} bp'.format(shift))
-                # start1 -= shift
-                # end1 -= shift
-                # start2 -= shift
-                # end2 -= shift
+            move_res = variants_.move_left(psv_start, ref, (alt,), reg1_seq, reg1_start)
+            if move_res is not None:
+                new_start, shifted_alleles = move_res
+                shift = psv_start - new_start
+                s = 'WARN: Variant/PSV [{}]:{:,}  Alleles: {}, {}   is not in a canonical representation:\n'.format(
+                    region1.chrom_id, psv_start + 1, ref, alt)
+                s += '    New position {:,}  Alleles: {}   ({} bp shift)'.format(
+                    new_start + 1, ', '.join(shifted_alleles), shift)
+                common.log(s)
 
         psv_start = reg1_start + start1
         psv_end = reg1_start + end1
@@ -275,6 +274,8 @@ def create_psv_records(duplications, genome, vcf_header, in_region, tangled_regi
     psv_records = []
     duplication_starts1 = [dupl.region1.start for dupl in duplications]
     for pre_psv in combine_psvs(psvs, aligned_pos, duplication_starts1):
+        if pre_psv.end < in_region.start or pre_psv.start >= in_region.end:
+            continue
         if pre_psv.overlaps_boundary(duplications):
             psv_records.append(pre_psv.to_complex_record(vcf_header, chrom_name, duplications))
         else:

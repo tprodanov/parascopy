@@ -427,46 +427,6 @@ class Cigar:
     def to_pysam_tuples(self):
         return [(op.value, len) for len, op in self._tuples]
 
-    def aligned_seqs(self, read_seq, ref_seq):
-        read_res = ''
-        ref_res = ''
-
-        pos1 = 0
-        pos2 = 0
-        for length, op in self._tuples:
-            if op.consumes_both():
-                subs1 = read_seq[pos1 : pos1 + length]
-                subs2 = ref_seq[pos2 : pos2 + length]
-                if op == Operation.SeqMismatch:
-                    read_res += subs1.lower()
-                    ref_res += subs2.lower()
-                    if subs1 == subs2:
-                        sys.stderr.write('Error: operation %dX at positions %d,%d corresponds to sequence match %s\n'
-                            % (length, pos1, pos2, subs1))
-                else:
-                    read_res += subs1
-                    ref_res += subs2
-                    if op == Operation.SeqMatch and subs1 != subs2:
-                        sys.stderr.write('Error: operation %d= at positions %d,%d corresponds to sequence '
-                            'mismatch %s != %s\n' % (length, pos1, pos2, subs1, subs2))
-                pos1 += length
-                pos2 += length
-
-            elif op.consumes_read():
-                ref_res += '-' * length
-                read_res += read_seq[pos1 : pos1 + length]
-                pos1 += length
-            elif op.consumes_ref():
-                ref_res += ref_seq[pos2 : pos2 + length]
-                read_res += '-' * length
-                pos2 += length
-
-        if pos1 != len(read_seq) or pos2 != len(ref_seq):
-            sys.stderr.write('Error: CIGAR length does not match sequences length: '
-                'read_len = %d, read_seq = %d, ref_len = %d, ref_seq = %d\n'
-                % (pos1, len(read_seq), pos2, len(ref_seq)))
-        return read_res, ref_res
-
     def aligned_pairs(self, ref_start=0, read_start=0):
         """
         Returns iterator over pairs of indices, aligned to each other.
@@ -652,6 +612,26 @@ class Cigar:
     def extend(cigar, it):
         Cigar.append(cigar, *next(it))
         cigar.extend(it)
+
+    def visualize(self, ref_seq, read_seq):
+        aref_seq = ''
+        ref_pos = 0
+        aread_seq = ''
+        read_pos = 0
+
+        for length, op in self:
+            if op.consumes_ref():
+                aref_seq += ref_seq[ref_pos:ref_pos + length]
+                ref_pos += length
+            else:
+                aref_seq += '-' * length
+
+            if op.consumes_read():
+                aread_seq += read_seq[read_pos:read_pos + length]
+                read_pos += length
+            else:
+                aread_seq += '-' * length
+        return aref_seq, aread_seq
 
 
 class CigarIndex:

@@ -68,15 +68,15 @@ def _write_aligned_regions_csv(region, region_seq, aligned_regions, genome, outp
 
         for i, subseq2 in enumerate(al_region.aligned_seq2):
             if subseq2 == '-':
-                outp.write('NA\tNA\t%s\t%d\t%s\tNA\n' % (chrom1, start1 + i, seq1[i]))
+                outp.write('NA\tNA\t{}\t{}\t{}\tNA\n'.format(chrom1, start1 + i, seq1[i]))
                 continue
-            outp.write('%s\t%d\t%s\t%d\t%s\t%s\n' % (chrom2, abs(pos2), chrom1, start1 + i, seq1[i], subseq2[0]))
+            outp.write('{}\t{}\t{}\t{}\t{}\t{}\n'.format(chrom2, abs(pos2), chrom1, start1 + i, seq1[i], subseq2[0]))
 
             if len(subseq2) > 1:
                 summand = 1 / len(subseq2)
                 for j in range(1, len(subseq2)):
-                    outp.write('%s\t%d\t%s\t%.2f\tNA\t%s\n'
-                        % (chrom2, abs(pos2 + j), chrom1, start1 + i + j * summand, subseq2[j]))
+                    outp.write('{}\t{}\t{}\t{:.2f}\tNA\t{}\n'.format(
+                        chrom2, abs(pos2 + j), chrom1, start1 + i + j * summand, subseq2[j]))
             pos2 += len(subseq2)
 
 
@@ -88,25 +88,25 @@ def _al_region_key(al_region):
 
 def _write_msa(region, region_seq, duplications, aligned_regions, genome, outp, true_clustal, width):
     name_counter = collections.Counter()
-    names = ['%s:%d' % (region.chrom_name(genome), region.start_1)]
+    names = ['{}:{}'.format(region.chrom_name(genome), region.start_1)]
     name_counter[names[0]] += 1
     for al_region in aligned_regions:
         if al_region is None:
             names.append('-')
             continue
 
-        name = '%s:%d' % (al_region.region2.chrom_name(genome), al_region.region2.start_1)
+        name = '{}:{}'.format(al_region.region2.chrom_name(genome), al_region.region2.start_1)
         prev_count = name_counter[name]
         name_counter[name] += 1
         if prev_count:
-            name += '_%s' % common.string_suffix(prev_count)
+            name += '_' + common.letter_suffix(prev_count)
         names.append(name)
     name_len = max(map(len, names))
     padded_names = [name + ' ' * (name_len - len(name)) for name in names]
 
     outp.write('#=======================================\n#\n')
-    outp.write('# Aligned sequences: %d\n' % (len(duplications) + 1))
-    outp.write('# 1: %s\n' % names[0])
+    outp.write('# Aligned sequences: {}\n'.format(len(duplications) + 1))
+    outp.write('# 1: {}\n'.format(names[0]))
     for i, (dupl, al_region) in enumerate(zip(duplications, aligned_regions)):
         if al_region is None:
             outp.write('# !!! Region of interest within deletion (not shown).')
@@ -252,13 +252,14 @@ def main(prog_name=None, in_argv=None):
             common.open_possible_gzip(args.output, 'w') as outp, \
             common.open_possible_empty(args.out_csv, 'w') as outp_csv:
 
-        outp.write(
+        header = \
 '''CLUSTAL W
 ########################################
 # Program:  homologytools msa
-# Rundate:  %s
-# Command:  %s
-########################################\n''' % (datetime.now().strftime('%b %d %Y %H:%M:%S'), common.command_to_str()))
+# Rundate:  {}
+# Command:  {}
+########################################\n'''
+        outp.write(header.format(datetime.now().strftime('%b %d %Y %H:%M:%S'), common.command_to_str()))
 
         if outp_csv:
             outp_csv.write('# {}\n'.format(common.command_to_str()))

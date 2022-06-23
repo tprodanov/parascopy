@@ -433,7 +433,6 @@ def _save_component_wrapper(tup):
     try:
         return _save_component(*tup)
     except:
-        common.log('CATCH')
         fmt_exc = traceback.format_exc()
         common.log('ERROR:\n{}'.format(fmt_exc))
         return None

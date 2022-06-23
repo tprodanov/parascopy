@@ -430,3 +430,13 @@ def command_to_str(command=None, basename=True, quote=True, sep=' '):
         for i in range(len(command)):
             command[i] = shlex.quote(command[i])
     return sep.join(command)
+
+
+def letter_suffix(index, chars=string.ascii_lowercase):
+    """
+    Returns one or two letter suffix. a, b, c, ..., aa, ab, ...
+    """
+    n = len(chars)
+    if index < n:
+        return chars[index]
+    return chars[index // n - 1] + chars[index % n]
