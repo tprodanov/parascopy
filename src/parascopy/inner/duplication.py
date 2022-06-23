@@ -693,7 +693,6 @@ class Duplication:
         Canonizes insertions and deletions in the duplication.
         seq1 and seq2 must be present.
         """
-        common.log('Canonize  {}  {}  {}'.format(self._region1, self.strand_str, self._region2))
         self._full_cigar = Cigar.from_tuples(_move_everything_left(self._full_cigar, 0, self._seq1, 0, self._seq2))
 
 
@@ -832,20 +831,12 @@ def _glue_segments(cigar, aln_fun, seq1, seq2, shift1, shift2, a_end1, a_end2, b
 
 
 def _move_everything_left(cigar, start1, seq1, start2, seq2, from_full_cigar=True):
-    # common.log('Move everything left     start1 {}  start2 {}    full cigar? {}'.format(
-    #     start1, start2, from_full_cigar))
-    # cigarx = Cigar.from_tuples(cigar)
-    # aref, aread = cigarx.visualize(seq1, seq2)
-    # common.log('    {}'.format(cigarx.to_str()))
-    # common.log('    {}'.format(aref))
-    # common.log('    {}'.format(aread))
     pos1 = move_stop1 = shift1 = start1
     pos2 = shift2 = start2
     new_cigar = []
     match_op = Operation.SeqMatch if from_full_cigar else Operation.AlnMatch
 
     for length, op in cigar:
-        # common.log('        {} {}    pos1 {}   pos2 {}   move_stop {}'.format(length, op, pos1, pos2, move_stop1))
         if op.consumes_both():
             pos1 += length
             pos2 += length
@@ -877,12 +868,6 @@ def _move_everything_left(cigar, start1, seq1, start2, seq2, from_full_cigar=Tru
             new_start = variants_.move_left(var_start1, var_seq1, (var_seq2,), seq1, shift1,
                 min_start=move_stop1 + 1, skip_alleles=True)
 
-            # common.log('        Move variant from {} to {}'.format(var_start1, new_start))
-            # new_startx = variants_.move_left(var_start1, var_seq1, (var_seq2,), seq1, shift1,
-            #     min_start=start1, skip_alleles=True)
-            # if new_start != new_startx:
-            #     common.log('        Two possible ways to move the variant! To {} and to {}'.format(new_start, new_startx))
-
         if new_start is None:
             Cigar.append(new_cigar, length, op)
         else:
@@ -900,12 +885,6 @@ def _move_everything_left(cigar, start1, seq1, start2, seq2, from_full_cigar=Tru
         else:
             pos1 += length
         move_stop1 = pos1
-
-    # new_cigarx = Cigar.from_tuples(new_cigar)
-    # aref, aread = new_cigarx.visualize(seq1, seq2)
-    # common.log('    {}'.format(new_cigarx.to_str()))
-    # common.log('    {}'.format(aref))
-    # common.log('    {}'.format(aread))
     return new_cigar
 
 

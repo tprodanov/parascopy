@@ -144,8 +144,9 @@ Precomputed data
 
 You can use the following precomputed data:
 - Precomputed homology tables (v1.2):
-    [hg19 (25 Mb)](https://dl.dropboxusercontent.com/s/93cgf3zcf8pubql/homology_table_hg19.tar) and
-    [hg38 (40 Mb)](https://dl.dropboxusercontent.com/s/okzeedb6gze6zzs/homology_table_hg38.tar).
+    [hg19 (v1.2, 25 Mb)](https://dl.dropboxusercontent.com/s/93cgf3zcf8pubql/homology_table_hg19.tar),
+    [hg38 (v1.2, 40 Mb)](https://dl.dropboxusercontent.com/s/okzeedb6gze6zzs/homology_table_hg38.tar) and
+    [hg38 (v1.7, 41 Mb)](https://dl.dropboxusercontent.com/s/qzh49rg0ogrc9br/homology_table_hg38.tar.gz).
 - Precomputed model parameters for five continental populations (v1.2.5):
     [hg38 (11 Mb)](https://dl.dropboxusercontent.com/s/5fsohggje778dlb/models_v1.2.5.tar.gz).
     Model parameters were calculated using 2504 samples from the 1000 genomes project
