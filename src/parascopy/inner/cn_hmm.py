@@ -433,12 +433,11 @@ def _transform_jump_probs(down, up, min_prob, max_prob, max_state_dist):
     return res
 
 
-def _narrow_possible_states(prob_matrices, min_prev_prob=np.log(0.01), margin=1):
+def _narrow_possible_states(prob_matrices, min_prev_prob=np.log(0.001), margin=1):
     """
     Returns matrix (n_samples x 2), that stores range of possible states for each sample.
     """
     n_samples, n_hidden, _n_observations = prob_matrices.shape
-    assert n_hidden < 256
     assert min_prev_prob < 0
 
     res = np.zeros((n_samples, 2), dtype=np.uint16)
@@ -965,7 +964,8 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
     paths, sample_paths = _extract_paths(states_matrix, model, windows, model_params, group_name, window_boundaries)
     _summarize_paths(dupl_hierarchy, windows, paths, genome, samples, out.viterbi_summary)
 
-    model.run_forward_backward(possible_states=possible_states)
+    # NOTE: Should we use possible_states here?
+    model.run_forward_backward(possible_states=None)
     common.log('    Writing detailed copy number profiles')
     _write_detailed_cn(model, samples, windows, genome, out.detailed_cn)
 

@@ -264,7 +264,8 @@ def calculate_all_psv_gt_probs(region_group_extra, max_agcn, max_genotypes):
         for sample_const_region in region_group_extra.sample_const_regions[sample_id]:
             reg_start = sample_const_region.region1.start
             reg_end = sample_const_region.region1.end
-            if sample_const_region.pred_cn == 0 or sample_const_region.pred_cn > max_agcn:
+            if sample_const_region.pred_cn is None or sample_const_region.pred_cn == 0 \
+                    or sample_const_region.pred_cn > max_agcn:
                 continue
             psv_start_ix, psv_end_ix = psv_searcher.contained_ixs(reg_start, reg_end)
             if psv_start_ix >= psv_end_ix:

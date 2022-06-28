@@ -28,7 +28,7 @@ class ChromNames:
                 names = []
                 lengths = []
                 for entry in line.split(','):
-                    name, length = entry.split(':')
+                    name, length = entry.rsplit(':', 1)
                     names.append(name)
                     lengths.append(int(length))
                 return cls(names, lengths)

@@ -533,7 +533,7 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params, modi
     except Exception as exc:
         trace = traceback.format_exc().strip().split('\n')
         trace = '\n'.join(' ' * 11 + s for s in trace)
-        common.log('Error in analyzing region {}:\n{}'.format(region.full_name(data.genome), trace))
+        common.log('Error: region {}:\n{}'.format(region.full_name(data.genome), trace))
         exc_str = '{}: {}'.format(type(exc).__name__, exc)
         return region_ix, exc_str
     finally:

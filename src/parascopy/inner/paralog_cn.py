@@ -1207,8 +1207,6 @@ class ResultEntry:
         return self.sample_const_region.pred_cn
 
     def copy_num_to_str(self):
-        if self.pred_cn is None:
-            return (self.agcn_filter.to_str(False), '?', '*')
         return (self.agcn_filter.to_str(), self.sample_const_region.pred_cn_str,
             '{:.2f}'.format(self.sample_const_region.qual))
 

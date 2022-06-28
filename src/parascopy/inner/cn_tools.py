@@ -558,7 +558,7 @@ class DuplHierarchy:
                 out.write('    {}\n'.format(subregion.regions2_str(genome, use_comma=True, sep='\n    ')))
             out.write('    ====\n')
 
-            if min_windows > 1 and total_windows >= min_windows * 1.5 and windows_in_hmm == 0:
+            if min_windows >= 5 and total_windows > 2 * min_windows and windows_in_hmm == 0:
                 common.log(('WARN: [{}  {}] cannot use any windows for the agCN HMM (out of total {} windows).\n' +
                     '           If there are many messages like this, consider setting --window-filtering > 1')
                     .format(self.interval.name, region_group.name, total_windows))
@@ -707,8 +707,13 @@ class RegionGroupExtra:
             psv.info['rel'] = psv_type
 
             for sample_id, sample_info in enumerate(psv_info.sample_infos):
-                sample_cn = sample_info and sample_info.best_cn
-                if sample_cn is None or sample_info.psv_gt_probs[sample_cn] is None:
+                if sample_info is None or sample_info.best_cn is None:
+                    continue
+                sample_cn = sample_info.best_cn
+                if sample_cn not in sample_info.psv_gt_probs:
+                    common.log('ERROR: Sample #{}    agCN = {} is undefined for PSVs'.format(sample_id, sample_cn))
+                    continue
+                if sample_info.psv_gt_probs[sample_cn] is None:
                     continue
                 fmt = psv.samples[sample_id]
                 psv_gt_probs = sample_info.psv_gt_probs[sample_cn]

@@ -154,7 +154,7 @@ You can use the following precomputed data:
     Model parameters require the homology table
     [v1.2](https://dl.dropboxusercontent.com/s/okzeedb6gze6zzs/homology_table_hg38.tar).
 
-Compatible reference genomes can be dowloaded from
+Compatible reference genomes (without the ALT contigs) can be dowloaded from
 - [UCSC (hg19 and hg38)](https://hgdownload.soe.ucsc.edu/downloads.html#human),
 - [1000 genomes (hg38)](https://github.com/igsr/1000Genomes_data_indexes/blob/master/data_collections/1000_genomes_project/README.1000genomes.GRCh38DH.alignment).
 
