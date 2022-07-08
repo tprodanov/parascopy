@@ -127,7 +127,7 @@ class HmmModel:
             col_b = np.full(self._n_hidden, -np.inf)
 
             for state, emission in enumerate(self._emission_matrices[sample_id, :, obs_ix]):
-                if not np.isfinite(emission):
+                if np.isinf(emission):
                     continue
                 best_state = state
                 best_val = -np.inf
@@ -179,7 +179,7 @@ class HmmModel:
         prob += alpha[first_segment.state, first_segment.start_ix]
         last_segment = path[-1]
         prob += beta[last_segment.state, last_segment.end_ix - 1]
-        if not np.isfinite(prob):
+        if np.isinf(prob):
             return prob
 
         prev = None
@@ -210,7 +210,7 @@ class HmmModel:
         for obs_ix in range(1, self._n_observations):
             for state in range(a0, b0):
                 emission = emission_matrix[state, obs_ix]
-                if not np.isfinite(emission):
+                if np.isinf(emission):
                     continue
                 a, b = self.consecutive_state_range(state)
                 a = max(a, a0)
@@ -946,8 +946,8 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
 
         rel_improv = (prob - prev_prob) / np.abs(prev_prob) if np.isfinite(prev_prob) else 1
         improv = prob - prev_prob if np.isfinite(prev_prob) else 1
-        if not np.isfinite(prob):
-            common.log('Warning: HMM likelihood is infinite')
+        if np.isinf(prob):
+            common.log('WARN: HMM likelihood is infinite')
             rel_improv = -1
             improv = -1
         # Require different improvement based on the number of iterations.

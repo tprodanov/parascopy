@@ -86,7 +86,11 @@ def _extract_reads(in_bam, out_bam, read_groups, region, genome, out_header, rea
             continue
 
         curr_read_pos = read_positions[record.query_name]
-        assert curr_read_pos.add_realigned_pos(record.is_read2, record.reference_start)
+        if not curr_read_pos.add_primary_pos(record.is_read2, record.reference_start):
+            common.log('WARN: Read {} (read mate {}) has several primary alignments ({}:{} and more).'
+                .format(record.query_name, record.is_read2 + 1, record.reference_name, record.reference_start + 1) +
+                ' Skipping second alignment')
+            continue
         curr_read_pos.record_mate_pos(record, genome, max_mate_dist)
         new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.SameLoc, max_mate_dist)
         out_bam.write(new_rec)
@@ -99,6 +103,13 @@ class _ReadPositions:
         self.realigned_pos = ([], [])
         self.mate_written = [False, False]
         self.mate_position = None
+
+    def add_primary_pos(self, is_read2, pos):
+        positions = self.realigned_pos[is_read2]
+        if positions:
+            return False
+        positions.append(pos)
+        return True
 
     def add_realigned_pos(self, is_read2, new_pos):
         positions = self.realigned_pos[is_read2]
@@ -224,8 +235,8 @@ def pool(bam_wrappers, out_path, interval, duplications, genome, *,
 
             read_groups = bam_wrapper.read_groups()
             with bam_wrapper.open_bam_file(genome) as bam_file:
-                _extract_reads(bam_file, tmp_bam, read_groups, interval, genome, out_header,
-                    read_positions, max_mate_dist)
+                _extract_reads(bam_file, tmp_bam, read_groups, interval, genome, out_header, read_positions,
+                    max_mate_dist)
                 for dupl in duplications:
                     _extract_reads_and_realign(bam_file, tmp_bam, read_groups, dupl, genome,
                         out_header, weights, read_positions, max_mate_dist)

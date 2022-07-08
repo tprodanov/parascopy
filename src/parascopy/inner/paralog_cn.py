@@ -34,40 +34,50 @@ def _get_f_prior(f_values):
     return logsumexp(beta_cdfs, b=(1, -1))
 
 
-def _e_step(psv_infos, psv_f_values, all_genotype_priors):
+def _calculate_sample_pscn_probs(psv_gt_probs, psv_gt_coefs):
+    # psv_gt_probs: n_samples x n_genotypes
+    # psv_gt_coefs: n_pscns   x n_genotypes
+    # ext_matrix:   n_samples x n_pscns x n_genotypes
+    ext_matrix = psv_gt_probs[:, np.newaxis, :] + psv_gt_coefs[np.newaxis, :, :]
+    return logsumexp(ext_matrix, axis=2)
+
+
+def _e_step(psv_infos, psv_f_values, pscn_priors):
     """
     Returns
         - total ln likelihood,
         - list of lists of P(sample_genotype | allele_counts, psvs),
-            outer size = n_samples; inner size = len(all_genotype_priors[i]).
+            outer size = n_samples; inner size for sample_id is len(pscn_priors[sample_id]).
     """
     n_psvs = len(psv_infos)
-    prob_matrix = [None] * len(all_genotype_priors)
-    for sample_id, genotype_priors in enumerate(all_genotype_priors):
+    prob_matrix = [None] * len(pscn_priors)
+    for sample_id, genotype_priors in enumerate(pscn_priors):
         if genotype_priors is not None:
             prob_matrix[sample_id] = genotype_priors.copy()
 
-    total_f_prior = 0
+    total_lik = 0
     for psv_info in psv_infos:
         if not psv_info.in_em:
             continue
 
         exponent = psv_info.info_content
         f_values = psv_f_values[psv_info.psv_ix]
-        total_f_prior += _get_f_prior(f_values)
+        total_lik += _get_f_prior(f_values)
 
-        all_psv_gt_coefs = {}
-        for agcn in psv_info.em_agcns:
-            precomp_data = psv_info.precomp_datas[agcn]
-            f_pow_combs = precomp_data.f_power_combinations(f_values)
-            all_psv_gt_coefs[agcn] = precomp_data.eval_poly_matrices(f_pow_combs)
+        for i, agcn in enumerate(psv_info.em_agcns):
+            precomp_data = psv_info.em_precomp_datas[i]
+            # psv_gt_probs: n_samples x n_genotypes
+            psv_gt_probs = psv_info.em_psv_gt_probs[i]
+            # psv_gt_coefs: n_pscns   x n_genotypes
+            psv_gt_coefs = precomp_data.fval_to_gt_coefs(f_values)
+            # ext_matrix:   n_samples x n_pscns x n_genotypes
+            ext_matrix = psv_gt_probs[:, np.newaxis, :] + psv_gt_coefs[np.newaxis, :, :]
+            # sample_pscn_probs:  n_samples x n_pscns
+            sample_pscn_probs = exponent * logsumexp(ext_matrix, axis=2)
 
-        for sample_id in psv_info.em_sample_ids:
-            agcn, psv_gt_probs = psv_info.em_psv_gt_probs[sample_id]
-            for sample_pscn_ix, psv_gt_coefs in enumerate(all_psv_gt_coefs[agcn]):
-                prob_matrix[sample_id][sample_pscn_ix] += exponent * logsumexp(psv_gt_coefs + psv_gt_probs)
+            for sample_id, curr_sample_pscn_probs in zip(psv_info.em_sample_ids[i], sample_pscn_probs):
+                prob_matrix[sample_id] += curr_sample_pscn_probs
 
-    total_lik = total_f_prior
     for sample_row in prob_matrix:
         if sample_row is not None:
             s = logsumexp(sample_row)
@@ -76,27 +86,33 @@ def _e_step(psv_infos, psv_f_values, all_genotype_priors):
     return total_lik, prob_matrix
 
 
-def _minus_lik_fn(psv_info, sample_pscn_probs, sample_ids):
-    em_agcns = psv_info.em_agcns
+def _minus_lik_fn(psv_info, sample_pscn_probs):
     reg_pscn_probs = []
-    for sample_id in sample_ids:
-        reg_pscn_probs.append(np.exp(sample_pscn_probs[sample_id]))
+    for i, sample_ids in enumerate(psv_info.em_sample_ids):
+        n_samples = len(sample_ids)
+        n_pscns = psv_info.em_precomp_datas[i].n_poss_pscns
+        curr_pscn_probs = np.zeros((n_samples, n_pscns))
+        for j, sample_id in enumerate(sample_ids):
+            curr_pscn_probs[j] = np.exp(sample_pscn_probs[sample_id])
+        reg_pscn_probs.append(curr_pscn_probs)
+    n_agcns = len(psv_info.em_agcns)
 
     def fn(f_values):
         min_lik = -_get_f_prior(f_values)
-        if np.isinf(min_lik):
-            return min_lik
+        assert np.isfinite(min_lik)
 
-        all_psv_gt_coefs = {}
-        for agcn in em_agcns:
-            precomp_data = psv_info.precomp_datas[agcn]
-            f_pow_combs = precomp_data.f_power_combinations(f_values)
-            all_psv_gt_coefs[agcn] = precomp_data.eval_poly_matrices(f_pow_combs)
+        for i in range(n_agcns):
+            precomp_data = psv_info.em_precomp_datas[i]
 
-        for sample_id, curr_reg_pscn_probs in zip(sample_ids, reg_pscn_probs):
-            agcn, psv_gt_probs = psv_info.em_psv_gt_probs[sample_id]
-            for sample_pscn_ix, psv_gt_coefs in enumerate(all_psv_gt_coefs[agcn]):
-                min_lik -= logsumexp(psv_gt_coefs + psv_gt_probs) * curr_reg_pscn_probs[sample_pscn_ix]
+            # psv_gt_probs: n_samples x n_genotypes
+            psv_gt_probs = psv_info.em_psv_gt_probs[i]
+            # psv_gt_coefs: n_pscns   x n_genotypes
+            psv_gt_coefs = precomp_data.fval_to_gt_coefs(f_values)
+            # ext_matrix:   n_samples x n_pscns x n_genotypes
+            ext_matrix = psv_gt_probs[:, np.newaxis, :] + psv_gt_coefs[np.newaxis, :, :]
+            # sample_pscn_probs:  n_samples x n_pscns
+            sample_pscn_probs = logsumexp(ext_matrix, axis=2)
+            min_lik -= np.sum(sample_pscn_probs * reg_pscn_probs[i])
         return min_lik
     return fn
 
@@ -115,21 +131,19 @@ def _m_step(sample_pscn_probs, psv_infos, psv_ixs, prev_psv_f_values):
     OPTS = dict(maxiter=50)
     METHOD = 'L-BFGS-B'
     # If the number of samples is small -- cannot estimate f-values very close to 0 or 1.
-    min_bound = np.clip(1 / n_samples, 1e-6, 1 / 10)
+    min_bound = np.clip(1 / n_samples, 1e-6, 0.03)
     bounds = ((min_bound, 1 - min_bound),) * n_copies
 
     total_lik = 0
     for psv_ix in psv_ixs:
         psv_info = psv_infos[psv_ix]
-        sample_ids = psv_info.em_sample_ids
-        assert len(sample_ids) > 0
-
         prev_f_values = prev_psv_f_values[psv_ix]
-        minus_lik = _minus_lik_fn(psv_info, sample_pscn_probs, sample_ids)
-        sol = optimize.minimize(minus_lik, x0=prev_f_values, bounds=bounds, options=OPTS, method=METHOD)
 
+        minus_lik = _minus_lik_fn(psv_info, sample_pscn_probs)
+        sol = optimize.minimize(minus_lik, x0=prev_f_values, bounds=bounds, options=OPTS, method=METHOD)
         total_lik -= sol.fun
         psv_f_values[psv_ix] = sol.x
+
     return psv_f_values, total_lik
 
 
@@ -226,10 +240,10 @@ def _select_psv_sample_pairs(region_group_extra, samples, out, min_samples, samp
             info_str += '\t{}{}'.format('+' if good_obs else '-', '+' if is_ref else '-')
             use_samples[sample_id] = good_obs and is_ref
 
-        psv_info.set_use_samples(use_samples)
-        psv_info.in_em = psv_info.n_used_samples >= min_samples
+        psv_info.em_prepare(use_samples, sample_ref_agcns)
+        psv_info.in_em = psv_info.total_used_samples >= min_samples
         out.write('{}\t{}:{}\t{}{}\n'.format(group_name, psv_info.chrom, psv_info.start + 1,
-            psv_info.n_used_samples, info_str))
+            psv_info.total_used_samples, info_str))
 
 
 class SamplePsvInfo:
@@ -252,20 +266,50 @@ class _PsvInfo:
 
         self.info_content = np.nan
         self.in_em = False
+        # Tuple of integers. Denote number of agCN values as N.
+        self.em_agcns = None
+        # Tuple of sample indices lists (length: N).
         self.em_sample_ids = None
-        self.n_used_samples = 0
+        self.total_used_samples = None
+        # One precomputed data for each agCN value (length: N).
+        self.em_precomp_datas = None
+        # N matrices (samples x genotypes), em_psv_gt_probs[i].shape[0] == len(em_sample_ids[i]).
+        self.em_psv_gt_probs = None
 
+        # All precomputed datas (not only used in the EM).
         # keys: agCN values.
         self.precomp_datas = {}
-        # (sample agCN, psv GT probs) for each sample.
-        self.em_psv_gt_probs = None
-        # Tuple with possible agCN values during the EM-step.
-        self.em_agcns = None
         self.sample_infos = [None] * n_samples
 
-    def set_use_samples(self, use_samples):
-        self.em_sample_ids = np.where(use_samples)[0]
-        self.n_used_samples = len(self.em_sample_ids)
+    def em_prepare(self, use_samples, agcn_values):
+        self.total_used_samples = np.sum(use_samples)
+        if self.total_used_samples == 0:
+            return
+
+        self.em_agcns = tuple(sorted(set(itertools.compress(agcn_values, use_samples))))
+        self.em_sample_ids = []
+        self.em_precomp_datas = []
+        self.em_psv_gt_probs = []
+        for agcn in self.em_agcns:
+            # Cannot use np.where because agcn_values is not a numpy array and may contain Nones.
+            curr_sample_ids = [sample_id for sample_id, sample_agcn in enumerate(agcn_values)
+                if use_samples[sample_id] and sample_agcn == agcn]
+            curr_n_samples = len(curr_sample_ids)
+            assert curr_n_samples
+            self.em_sample_ids.append(curr_sample_ids)
+
+            precomp_data = self.precomp_datas[agcn]
+            self.em_precomp_datas.append(precomp_data)
+            n_psv_genotypes = precomp_data.n_psv_genotypes
+
+            psv_gt_probs = np.zeros((curr_n_samples, n_psv_genotypes))
+            for i, sample_id in enumerate(curr_sample_ids):
+                psv_gt_probs[i] = self.sample_infos[sample_id].psv_gt_probs[agcn]
+            self.em_psv_gt_probs.append(psv_gt_probs)
+
+        self.em_sample_ids = tuple(self.em_sample_ids)
+        self.em_precomp_datas = tuple(self.em_precomp_datas)
+        self.em_psv_gt_probs = tuple(self.em_psv_gt_probs)
 
     def distance(self, other):
         if other.psv_ix < self.psv_ix:
@@ -304,51 +348,35 @@ class _PsvInfo:
         if len(set(after_psv)) == 1:
             self.in_em = False
 
-    def create_em_psv_gt_probs(self, sample_ref_agcns):
-        if not self.n_used_samples:
-            return
-        em_agcns = set()
-        self.em_psv_gt_probs = [(None, None)] * len(sample_ref_agcns)
-        for sample_id in self.em_sample_ids:
-            agcn = sample_ref_agcns[sample_id]
-            em_agcns.add(agcn)
-            sample_info = self.sample_infos[sample_id]
-            self.em_psv_gt_probs[sample_id] = (agcn, sample_info.psv_gt_probs[agcn])
-        self.em_agcns = tuple(em_agcns)
-
 
 def _calculate_psv_info_content(group_name, psv_infos, min_samples, out):
     out.write('Region group {}\n'.format(group_name))
     for psv_info in psv_infos:
-        if not psv_info.n_used_samples:
+        if not psv_info.total_used_samples:
             out.write('{}   no applicable samples, skipping.\n'.format(psv_info))
             continue
 
         # Cache of genotype multipliers based on the aggregate CN.
         n_alleles_m1 = psv_info.n_alleles - 1
         rn_alleles_m1 = 1 / n_alleles_m1
-        gt_mult_dict = {}
-        for agcn in psv_info.em_agcns:
-            psv_genotypes = psv_info.precomp_datas[agcn].psv_genotypes
-            gt_mult = np.fromiter((n_alleles_m1 - gt.count(0) for gt in psv_genotypes),
-                np.float64, len(psv_genotypes)) \
-                * rn_alleles_m1
-            gt_mult_dict[agcn] = gt_mult
         threshold = 0.8 * rn_alleles_m1
 
         sum_info_content = 0.0
         inform_samples = 0
-        for agcn, psv_gt_probs in psv_info.em_psv_gt_probs:
-            if agcn is None:
-                continue
-            curr_info_content = np.sum(np.exp(psv_gt_probs) * gt_mult_dict[agcn])
-            sum_info_content += curr_info_content
-            if curr_info_content >= threshold:
-                inform_samples += 1
+        for i, agcn in enumerate(psv_info.em_agcns):
+            psv_genotypes = psv_info.em_precomp_datas[i].psv_genotypes
+            gt_mults = rn_alleles_m1 * \
+                np.fromiter((n_alleles_m1 - gt.count(0) for gt in psv_genotypes),np.float64, len(psv_genotypes))
 
-        psv_info.info_content = sum_info_content / psv_info.n_used_samples
+            for psv_gt_probs in psv_info.em_psv_gt_probs[i]:
+                curr_info_content = np.sum(np.exp(psv_gt_probs) * gt_mults)
+                sum_info_content += curr_info_content
+                if curr_info_content >= threshold:
+                    inform_samples += 1
+
+        psv_info.info_content = sum_info_content / psv_info.total_used_samples
         out.write('{}   informative: {}/{} samples. Information content: {:.4f}\n'.format(
-            psv_info, inform_samples, psv_info.n_used_samples, psv_info.info_content))
+            psv_info, inform_samples, psv_info.total_used_samples, psv_info.info_content))
         if psv_info.info_content < 1e-6:
             psv_info.in_em = False
 
@@ -390,8 +418,7 @@ def _define_sample_pscn_priors(n_copies, ref_agcns, ref_pscns):
         Second list = sample sample psCN priors for each sample.
     """
     # Sample priors are distributed by distance to the reference paralog-specific copy numbers.
-    # Distance will be always divisible by two.
-    # psCN (4, 0) will have prior 1e-6 compared to reference psCN (2, 2).
+    # psCN (4, 0) has distance 4 from psCN (2, 2), therefore will have prior 1e-6.
     DIST_MULT = -1.5 * common.LOG10
     cache = {}
     all_poss_pscns = []
@@ -425,9 +452,11 @@ def _cluster_psvs(psv_infos, psv_counts, n_samples):
 
     ref_fractions = np.full((n_psvs, n_samples), np.nan)
     for psv_info in psv_infos:
+        if not psv_info.total_used_samples:
+            continue
         allele_corresp = psv_info.allele_corresp
         mult = len(allele_corresp) / allele_corresp.count(0)
-        for sample_id in psv_info.em_sample_ids:
+        for sample_id in itertools.chain(*psv_info.em_sample_ids):
             allele_counts = psv_counts[psv_info.psv_ix][sample_id].allele_counts
             ref_fractions[psv_info.psv_ix, sample_id] = allele_counts[0] / sum(allele_counts) * mult
 
@@ -525,7 +554,7 @@ def create_psv_infos(psvs, region_group, n_samples, genome):
     return [_PsvInfo(psv_ix, psv, region_group, n_samples, genome) for psv_ix, psv in enumerate(psvs)]
 
 
-def _get_ref_pscns(samples, region_group, const_regions, modified_ref_cns, max_agcn):
+def _get_ref_pscns(samples, genome, region_group, const_regions, modified_ref_cns, max_agcn):
     """
     Looks up modified reference CNs and returns two lists
        - reference agCNs for all samples,
@@ -552,41 +581,20 @@ def _get_ref_pscns(samples, region_group, const_regions, modified_ref_cns, max_a
         for region2, _ in const_region.regions2:
             regions.append(region2)
 
-        for sample_id in range(n_samples):
+        for sample_id, sample in enumerate(samples):
             if ref_pscns[sample_id] is None:
                 continue
 
-            tree = modified_ref_cns[sample_id]
-            if tree is None:
-                pscn = def_pscn
-            else:
-                pscn = []
-                err = False
-                for region in regions:
-                    cn_regions = list(tree.overlap_iter(region))
-                    if len(cn_regions) == 0:
-                        pscn.append(2)
-                    elif len(cn_regions) > 1:
-                        common.log('ERROR: Modified reference CNs contain several entries for sample {} and group {}'
-                            .format(samples[sample_id], region_group.name))
-                        pscn = None
-                        break
-                    elif not cn_regions[0][0].contains(region):
-                        common.log('ERROR: Modified reference CNs do not match for sample {} and group {}'
-                            .format(samples[sample_id], region_group.name))
-                        pscn = None
-                        break
-                    else:
-                        pscn.append(cn_regions[0][1])
-                if pscn is None:
-                    ref_agcns[sample_id] = ref_pscns[sample_id] = None
-                    continue
-                pscn = tuple(pscn)
+            pscn, _ = modified_ref_cns.from_regions(regions, sample_id, sample, genome)
+            if pscn is None:
+                ref_agcns[sample_id] = ref_pscns[sample_id] = None
+                continue
 
             if i > 0:
                 if ref_pscns[sample_id] != pscn:
-                    common.log('ERROR: Modified reference CNs do not match for sample {} and group {}'
-                        .format(samples[sample_id], region_group.name))
+                    common.log(
+                        'ERROR: Input BED file {} contains non-matching entries for sample {} and region group {}'
+                            .format(modified_ref_cns.filename, samples[sample_id], region_group.name))
                     ref_agcns[sample_id] = ref_pscns[sample_id] = None
                 continue
 
@@ -613,7 +621,7 @@ def find_reliable_psvs(region_group_extra, samples, genome, modified_ref_cns, ou
         return
 
     # ===== Selecting a set of PSVs used in the EM algorithm =====
-    ref_agcns, ref_pscns = _get_ref_pscns(samples, region_group, const_regions, modified_ref_cns, max_agcn)
+    ref_agcns, ref_pscns = _get_ref_pscns(samples, genome, region_group, const_regions, modified_ref_cns, max_agcn)
     if not any(ref_agcns):
         return
     _select_psv_sample_pairs(region_group_extra, samples, out.use_psv_sample, min_samples, ref_agcns, ref_pscns)
@@ -622,7 +630,6 @@ def find_reliable_psvs(region_group_extra, samples, genome, modified_ref_cns, ou
     region_sequence = region_group.region1.get_sequence(genome)
     for psv_info in psv_infos:
         psv_info.check_complicated_pos(region_group.region1, region_sequence)
-        psv_info.create_em_psv_gt_probs(ref_agcns)
     if not any(psv_info.in_em for psv_info in psv_infos):
         return
 
@@ -633,7 +640,7 @@ def find_reliable_psvs(region_group_extra, samples, genome, modified_ref_cns, ou
     if not len(em_psv_ixs):
         return
 
-    common.log('    Searching for reliable PSVs')
+    common.log('    Searching for reliable PSVs (out of total {} PSVs)'.format(len(em_psv_ixs)))
     # ===== EM iterations, try several clusters =====
     poss_pscns_str, poss_pscn_priors = _define_sample_pscn_priors(n_copies, ref_agcns, ref_pscns)
     best_cluster = None
@@ -690,13 +697,13 @@ def find_reliable_psvs(region_group_extra, samples, genome, modified_ref_cns, ou
         common.log('WARN: Many reliable PSVs have low information content.')
 
     discarded_psvs = np.array([psv_info.psv_ix for psv_info in psv_infos
-        if not psv_info.in_em and psv_info.n_used_samples > 0])
+        if not psv_info.in_em and psv_info.total_used_samples > 0])
     if len(discarded_psvs):
         oth_f_values, _ = _m_step(poss_pscn_probs, psv_infos, discarded_psvs, np.full((n_psvs, n_copies), 0.5))
         psv_f_values[discarded_psvs, :] = oth_f_values[discarded_psvs, :]
     for psv_info in psv_infos:
         out.psv_f_values.write('{}\t{}:{}\t{}\t{}\t{:.6f}\t{}\n'.format(group_name, psv_info.chrom,
-            psv_info.start + 1, psv_info.n_used_samples, 'T' if psv_info.in_em else 'F', psv_info.info_content,
+            psv_info.start + 1, psv_info.total_used_samples, 'T' if psv_info.in_em else 'F', psv_info.info_content,
             '\t'.join(map('{:.6f}'.format, psv_f_values[psv_info.psv_ix]))))
     region_group_extra.set_f_values(psv_f_values)
 
@@ -725,8 +732,7 @@ def _single_sample_e_step(sample_id, agcn, psv_infos, psv_weights=None):
     precomp_data = psv_infos[0].precomp_datas.get(agcn)
     if precomp_data is None:
         return None, None
-    poss_pscns = precomp_data.poss_pscns
-    gt_probs = np.zeros(len(poss_pscns))
+    gt_probs = np.zeros(precomp_data.n_poss_pscns)
 
     if psv_weights is None:
         psv_weights = itertools.repeat(1.0)
@@ -735,7 +741,7 @@ def _single_sample_e_step(sample_id, agcn, psv_infos, psv_weights=None):
         if support_row is None:
             return None, None
         gt_probs += support_row * psv_weight
-    return poss_pscns, gt_probs
+    return precomp_data.poss_pscns, gt_probs
 
 
 def _identify_best_agcn(sample_id, probable_cns, remaining_prob, psv_infos):
@@ -1422,6 +1428,10 @@ class CopyNumProfiles:
                 self._searchers.append(itree.NonOverlTree(curr_sample_entries, itree.region1_start, itree.region1_end))
 
     @property
+    def search_chrom_id(self):
+        return self._search_chrom_id
+
+    @property
     def n_samples(self):
         return len(self._cn_profiles)
 
@@ -1429,9 +1439,8 @@ class CopyNumProfiles:
         return self._cn_profiles[sample_id]
 
     def cn_estimates(self, sample_id, region):
-        if region.chrom_id != self._search_chrom_id:
-            return ()
-        return self._searchers[sample_id].overlap_iter(region.start, region.end)
+        assert region.chrom_id == self._search_chrom_id
+        return tuple(self._searchers[sample_id].overlap_iter(region.start, region.end))
 
 
 class ParalogEntry:

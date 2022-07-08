@@ -66,7 +66,7 @@ def compare_contigs(bam_wrappers, genome):
 
     PRINT_MAX = 5
     if missing_contigs or extra_contigs:
-        common.log('WARNING: Reference genome does not match BAM/CRAM files completely.')
+        common.log('WARN: Reference genome does not match BAM/CRAM files completely.')
     if missing_contigs:
         common.log('{} / {} alignment files have missing contigs.'.format(np.sum(missing_n_contigs > 0), n))
         common.log('On average, {:.3f} contigs are missing per file. In total, {} contigs are missing.'

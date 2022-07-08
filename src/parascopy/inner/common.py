@@ -188,6 +188,9 @@ def get_regions_explicit(regions, regions_file, genome, only_unique=True):
                     continue
 
                 line = line.strip().split('\t')
+                if not genome.has_chrom(line[0]):
+                    log('WARN: Unknown chromosome {}'.format(line[0]))
+                    continue
                 chrom_id = genome.chrom_id(line[0])
                 start = int(line[1])
                 end = int(line[2])
@@ -402,7 +405,7 @@ def checked_fetch_coord(fetch_file, chrom, start, end):
     try:
         return fetch_file.fetch(chrom, start, end)
     except ValueError as e:
-        common.log('ERROR: Cannot fetch {}:{}-{} from {} (possibly missing chromosome).'
+        log('ERROR: Cannot fetch {}:{}-{} from {} (possibly missing chromosome).'
             .format(chrom, start + 1, end, fetch_file.filename.decode()))
         return iter(())
 

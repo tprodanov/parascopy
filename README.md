@@ -158,6 +158,10 @@ Compatible reference genomes (without the ALT contigs) can be dowloaded from
 - [UCSC (hg19 and hg38)](https://hgdownload.soe.ucsc.edu/downloads.html#human),
 - [1000 genomes (hg38)](https://github.com/igsr/1000Genomes_data_indexes/blob/master/data_collections/1000_genomes_project/README.1000genomes.GRCh38DH.alignment).
 
+Note that if the BAM/CRAM files contain ALT contigs, you should provide modified reference copy number values
+using `--modify-ref` argument, where all ALT contigs have the reference copy number 0.
+Additionally, you should use homology table constructed on a reference file with ALT contigs.
+
 Test dataset
 ------------
 

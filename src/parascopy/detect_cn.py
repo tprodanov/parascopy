@@ -726,7 +726,7 @@ class DataStructures:
         return res
 
 
-def _write_command(filename):
+def write_command(filename):
     """
     Rewrite file with commands, leaving only the last of each entries. Add new command to the end.
     """
@@ -780,46 +780,90 @@ def filter_regions(regions, loaded_models, regions_subset):
     return regions, loaded_models
 
 
-def _get_modified_ref_cn(filename, genome, samples):
-    from .inner import itree
-    n_samples = len(samples)
-    if filename is None:
-        return None
+class InCopyNums:
+    def __init__(self, filename, genome, samples):
+        from .inner import itree
+        self._filename = filename
 
-    sample_regions = [[] for _ in range(n_samples)]
-    with common.open_possible_gzip(filename) as inp:
-        for line in inp:
-            if line.startswith('#'):
-                continue
-            chrom, start, end, sample_list, cn = line.strip().split()[:5]
-            chrom_id = genome.chrom_id(chrom)
-            if end == 'inf':
-                end = genome.chrom_len(chrom_id)
+        n_samples = len(samples)
+        sample_regions = [[] for _ in range(n_samples)]
+        with common.open_possible_gzip(filename) as inp:
+            for line in inp:
+                if line.startswith('#'):
+                    continue
+                chrom, start, end, sample_list, cn = line.strip().split()[:5]
+                chrom_id = genome.chrom_id(chrom)
+                if end == 'inf':
+                    end = genome.chrom_len(chrom_id)
+                else:
+                    end = int(end)
+                pair = (Interval(chrom_id, int(start), end), int(cn))
+
+                if sample_list == '*':
+                    sample_ids = range(n_samples)
+                else:
+                    sample_ids = []
+                    for sample in sample_list.split(','):
+                        if sample in samples:
+                            sample_ids.append(samples.id(sample))
+                        else:
+                            common.log('ERROR: Unknown sample {} in file "{}"'.format(sample, filename))
+                for sample_id in sample_ids:
+                    sample_regions[sample_id].append(pair)
+
+        self._trees = []
+        region_getter = operator.itemgetter(0)
+        for regions in sample_regions:
+            if not regions:
+                self._trees.append(None)
             else:
-                end = int(end)
-            pair = (Interval(chrom_id, int(start), end), int(cn))
+                regions.sort()
+                self._trees.append(itree.MultiNonOverlTree(regions, region_getter))
 
-            if sample_list == '*':
-                sample_ids = range(n_samples)
+    @property
+    def filename(self):
+        return self._filename
+
+    def from_region(self, sample_id, region):
+        tree = self._trees[sample_id]
+        if tree is None:
+            return ()
+        return tuple(tree.overlap_iter(region))
+
+    def from_regions(self, regions, sample_id, sample=None, genome=None, ploidy=2):
+        """
+        Returns pair:
+            - tuple of copy numbers for each region (use ploidy when unknown).
+            - total number of unknown copy numbers (where ploidy was used).
+        """
+        tree = self._trees[sample_id]
+        n_regions = len(regions)
+        if tree is None:
+            pscn = (ploidy,) * n_regions
+            return pscn, n_regions
+
+        pscn = []
+        n_unknown = 0
+        for region in regions:
+            cn_regions = tuple(tree.overlap_iter(region))
+            if len(cn_regions) == 0:
+                pscn.append(ploidy)
+                n_unknown += 1
+            elif len(cn_regions) > 1:
+                common.log('ERROR: Input BED file {} contains several entries for sample {} and region {}'.format(
+                    self._filename,
+                    sample if sample else '#{}'.format(sample_id),
+                    region.to_str(genome) if genome else region))
+                return None, n_regions
+            elif not cn_regions[0][0].contains(region):
+                common.log('ERROR: Input BED file {} contains non-matching entries for sample {} and region {}'.format(
+                    self._filename,
+                    sample if sample else '#{}'.format(sample_id),
+                    region.to_str(genome) if genome else region))
+                return None, n_regions
             else:
-                sample_ids = []
-                for sample in sample_list.split(','):
-                    if sample in samples:
-                        sample_ids.append(samples.id(sample))
-                    else:
-                        common.log('ERROR: Unknown sample {} in file "{}"'.format(sample, filename))
-            for sample_id in sample_ids:
-                sample_regions[sample_id].append(pair)
-
-    trees = []
-    region_getter = operator.itemgetter(0)
-    for regions in sample_regions:
-        if not regions:
-            trees.append(None)
-        else:
-            regions.sort()
-            trees.append(itree.MultiNonOverlTree(regions, region_getter))
-    return trees
+                pscn.append(cn_regions[0][1])
+        return tuple(pscn), n_unknown
 
 
 def parse_args(prog_name, in_argv, is_new):
@@ -992,7 +1036,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
     directory = args.output
     common.log('Using output directory "{}"'.format(directory))
     common.mkdir(directory)
-    _write_command(os.path.join(directory, 'command.txt'))
+    write_command(os.path.join(directory, 'command.txt'))
 
     regions, loaded_models = get_regions(args, genome, load_models=not args.is_new)
     if loaded_models:
@@ -1003,7 +1047,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
     bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome)
     data.set_bam_wrappers(bam_wrappers)
     depth_.check_duplicated_samples(bam_wrappers)
-    modified_ref_cns = _get_modified_ref_cn(args.modify_ref, genome, samples)
+    modified_ref_cns = None if args.modify_ref is None else InCopyNums(args.modify_ref, genome, samples)
 
     if loaded_models:
         bg_depth = depth_.Depth.from_filenames(args.depth, samples)

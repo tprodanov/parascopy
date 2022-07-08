@@ -158,7 +158,7 @@ class Genome(ChromNames):
 
         PRINT_MAX = 5
         if set1 != set2:
-            common.log('WARNING: Files "{}" and "{}" have different sets of contigs. This may raise errors later!'
+            common.log('WARN: Files "{}" and "{}" have different sets of contigs. This may raise errors later!'
                 .format(self.filename, filename2))
             extra1 = sorted(set1 - set2)
             if len(extra1) > PRINT_MAX:
@@ -179,7 +179,7 @@ class Genome(ChromNames):
             len1 = self.chrom_len(self.chrom_id(name))
             len2 = genome2.chrom_len(genome2.chrom_id(name))
             if len1 != len2:
-                common.log('WARNING: Files "{}" and "{}" have different contig lengths:'
+                common.log('WARN: Files "{}" and "{}" have different contig lengths:'
                     .format(self.filename, filename2))
                 common.log('For example contig "{}" has lengths {:,} and {:,}'.format(name, len1, len2))
                 common.log('')
