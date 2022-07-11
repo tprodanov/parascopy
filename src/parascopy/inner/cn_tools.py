@@ -685,8 +685,6 @@ class RegionGroupExtra:
         self._psv_f_values = model_params.load_psv_f_values(self._psv_infos, copy_num)
         if self._psv_f_values is None:
             return
-        for psv_info in self._psv_infos:
-            psv_info.set_use_samples(np.zeros(n_samples, dtype=np.bool))
 
     def update_psv_records(self, reliable_thresholds):
         from . import paralog_cn
