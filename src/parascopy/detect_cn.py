@@ -1024,6 +1024,20 @@ def parse_args(prog_name, in_argv, is_new):
     return args
 
 
+def _check_number_of_samples(n, min_samples):
+    if n < min_samples:
+        s = ('\nWARN: Too few input samples ({} < {}):\n'.format(n, min_samples) +
+            '    * Paralog-specific copy number will not be estimated,\n'
+            '    * Aggregate copy number will be partially estimated.\n'
+            'Consider:\n'
+            '    * using more samples,\n'
+            '    * setting --min-samples,\n'
+            '    * using existing model parameters (parascopy cn-using).\n')
+        common.log(s)
+    elif n < 30:
+        common.log('WARN: Few input samples ({}), results may be unstable.'.format(n))
+
+
 def main(prog_name=None, in_argv=None, is_new=None):
     args = parse_args(prog_name, in_argv, is_new)
     np.set_printoptions(precision=6, linewidth=sys.maxsize, suppress=True, threshold=sys.maxsize)
@@ -1045,6 +1059,9 @@ def main(prog_name=None, in_argv=None, is_new=None):
     regions, loaded_models = filter_regions(regions, loaded_models, args.regions_subset)
 
     bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome)
+    if args.is_new:
+        _check_number_of_samples(len(bam_wrappers), args.min_samples)
+
     data.set_bam_wrappers(bam_wrappers)
     depth_.check_duplicated_samples(bam_wrappers)
     modified_ref_cns = None if args.modify_ref is None else InCopyNums(args.modify_ref, genome, samples)

@@ -47,7 +47,7 @@ def _create_record(orig_record, header, read_groups, status, max_mate_dist,
     else:
         record.is_unmapped = True
 
-    read_group = orig_record.get_tag('RG') if orig_record.has_tag('RG') else _UNDEF
+    read_group = orig_record.get_tag('RG') if orig_record.has_tag('RG') else None
     new_read_group = read_groups[read_group][0]
     record.set_tag('RG', new_read_group)
 
