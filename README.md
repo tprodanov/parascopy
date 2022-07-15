@@ -143,16 +143,16 @@ Precomputed data
 ----------------
 
 You can use the following precomputed data:
-- Precomputed homology tables (v1.2):
-    [hg19 (v1.2, 25 Mb)](https://dl.dropboxusercontent.com/s/93cgf3zcf8pubql/homology_table_hg19.tar),
-    [hg38 (v1.2, 40 Mb)](https://dl.dropboxusercontent.com/s/okzeedb6gze6zzs/homology_table_hg38.tar) and
+- Precomputed homology tables:
+    [hg19 (v1.2, 25 Mb)](https://dl.dropboxusercontent.com/s/93cgf3zcf8pubql/homology_table_hg19.tar) and
     [hg38 (v1.7, 41 Mb)](https://dl.dropboxusercontent.com/s/qzh49rg0ogrc9br/homology_table_hg38.tar.gz).
-- Precomputed model parameters for five continental populations (v1.2.5):
-    [hg38 (11 Mb)](https://dl.dropboxusercontent.com/s/5fsohggje778dlb/models_v1.2.5.tar.gz).
+- Precomputed model parameters for five continental populations:
+    [hg38 (v1.7, 11 Mb)](https://dl.dropboxusercontent.com/s/oxuorudqwblvus8/models_v1.7.tar.gz).
     Model parameters were calculated using 2504 samples from the 1000 genomes project
     (661 AFR, 503 EUR, 504 EAS, 489 SAS, 347 AMR samples).
-    Model parameters require the homology table
-    [v1.2](https://dl.dropboxusercontent.com/s/okzeedb6gze6zzs/homology_table_hg38.tar).
+- Legacy files (hg38) can be downloaded here:
+    [homology table v1.2 (40 Mb)](https://dl.dropboxusercontent.com/s/okzeedb6gze6zzs/homology_table_hg38.tar) and
+    [model parameters v1.2 (11 Mb)](https://dl.dropboxusercontent.com/s/5fsohggje778dlb/models_v1.2.5.tar.gz).
 
 Compatible reference genomes (without the ALT contigs) can be dowloaded from
 - [UCSC (hg19 and hg38)](https://hgdownload.soe.ucsc.edu/downloads.html#human),
