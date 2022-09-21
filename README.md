@@ -49,7 +49,7 @@ conda activate paras_env
 
 Alternatively, you can install it manually using the following commands:
 ```bash
-git clone https://github.com/tprodanov/parascopy.git
+git clone --recursive https://github.com/tprodanov/parascopy.git
 cd parascopy
 python3 setup.py install
 ```
@@ -67,8 +67,23 @@ In case of manual installation, Parascopy requires
 * [bgzip ≥ 1.11](http://www.htslib.org/doc/bgzip.html),
 * [bwa ≥ 0.7](https://github.com/lh3/bwa).
 
+In order to run variant calling (`parascopy call`), Parascopy requires a modified Freebayes executable.
+It is installed automatically via conda, but for manual installation you need to run
+```bash
+cd freebayes
+meson build/ --buildtype release
+cd build
+ninja
+cd ../../
+```
+
 General usage
 -------------
+
+See `parascopy help` or `parascopy <command> --help` for more information.
+Additionally, you can find a test dataset and pipeline [here](#test-dataset).
+
+### Homology table
 
 Parascopy uses a database of duplications - *homology table*.
 To construct a homology table you would need to run:
@@ -79,19 +94,27 @@ parascopy table -i pretable.bed.gz -f genome.fa -o table.bed.gz
 Note, that the reference genome should be indexed with both `samtools faidx` and `bwa index`.
 Alternatively, you can download a [precomputed homology table](#precomputed-data).
 
+### Estimating copy number
+
 In order to find aggregate and paralog-specific copy number profiles (*agCN* and *psCN*), you can run the following commands:
 ```bash
 # Calculate background read depth.
 parascopy depth -I input.list -g hg38 -f genome.fa -o depth
 # Estimate agCN and psCN for multiple samples.
-parascopy cn -I input.list -t table.bed.gz -f genome.fa -R regions.bed -d depth -o out1
+parascopy cn -I input.list -t table.bed.gz -f genome.fa -R regions.bed -d depth -o analysis1
 # Estimate agCN and psCN for single/multiple samples using model parameters from a previous run.
 parascopy depth -I input2.list -g hg38 -f genome.fa -o depth2
-parascopy cn-using out1/model -I input2.list -t table.bed.gz -f genome.fa -d depth2 -o out2
+parascopy cn-using analysis1/model -I input2.list -t table.bed.gz -f genome.fa -d depth2 -o analysis2
 ```
 
-See `parascopy help` or `parascopy <command> --help` for more information.
-Additionally, you can find a test dataset [here](#test-dataset).
+### Calling variants
+
+Parascopy variant calling in duplicated regions is available since version `v1.9`.
+Currently, variant calling is performed on top of an existing copy number analysis.
+To run variant calling you can execute the following command:
+```bash
+parascopy call -p analysis1 -f genome.fa -t table.bed.gz
+```
 
 ### Input files
 

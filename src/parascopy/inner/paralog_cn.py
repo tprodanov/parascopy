@@ -905,8 +905,8 @@ def _create_sample_results_from_agcn(sample_id, region_group_extra):
 
         reg_start = sample_const_region.region1.start
         reg_end = sample_const_region.region1.end
-        entry.info['n_windows'] = region_group_extra.group_windows_searcher.overlap_size(reg_start, reg_end)
-        entry.info['hmm_windows'] = region_group_extra.hmm_windows_searcher.overlap_size(reg_start, reg_end)
+        entry.info['n_windows'] = region_group_extra.group_windows_searcher.n_overlaps(reg_start, reg_end)
+        entry.info['hmm_windows'] = region_group_extra.hmm_windows_searcher.n_overlaps(reg_start, reg_end)
 
         psv_start_ix, psv_end_ix = region_group_extra.psv_searcher.contained_ixs(reg_start, reg_end)
         entry.info['n_psvs'] = psv_end_ix - psv_start_ix
@@ -1445,45 +1445,101 @@ class CopyNumProfiles:
 
 class ParalogEntry:
     @classmethod
-    def create(cls, entry, region_ix):
+    def create(cls, entry, region_ix, store_hom_regions=False):
         if entry.paralog_cn[region_ix] is None:
             return None
         self = cls.__new__(cls)
-        self.region = entry.region1 if region_ix == 0 else entry.sample_const_region.regions2[region_ix - 1][0]
+        self.region1 = entry.region1 if region_ix == 0 else entry.sample_const_region.regions2[region_ix - 1][0]
         self.sample_id = entry.sample_id
-        self.filter = entry.agcn_filter.union(entry.paralog_filter)
-        self.copy_num = entry.paralog_cn[region_ix]
-        self.min_qual = min(entry.sample_const_region.qual, entry.paralog_qual[region_ix])
+        self.pscn = entry.paralog_cn[region_ix]
+        self.pscn_qual = entry.paralog_qual[region_ix]
+        self.pscn_filter = entry.paralog_filter
+
+        self.agcn = entry.sample_const_region.pred_cn
+        self.agcn_qual = entry.sample_const_region.qual
+        self.agcn_filter = entry.agcn_filter
         self.main_region = entry.region1
+
+        self.regions2 = None
+        if store_hom_regions:
+            self.regions2 = []
+            if region_ix == 0 and entry.sample_const_region.regions2 is not None:
+                self.regions2.extend(region for region, _strand in entry.sample_const_region.regions2)
+            else:
+                self.regions2.append(entry.region1)
+                self.regions2.extend(region for i, (region, _strand)
+                    in enumerate(entry.sample_const_region.regions2) if i + 1 != region_ix)
+        return self
+
+    @classmethod
+    def from_pooled_entry(cls, pooled_entry, region_ix, cn, cn_filter=None, cn_qual=10000):
+        self = cls.__new__(cls)
+        self.region1 = pooled_entry.region1 if region_ix == 0 else pooled_entry.regions2[region_ix - 1]
+        self.sample_id = pooled_entry.sample_id
+        self.pscn = cn
+        self.pscn_qual = cn_qual
+        self.pscn_filter = Filters() if cn_filter is None else cn_filter
+
+        self.agcn = pooled_entry.cn
+        self.agcn_qual = pooled_entry.qual
+        self.agcn_filter = pooled_entry.filter
+        self.main_region = pooled_entry.region1
+        if region_ix == 0:
+            self.regions2 = list(pooled_entry.regions2)
+        else:
+            self.regions2 = [pooled_entry.region1]
+            self.regions2.extend(region for i, region in enumerate(pooled_entry.regions2) if i + 1 != region_ix)
         return self
 
     @classmethod
     def parse(cls, tup, genome, samples):
         self = cls.__new__(cls)
-        self.region = Interval(genome.chrom_id(tup[0]), int(tup[1]), int(tup[2]))
+        self.region1 = Interval(genome.chrom_id(tup[0]), int(tup[1]), int(tup[2]))
         self.sample_id = samples.id(tup[3])
-        self.filter = Filters.from_str(Filter, tup[4])
-        self.copy_num = int(tup[5])
-        self.min_qual = float(tup[6])
-        self.main_region = Interval.parse(tup[7], genome)
+
+        self.pscn_filter = Filters.from_str(Filter, tup[4])
+        self.pscn = int(tup[5])
+        self.pscn_qual = float(tup[6])
+
+        self.agcn_filter = Filters.from_str(Filter, tup[7])
+        self.agcn = int(tup[8])
+        self.agcn_qual = float(tup[9])
+        self.main_region = Interval.parse(tup[10], genome)
+        self.regions2 = None
+        if len(tup) >= 12:
+            if tup[11] == '*':
+                self.regions2 = ()
+            else:
+                self.regions2 = tuple(Interval.parse(s, genome) for s in tup[11].split(','))
         return self
 
     def copy(self, new_region=None):
         cls = self.__class__
         new = cls.__new__(cls)
-        new.region = new_region or self.region
+        new.region1 = new_region or self.region1
         new.sample_id = self.sample_id
-        new.filter = self.filter.copy()
-        new.copy_num = self.copy_num
-        new.min_qual = self.min_qual
+
+        new.pscn = self.pscn
+        new.pscn_qual = self.pscn_qual
+        new.pscn_filter = self.pscn_filter.copy()
+
+        new.agcn = self.agcn
+        new.agcn_qual = self.agcn_qual
+        new.agcn_filter = self.agcn_filter.copy()
         new.main_region = self.main_region
+        if new_region is None:
+            new.regions2 = self.regions2
+        else:
+            # Cannot set new region if regions2 are non-empty.
+            assert self.regions2 is None
+            new.regions2 = None
         return new
 
     def __lt__(self, other):
-        return self.region.__lt__(other.region)
+        return self.region1.__lt__(other.region1)
 
     def compatible(self, other):
-        return self.region.chrom_id == other.region.chrom_id and self.region.end == other.region.start \
+        return self.region1.chrom_id == other.region1.chrom_id and self.region1.end == other.region1.start \
             and self.sample_id == other.sample_id and self.main_region == other.main_region
 
     @classmethod
@@ -1491,22 +1547,29 @@ class ParalogEntry:
         if len(paralog_entries) == 1:
             entry = paralog_entries[0]
         else:
-            best_i = np.argmax(list(map(operator.attrgetter('min_qual'), paralog_entries)))
+            best_i = np.argmax([min(entry.pscn_qual, entry.agcn_qual) for entry in paralog_entries])
             entry = paralog_entries[best_i]
-        if entry.region != new_subregion:
+        if entry.region1 != new_subregion:
             entry = entry.copy(new_subregion)
 
         if entries and entries[-1].compatible(entry):
             prev = entries[-1]
-            assert prev.copy_num == entry.copy_num and prev.min_qual == entry.min_qual
-            entries[-1] = prev.copy(prev.region.combine(entry.region))
+            assert prev.pscn == entry.pscn and prev.pscn_qual == entry.pscn_qual
+            entries[-1] = prev.copy(prev.region1.combine(entry.region1))
         else:
             entries.append(entry)
 
     def to_str(self, genome, samples):
-        return '{}\t{}\t{}\t{}\t{:.0f}\t{}\n'.format(
-            self.region.to_bed(genome), samples[self.sample_id], self.filter.to_str(),
-            self.copy_num, self.min_qual, self.main_region.to_str(genome))
+        if self.regions2 is None:
+            reg_col = self.main_region.to_str(genome)
+        elif not self.regions2:
+            reg_col = '*'
+        else:
+            reg_col = ','.join(region.to_str(genome) for region in self.regions2)
+        return '{}\t{}\t{}\t{}\t{:.0f}\t{}\t{}\t{:.0f}\t{}\n'.format(
+            self.region1.to_bed(genome), samples[self.sample_id],
+            self.pscn_filter.to_str(), self.pscn, self.pscn_qual,
+            self.agcn_filter.to_str(), self.agcn, self.agcn_qual, reg_col)
 
     @classmethod
     def load(cls, filename, genome, samples):
@@ -1534,7 +1597,7 @@ def summary_to_paralog_bed(in_filename, out_filename, genome, samples, tabix):
                 if par_entry is not None:
                     sample_entries.append(par_entry)
         sample_entries.sort()
-        subregions = Interval.get_disjoint_subregions(map(operator.attrgetter('region'), sample_entries))
+        subregions = Interval.get_disjoint_subregions(map(operator.attrgetter('region1'), sample_entries))
         for subregion, subregion_ixs in subregions:
             if len(subregion_ixs) > 1:
                 ParalogEntry.extend_entries(all_entries, subregion, [sample_entries[i] for i in subregion_ixs])
@@ -1545,8 +1608,57 @@ def summary_to_paralog_bed(in_filename, out_filename, genome, samples, tabix):
     with common.open_possible_gzip(out_filename, 'w', bgzip=True) as out:
         out.write('## {}\n'.format(common.command_to_str()))
         out.write('## {} v{}\n'.format(__pkg_name__, __version__))
-        out.write('#chrom\tstart\tend\tsample\tfilter\tcopy_num\tqual\tmain_region\n')
+        out.write('#chrom\tstart\tend\tsample\tcn_filter\tcn\tcn_qual\t'
+            'agcn_filter\tagcn\tagcn_qual\tmain_region\n')
         for entry in all_entries:
             out.write(entry.to_str(genome, samples))
     if out_filename.endswith('.gz') and tabix != 'none':
         common.Process([tabix, '-p', 'bed', out_filename]).finish()
+
+
+class PooledEntry:
+    def __init__(self, res_entry, artificial_cn=None):
+        self.region1 = res_entry.region1
+        self.sample_id = res_entry.sample_id
+        if res_entry.sample_const_region.regions2 is None:
+            self.regions2 = ()
+        else:
+            self.regions2 = tuple(map(operator.itemgetter(0), res_entry.sample_const_region.regions2))
+
+        if artificial_cn is None:
+            self.cn = res_entry.pred_cn
+            self.filter = res_entry.agcn_filter
+            self.qual = res_entry.sample_const_region.qual
+        else:
+            self.cn = artificial_cn
+            self.filter = Filters()
+            self.qual = 10000
+
+    def __lt__(self, oth):
+        return self.region1.__lt__(oth.region1)
+
+    def to_str(self, genome, samples):
+        return '{}\t{}\t{}\t{}\t{:.0f}\t{}\n'.format(self.region1.to_bed(genome), samples[self.sample_id],
+            self.filter.to_str(), self.cn, self.qual,
+            ','.join(region.to_str(genome) for region in self.regions2) if self.regions2 else '*')
+
+    def to_str_short(self, genome, samples):
+        return '{}\t{}\t{}\n'.format(self.region1.to_bed(genome), samples[self.sample_id], self.cn)
+
+    def to_str_zero(self, genome, samples):
+        return '{}\t{}\t0\n'.format(self.region1.to_bed(genome), samples[self.sample_id])
+
+    @classmethod
+    def parse(cls, tup, genome, samples):
+        self = cls.__new__(cls)
+        self.region1 = Interval(genome.chrom_id(tup[0]), int(tup[1]), int(tup[2]))
+        self.sample_id = samples.id(tup[3])
+        self.filter = Filters.from_str(Filter, tup[4])
+        self.cn = int(tup[5])
+        self.qual = float(tup[6])
+        self.ref_cn = int(tup[7])
+        if tup[8] == '*':
+            self.regions2 = ()
+        else:
+            self.regions2 = tuple(Interval.parse(s, genome) for s in tup[8].split(','))
+        return self

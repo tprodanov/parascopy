@@ -600,6 +600,12 @@ class OutputFiles:
     def __getattr__(self, key):
         return self._files[key]
 
+    def get(self, key):
+        return self._files.get(key)
+
+    def __contains__(self, key):
+        return self._files.__contains__(key)
+
     def flush(self):
         for f in self._files.values():
             f.flush()
@@ -683,8 +689,6 @@ class RegionGroupExtra:
     def set_from_model_params(self, model_params, n_samples):
         copy_num = self._region_group.cn // 2
         self._psv_f_values = model_params.load_psv_f_values(self._psv_infos, copy_num)
-        if self._psv_f_values is None:
-            return
 
     def update_psv_records(self, reliable_thresholds):
         from . import paralog_cn

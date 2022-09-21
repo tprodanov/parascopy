@@ -209,11 +209,12 @@ ggplot(depth.av) +
          scale_color_discrete('Sample'))
     } else { list() } } +
   locus_annotation +
-  scale_x_continuous(x_label, labels=fmt_pos) +
-  scale_y_continuous('Normalized read depth', breaks=0:40) +
+  scale_x_continuous(x_label, labels=fmt_pos, expand=expansion(mult=0.01)) +
+  scale_y_continuous('Normalized read depth', breaks=0:40, minor_breaks=NULL,
+      expand=expansion(mult=0.01)) +
   title(sprintf('%s: all windows, no multipliers', locus)) +
-  theme_bw()
-ggsave(sprintf('%sa_norm_depth_all.png', output), width=8, height=5)
+  theme_minimal()
+ggsave(sprintf('%sa_norm_depth_all.png', output), width=8, height=5, bg='white')
 
 # ------ Loading HMM results ------
 
@@ -262,11 +263,12 @@ ggplot(depth_v.av) +
       scale_color_discrete('Sample'))
   } else { list() } } +
   locus_annotation +
-  scale_x_continuous(x_label, labels=fmt_pos) +
-  scale_y_continuous('Normalized read depth', breaks=0:40) +
+  scale_x_continuous(x_label, labels=fmt_pos, expand=expansion(mult=0.01)) +
+  scale_y_continuous('Normalized read depth', breaks=0:40, minor_breaks=NULL,
+      expand=expansion(mult=0.01)) +
   title(sprintf('%s: good windows, no multipliers', locus)) +
-  theme_bw()
-ggsave(sprintf('%sb_norm_depth_good.png', output), width=8, height=5)
+  theme_minimal()
+ggsave(sprintf('%sb_norm_depth_good.png', output), width=8, height=5, bg='white')
 
 ggplot(depth_v.av) +
   curr_geom(aes(middle, copy_num), color='gray30', size=2, data=windows_v.av) +
@@ -277,11 +279,12 @@ ggplot(depth_v.av) +
       scale_color_discrete('Sample'))
   } else { list() } } +
   locus_annotation +
-  scale_x_continuous(x_label, labels=fmt_pos) +
-  scale_y_continuous('Corrected normalized read depth', breaks=0:40) +
+  scale_x_continuous(x_label, labels=fmt_pos, expand=expansion(mult=0.01)) +
+  scale_y_continuous('Corrected normalized read depth', breaks=0:40, minor_breaks=NULL,
+      expand=expansion(mult=0.01)) +
   title(sprintf('%s: good windows, use multipliers', locus)) +
-  theme_bw()
-ggsave(sprintf('%sc_corr_depth.png', output), width=8, height=5)
+  theme_minimal()
+ggsave(sprintf('%sc_corr_depth.png', output), width=8, height=5, bg='white')
 
 n_colors <- length(unique(round(depth_v.av$pred_cn)))
 colors <- if (n_colors <= 8) {
@@ -295,14 +298,15 @@ ggplot(depth_v.av) +
   curr_geom(aes(middle, corr_cn1, group=sample,
                 color=factor(round(pred_cn))), alpha=min(1, alpha * 2)) +
   locus_annotation +
-  scale_x_continuous(x_label, labels=fmt_pos) +
-  scale_y_continuous('Normalized read depth', breaks=0:40) +
+  scale_x_continuous(x_label, labels=fmt_pos, expand=expansion(mult=0.01)) +
+  scale_y_continuous('Normalized read depth', breaks=0:40, minor_breaks=NULL,
+      expand=expansion(mult=0.01)) +
   scale_color_manual('CN estimate',
                      values=colors, breaks=color_breaks) +
   title(sprintf('%s: good windows, use multipliers', locus)) +
   guides(color = guide_legend(override.aes = list(alpha=1, size=2.5))) +
-  theme_bw()
-ggsave(sprintf('%sd_corr_depth_color.png', output), width=8, height=5)
+  theme_minimal()
+ggsave(sprintf('%sd_corr_depth_color.png', output), width=8, height=5, bg='white')
 
 # ------ Draw HMM paths ------
 
@@ -336,10 +340,11 @@ if (any(hmm_states_first$iteration != 'v')) {
     } else { list() } } +
     geom_text(aes(middle, y = pred_cn_round + 0.3, label = sample),
               data=sample_counts, size=3) +
-    scale_x_continuous(x_label, labels=fmt_pos) +
-    scale_y_continuous('Copy number estimate', breaks=0:40) +
-    theme_bw()
-  ggsave(sprintf('%se_hmm_first.png', output), width=8, height=5)
+    scale_x_continuous(x_label, labels=fmt_pos, expand=expansion(mult=0.01)) +
+    scale_y_continuous('Copy number estimate', breaks=0:40, minor_breaks=NULL,
+        expand=expansion(mult=0.01)) +
+    theme_minimal()
+  ggsave(sprintf('%se_hmm_first.png', output), width=8, height=5, bg='white')
 }
 
 sample_counts <- aggregate(sample ~ middle + ix + pred_cn,
@@ -354,35 +359,44 @@ ggplot(hmm_states_last) +
          scale_color_discrete('Sample'))
   } else { list() } } +
   geom_text(aes(middle, y = pred_cn + 0.3, label = sample), data=sample_counts, size=3) +
-  scale_x_continuous(x_label, labels=fmt_pos) +
-  scale_y_continuous('Copy number estimate', breaks=0:40) +
-  theme_bw()
-ggsave(sprintf('%sf_hmm_last.png', output), width=8, height=5)
+  scale_x_continuous(x_label, labels=fmt_pos, expand=expansion(mult=0.01)) +
+  scale_y_continuous('Copy number estimate', breaks=0:40, minor_breaks=NULL,
+      expand=expansion(mult=0.01)) +
+  theme_minimal()
+ggsave(sprintf('%sf_hmm_last.png', output), width=8, height=5, bg='white')
 
 if (0 < n_highlight && n_highlight < 40) {
   highl_depth_v <- aggregate.average(
-    filter(depth_v, sample %in% highlight_samples), windows_v, c('corr_cn1', 'pred_cn'), n=1)
+      filter(depth_v, sample %in% highlight_samples), windows_v,
+      c('corr_cn1', 'pred_cn'), n=1)
+  highl_depth_v2 <- aggregate.average(
+      filter(depth, sample %in% highlight_samples & !in_hmm),
+      filter(windows, !in_hmm),
+      'norm_cn1', n=1)
 
   transition_lines <- windows_v[common_transitions,]$middle
-  if (length(transition_lines) > 20) {
-    transition_lines <- c()
-  }
+  # if (length(transition_lines) > 20) {
+  #   transition_lines <- c()
+  # }
   ggplot(highl_depth_v) +
     geom_vline(xintercept=transition_lines, color='gray80', linetype='dashed') +
     geom_line(aes(middle, copy_num), data=windows_v, size=2, color='gray80') +
     geom_point(aes(middle, corr_cn1, group=sample,
                   color = factor(pred_cn))) +
+    geom_point(aes(middle, norm_cn1, group=sample), data = highl_depth_v2,
+        shape = 21) +
     facet_wrap(~ sample, ncol=3, scales='free_y') +
-    scale_x_continuous(x_label, labels=fmt_pos) +
-    scale_y_continuous('Normalized read depth', breaks=0:40) +
+    scale_x_continuous(x_label, labels=fmt_pos, expand=expansion(mult=0.01)) +
+    scale_y_continuous('Normalized read depth', breaks=0:40, minor_breaks=NULL,
+        expand=expansion(mult=0.01)) +
     scale_color_manual('CN estimate',
                        values=colors, breaks=color_breaks) +
     guides(color = guide_legend(override.aes = list(alpha=1, size=2))) +
-    theme_bw() +
+    theme_minimal() +
     theme(panel.grid.major.y=element_line(color='gray80'))
 
   width <- 5 + nrow(windows_v) / 100 * 1.5 * min(n_highlight, 3)
   height <- max(5, ceiling(n_highlight / 3) * 2)
   ggsave(sprintf('%sg_highlight_samples.png', output),
-         width=width, height=height, limitsize=F)
+         width=width, height=height, limitsize=F, bg='white')
 }

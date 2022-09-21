@@ -27,6 +27,7 @@ Commands:
                 for given unique and duplicated regions.
     cn-using    Same as "cn", but use input model parameters.
     pool        Pool reads from various copies of a given homologous region.
+    call        Call pooled and paralog-specific variants.
 
 \033[32m[ Querying homology table ]\033[0m
     view        View and filter homology table.
@@ -144,7 +145,7 @@ def main():
         from . import examine_dupl
         return _process_exceptions(examine_dupl.main, inner_prog, inner_argv)
 
-    # valid_commands.append('call')
+    valid_commands.append('call')
     if command == 'call':
         from . import call_variants
         return _process_exceptions(call_variants.main, inner_prog, inner_argv)

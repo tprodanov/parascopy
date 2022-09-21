@@ -381,7 +381,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
                         interval.name, dupl.region1.to_str(genome), dupl.region2.to_str(genome)))
                     continue
 
-                outp.write('Use duplication   %s\n'.format(dupl.to_str(genome)))
+                outp.write('Use duplication   {}\n'.format(dupl.to_str(genome)))
                 model_params.add_duplication(len(duplications), dupl)
                 duplications.append(transform_duplication(dupl, interval, genome))
         skip_regions = Interval.combine_overlapping(skip_regions)
@@ -400,7 +400,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
     if model_params.is_loaded:
         msg = model_params.check_dupl_hierarchy(dupl_hierarchy, genome)
         if msg:
-            common.log(model_params.mismatch_warning())
+            common.log(model_params.mismatch_warning(genome))
             common.log(msg)
             raise RuntimeError('Model parameters mismatch')
 
@@ -461,14 +461,16 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
             time_log.log('Group {}: Run HMM to find aggregate copy number profiles'.format(group_name))
             common.log('[{}] Region group {}'.format(interval.name, group_name))
             cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
-                min_samples=args.min_samples, agcn_range=args.agcn_range, agcn_jump=args.agcn_jump,
-                min_trans_prob=args.transition_prob * common.LOG10, use_multipliers=args.use_multipliers,
+                min_samples=args.min_samples, agcn_range=args.agcn_range, strict_agcn_range=args.strict_agcn_range,
+                agcn_jump=args.agcn_jump, min_trans_prob=args.transition_prob * common.LOG10,
+                uniform_initial=args.uniform_initial, use_multipliers=args.use_multipliers,
                 update_agcn_qual=args.update_agcn)
             out.flush()
 
             time_log.log('Group {}: PSV genotype probabilities'.format(group_name))
-            variants_.calculate_all_psv_gt_probs(group_extra,
-                max_agcn=args.pscn_bound[0], max_genotypes=args.pscn_bound[1])
+            if not args.skip_pscn:
+                variants_.calculate_all_psv_gt_probs(group_extra,
+                    max_agcn=args.pscn_bound[0], max_genotypes=args.pscn_bound[1])
             if model_params.is_loaded:
                 group_extra.set_from_model_params(model_params, len(samples))
             else:
@@ -589,6 +591,7 @@ def join_vcf_files(in_filenames, out_filename, genome, tabix, merge_duplicates=F
             vcf.write(record)
     if out_filename.endswith('.gz') and tabix != 'none':
         common.Process([tabix, '-p', 'vcf', out_filename]).finish()
+    return records
 
 
 def run(regions, data, samples, bg_depth, models, modified_ref_cns):
@@ -750,14 +753,15 @@ def get_regions(args, genome, load_models):
         return (common.get_regions(args, genome), None)
 
     loaded_models = model_params_.load_all(args.model, genome)
-    model_names = {}
+    os_names = {}
     regions = []
     for model_params in loaded_models:
         main_entry = model_params.main_entry
-        name = main_entry['name']
-        if name in model_names:
-            raise ValueError('Provided several models with the same name ({})'.format(name))
-        regions.append(NamedInterval.from_region(main_entry.region1, genome, name))
+        name = main_entry.get('name')
+        region = NamedInterval.from_region(main_entry.region1, genome, name)
+        if region.os_name is os_names:
+            raise ValueError('Provided several models with the same name ({})'.format(region.os_name))
+        regions.append(region)
     return (regions, loaded_models)
 
 
@@ -806,8 +810,6 @@ class InCopyNums:
                     for sample in sample_list.split(','):
                         if sample in samples:
                             sample_ids.append(samples.id(sample))
-                        else:
-                            common.log('ERROR: Unknown sample {} in file "{}"'.format(sample, filename))
                 for sample_id in sample_ids:
                     sample_regions[sample_id].append(pair)
 
@@ -951,13 +953,16 @@ def parse_args(prog_name, in_argv, is_new):
                 'Values < 1 - discard more windows, > 1 - keep more windows.')
         aggr_det_args.add_argument('--agcn-range', type=int, metavar='<int> <int>', nargs=2, default=(5, 7),
             help='Detect aggregate copy number in a range around the reference copy number [default: 5 7].\n'
-                'For example, for a duplication with copy number 8 copy numbers 3-15 can\n'
-                'be detected. In addition, sample may be identified as having copy number <3 or >15.\n'
-                'In some cases, copy number within two ranges can be detected.')
+                'For example, for a duplication with copy number 8 copy numbers 3-15 can be detected.')
+        aggr_det_args.add_argument('--strict-agcn-range', action='store_true',
+            help='Detect aggregate copy number strictly within the --agcn-range, even if there are\n'
+                'samples with bigger/smaller copy number values.')
         aggr_det_args.add_argument('--agcn-jump', type=int, metavar='<int>', default=6,
             help='Maximal jump in the aggregate copy number between two consecutive windows [default: %(default)s].')
         aggr_det_args.add_argument('--transition-prob', type=float, metavar='<float>', default=-5,
             help='Log10 transition probability for the aggregate copy number HMM [default: %(default)s].')
+    aggr_det_args.add_argument('--uniform-initial', action='store_true',
+        help='Copy number HMM: use uniform initial distribution and do not update initial probabilities.')
     aggr_det_args.add_argument('--no-multipliers', action='store_false', dest='use_multipliers',
         help='Do not estimate or use read depth multipliers.')
     aggr_det_args.add_argument('--update-agcn', type=float, metavar='<float>', default=40,
@@ -992,6 +997,8 @@ def parse_args(prog_name, in_argv, is_new):
     exec_args.add_argument('--skip-cn', action='store_true',
         help='Do not calculate agCN and psCN profiles. If this option is set, Parascopy still\n'
             'calculates read depth for duplicated windows and PSV-allelic read depth.')
+    exec_args.add_argument('--skip-pscn', action='store_true',
+        help='Do not calculate psCN profiles.')
     exec_args.add_argument('-@', '--threads', type=int, metavar='<int>', default=4,
         help='Number of available threads [default: %(default)s].')
     exec_args.add_argument('--samtools', metavar='<path>|none', default='samtools',
@@ -1021,6 +1028,7 @@ def parse_args(prog_name, in_argv, is_new):
             exit(1)
     else:
         args.modify_ref = None
+        args.strict_agcn_range = True
     return args
 
 

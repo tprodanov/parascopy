@@ -131,7 +131,7 @@ def main(prog_name=None, in_argv=None):
                 continue
             elif exclude and exclude(dupl, genome):
                 continue
-            elif not dupl.is_tangled_region and regions2_tree and regions2_tree.overlap_size(dupl.region2) == 0:
+            elif not dupl.is_tangled_region and regions2_tree and regions2_tree.n_overlaps(dupl.region2) == 0:
                 continue
             if args.pretty:
                 outp.write(dupl.to_str_pretty(genome))

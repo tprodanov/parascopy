@@ -155,7 +155,7 @@ class _Psv:
 def create_vcf_header(genome, chrom_ids=None, argv=None):
     vcf_header = pysam.VariantHeader()
     if argv is not None:
-        vcf_header.add_line('##command="{}"'.format(common.command_to_str(argv)))
+        vcf_header.add_line(common.vcf_command_line(argv))
     for chrom_id in (chrom_ids or range(genome.n_chromosomes)):
         vcf_header.add_line('##contig=<ID={},length={}>'
             .format(genome.chrom_name(chrom_id), genome.chrom_len(chrom_id)))
@@ -191,7 +191,7 @@ def duplication_differences(region1, reg1_seq, reg2_seq, full_cigar, dupl_i, psv
 
         psv_start = reg1_start + start1
         psv_end = reg1_start + end1
-        if tangled_searcher.overlap_size(psv_start, psv_end) == 0:
+        if tangled_searcher.n_overlaps(psv_start, psv_end) == 0:
             psvs.append(_Psv(psv_start, psv_end, _SecondRegion(start2, end2, dupl_i)))
 
     curr_aligned_pos = []

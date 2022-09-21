@@ -183,11 +183,16 @@ class Entry:
             assert isinstance(key, str)
             if key in self._info:
                 return self._info[key]
-        raise KeyError('None of the keys "{}" are in the main entry "{}"'.format('", "'.join(keys), self._info))
+
+        info_str = ', '.join(map('%s: %s'.__mod__, self._info.items()))
+        raise KeyError('Keys "{}" not found in the entry {{ {} }}'.format('", "'.join(keys), info_str))
 
     def __setitem__(self, key, val):
         assert isinstance(key, str)
         self._info[key] = val
+
+    def get(self, key, default=None):
+        return self._info.get(key, default)
 
     def info_items(self):
         return self._info.items()
@@ -198,7 +203,8 @@ class ModelParams:
         self.entries = defaultdict(list)
         if main_interval is not None:
             main_entry = Entry(EntryType.Main, main_interval)
-            main_entry['name'] = main_interval.name
+            if main_interval.name_provided:
+                main_entry['name'] = main_interval.name
             main_entry['version'] = __version__
             main_entry['n_samples'] = n_samples
             self.add_entry(main_entry)
@@ -267,7 +273,7 @@ class ModelParams:
                 duplications[ix] = dupl
                 break
             else:
-                msg = self.mismatch_warning()
+                msg = self.mismatch_warning(genome)
                 msg += '\nCannot find duplication in the table that would match duplication {}  {}:{}'.format(
                     region1.to_str_comma(genome), region2.to_str_comma(genome), '+' if strand2 else '-')
                 raise RuntimeError(msg)
@@ -433,11 +439,15 @@ class ModelParams:
     def main_entry(self):
         return self.entries[EntryType.Main][0]
 
-    def mismatch_warning(self):
+    def mismatch_warning(self, genome):
         main_entry = self.main_entry
         version = main_entry['version']
+        name = main_entry.get('name')
+        if name is None:
+            name = main_entry.region1.to_str(genome)
+
         msg = 'Error: Model parameters for region {} ({}) does not match current run ({}).\n'.format(
-            main_entry['name'], version, __version__)
+            name, version, __version__)
         msg += '    Possible explanations:\n'
         if version != __version__:
             msg += '        - Version mismatch,\n'

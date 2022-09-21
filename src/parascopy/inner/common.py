@@ -1,6 +1,6 @@
 import sys
 from time import perf_counter
-from datetime import timedelta
+from datetime import timedelta, datetime
 import gzip
 import subprocess
 import itertools
@@ -17,6 +17,7 @@ import shlex
 
 from .genome import Interval, NamedInterval
 from . import errors
+from .. import __version__
 
 
 _rev_comp = {'A':'T', 'T':'A', 'C':'G', 'G':'C','a':'T', 't':'A', 'c':'G', 'g':'C', 'N':'N', 'n':'N' }
@@ -433,6 +434,11 @@ def command_to_str(command=None, basename=True, quote=True, sep=' '):
         for i in range(len(command)):
             command[i] = shlex.quote(command[i])
     return sep.join(command)
+
+
+def vcf_command_line(command=None):
+    return '##command="{}",version="{}",date="{}"'.format(
+        command_to_str(command), __version__, datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 
 def letter_suffix(index, chars=string.ascii_lowercase):

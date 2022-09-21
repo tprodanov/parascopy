@@ -20,7 +20,7 @@ class NonOverlTree:
         end_ix = self._starts.searchsorted(end, side='left')
         return start_ix, end_ix
 
-    def overlap_size(self, start, end):
+    def n_overlaps(self, start, end):
         start_ix, end_ix = self.overlap_ixs(start, end)
         return end_ix - start_ix
 
@@ -81,7 +81,7 @@ class MultiChromTree:
         for overlap in tree.overlap(region.start, region.end):
             yield overlap.data
 
-    def overlap_size(self, region):
+    def n_overlaps(self, region):
         tree = self._trees.get(region.chrom_id)
         return 0 if tree is None else len(tree.overlap(region.start, region.end))
 
@@ -119,9 +119,9 @@ class MultiNonOverlTree:
             return iter(())
         return tree.overlap_iter(region.start, region.end)
 
-    def overlap_size(self, region):
+    def n_overlaps(self, region):
         tree = None if region.chrom_id >= len(self._trees) else self._trees[region.chrom_id]
-        return 0 if tree is None else tree.overlap_size(region.start, region.end)
+        return 0 if tree is None else tree.n_overlaps(region.start, region.end)
 
     def intersection_size(self, region):
         return sum(interval.intersection_size(region) for interval in self.overlap_iter(region))

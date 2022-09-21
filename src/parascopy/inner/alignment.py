@@ -120,6 +120,10 @@ class Alignment:
     def replace_stats(self, stats):
         self._stats = stats
 
+    def __str__(self):
+        return 'Aln({}; {}; {}'.format(self._ref_interval, self.strand_str,
+            '*' if self._cigar is None else self._cigar.to_str())
+
     def to_str(self, genome):
         res = 'Aln({}; {}; {}'.format(self._ref_interval.to_str(genome), self.strand_str,
             '*' if self._cigar is None else self._cigar.to_str())

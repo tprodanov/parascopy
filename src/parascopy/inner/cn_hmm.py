@@ -356,6 +356,8 @@ class CopyNumHmm(HmmModel):
 
         state_dist = self._max_state_dist
         down_up = np.full((self._n_observations - 1, 2), np.nan)
+        if state_dist == 0:
+            return down_up
         for obs_ix in range(self._n_observations - 1):
             jump_probs = np.zeros(2 * state_dist)
             # We do not need to calculate probabilities for one of the jumps (here, we skip 0),
@@ -392,6 +394,8 @@ class CopyNumHmm(HmmModel):
         Transforms probabilities of going down, staying the same, or going up, into transition probabilities.
         min_rob and max_prob should be logarithmic and only apply to single jumps up and down.
         """
+        if self._max_state_dist == 0:
+            return
         new_down_up = np.zeros_like(down_up)
         new_down_up[:, 0] = _find_peaks(down_up[:, 0], min_prob)
         new_down_up[:, 1] = _find_peaks(down_up[:, 1], min_prob)
@@ -708,26 +712,39 @@ def _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs, agcn_range, 
 
     def inner(mult):
         matr = nbinom.logpmf(obs_depth, nbinom_n_matrix * mult, nbinom_ps) + copy_num_probs
-        res = -np.sum(logsumexp(matr, axis=0))
-        return res
+        return -np.sum(logsumexp(matr, axis=0))
 
-    x0 = 1.0
-    lik0 = inner(x0)
     sol = optimize.minimize_scalar(inner, bounds=mult_bounds, method='bounded')
-    return x0, lik0, sol.x, sol.fun
+    return sol.x, sol.fun
 
 
-def _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples, edge_prob=0.1, sample_ids=None):
+def _remove_consecutive_extreme_multipliers(multipliers, ref_cn, min_len):
+    n = len(multipliers)
+    status = np.zeros(n, dtype=np.int8)
+    lower_bound = (ref_cn - 0.5) / ref_cn
+    status[multipliers <= lower_bound] = 1
+    upper_bound = (ref_cn + 0.5) / ref_cn
+    status[multipliers >= upper_bound] = 2
+
+    diff_ixs = np.where(np.diff(status) != 0)[0] + 1
+    i = 0
+    for j in diff_ixs:
+        if j - i >= min_len and status[i]:
+            multipliers[i : j] = 1.0
+        i = j
+    if n - i >= min_len and status[i]:
+        multipliers[i:] = 1.0
+
+
+def _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples, extreme_cn_prob=0.1, sample_ids=None):
     if sample_ids is None:
         sample_ids = np.arange(model.n_samples)
         sample_ids_slice = slice(0, model.n_samples)
     else:
         sample_ids_slice = sample_ids
 
-    # Multipliers with extreme values will be discarded later.
     mult_bounds = (0.4, 2.1)
-    edge_log_prob = np.log(edge_prob)
-
+    log_extreme_cn_prob = np.log(extreme_cn_prob)
     n_hidden = model.n_hidden
     agcn_range = model.get_copy_num(np.arange(1, n_hidden - 1))
     prob_matrices = model.gammas
@@ -736,40 +753,50 @@ def _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples, edge_
     for obs_ix, window in enumerate(windows):
         # Keep samples, for which there is only a little probability of having smallest or largest available copy number.
         # We do this because in reality these samples may have even lower or higher copy number.
-        edge_probs = np.max(prob_matrices[sample_ids_slice][:, (0, n_hidden - 1), obs_ix], axis=1)
-        curr_sample_ids = sample_ids[edge_probs < edge_log_prob]
+        extreme_cn_probs = np.max(prob_matrices[sample_ids_slice][:, (0, n_hidden - 1), obs_ix], axis=1)
+        curr_sample_ids = sample_ids[extreme_cn_probs < log_extreme_cn_prob]
         if len(curr_sample_ids) < min_samples:
             continue
 
         obs_depth = depth_matrix[obs_ix, curr_sample_ids]
         nbinom_params = bg_depth.at(curr_sample_ids, window.gc_content)
         copy_num_probs = prob_matrices[curr_sample_ids, 1:n_hidden - 1, obs_ix].T
-        mult0, lik0, mult1, lik1 = _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs,
-            agcn_range, mult_bounds)
-        multipliers[obs_ix] = mult1
+        mult, _lik = _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs, agcn_range, mult_bounds)
+        multipliers[obs_ix] = mult
+
+    _remove_consecutive_extreme_multipliers(multipliers, model.ref_copy_num, min_len=10)
     return multipliers
 
 
-def _setup_model(depth_matrix, windows, bg_depth, agcn_range, agcn_jump, min_trans_prob):
+def _setup_model(depth_matrix, windows, bg_depth, group_name, agcn_range, strict_agcn_range, agcn_jump,
+        min_trans_prob, uniform_initial):
     n_observations, n_samples = depth_matrix.shape
     ref_copy_num = windows[0].cn
-    left_states, right_states = _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, agcn_range)
+    left_states, right_states = _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num,
+        agcn_range, strict_agcn_range)
     model = CopyNumHmm(n_samples, ref_copy_num, left_states, right_states, n_observations, agcn_jump)
 
-    # Set prior for the reference copy number on the first iteration.
-    initial = np.full(model.n_hidden, min_trans_prob / 2)
-    initial[model.left_states] = 0.0
-    initial -= logsumexp(initial)
-    model.set_initial(initial)
+    if uniform_initial:
+        model.set_uniform_initial()
+    else:
+        # Set prior for the reference copy number on the first iteration.
+        initial = np.full(model.n_hidden, min_trans_prob / 2)
+        initial[model.left_states] = 0.0
+        initial -= logsumexp(initial)
+        model.set_initial(initial)
 
     model.set_const_transitions(min_trans_prob)
     multipliers = np.ones(model.n_observations)
-    mult_weights = _get_mult_weights(multipliers, ref_copy_num)
+    mult_weights = np.ones(model.n_observations)
     model.calculate_emission_matrices(depth_matrix, windows, multipliers, mult_weights, bg_depth)
-    return model, multipliers
+
+    debug_params = _DebugParameters(model, group_name, windows)
+    debug_params.set_multipliers(multipliers, mult_weights)
+    return model, debug_params
 
 
-def _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_params, agcn_jump, use_multipliers):
+def _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_params, agcn_jump,
+        uniform_initial, use_multipliers):
     n_observations, n_samples = depth_matrix.shape
     ref_copy_num = windows[0].cn
 
@@ -779,9 +806,12 @@ def _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_p
     right_states = max_cn - ref_copy_num
     model = CopyNumHmm(n_samples, ref_copy_num, left_states, right_states, n_observations, agcn_jump)
 
-    initial = -np.array(list(map(float, input_hmm_entry['initial'].split(','))))
-    initial -= logsumexp(initial)
-    model.set_initial(initial)
+    if uniform_initial:
+        model.set_uniform_initial()
+    else:
+        initial = -np.array(list(map(float, input_hmm_entry['initial'].split(','))))
+        initial -= logsumexp(initial)
+        model.set_initial(initial)
 
     multipliers, jump_probs = model_params.get_hmm_data(window_ixs, model.max_state_dist)
     down = jump_probs[:, 0]
@@ -795,27 +825,44 @@ def _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_p
         multipliers = np.ones(n_observations)
     mult_weights = _get_mult_weights(multipliers, model.ref_copy_num)
     model.calculate_emission_matrices(depth_matrix, windows, multipliers, mult_weights, bg_depth)
-    return model, multipliers
+
+    debug_params = _DebugParameters(model, group_name, windows)
+    debug_params.set_multipliers(multipliers, mult_weights)
+    return model, debug_params
 
 
-def _write_hmm_params(group_name, iteration, windows, multipliers, mult_weights, down_up, model, params_out):
-    copy_numbers = model.get_copy_num(np.arange(model.n_hidden))
-    initial = model.initial
-    params_out.write('# Initial for group {} iteration {}: {}\n'.format(group_name, iteration,
-        '\t'.join(map('%d=%.4f'.__mod__, zip(copy_numbers, initial)))))
+class _DebugParameters:
+    def __init__(self, model, group_name, windows):
+        self.model = model
+        self.group_name = group_name
+        self.windows = windows
 
-    jump_probs_ixs = slice(model.max_state_dist - 1, model.max_state_dist + 2)
-    jump_probs = model.middle_state_transitions()
-    n_observations = len(windows)
-    for obs_ix, window in enumerate(windows):
-        params_out.write('{}\t{}\t{}\t{:.4f}\t{:.4f}\t'.format(group_name, iteration, windows[obs_ix].ix,
-            multipliers[obs_ix], mult_weights[obs_ix]))
-        if obs_ix == n_observations - 1:
-            params_out.write('\t'.join(('NA',) * 7))
-        else:
-            params_out.write('{:.3f}\t{:.3f}\t'.format(*(down_up[obs_ix] / common.LOG10)))
-            params_out.write('\t'.join(map('{:.3f}'.format, jump_probs[obs_ix] / common.LOG10)))
-        params_out.write('\n')
+        self.multipliers = None
+        self.mult_weights = None
+        self.down_up = np.full((model.n_observations - 1, 2), np.nan)
+
+    def set_multipliers(self, multipliers, mult_weights):
+        self.multipliers = multipliers
+        self.mult_weights = mult_weights
+
+    def write(self, iteration, likelihood, out):
+        copy_numbers = self.model.get_copy_num(np.arange(self.model.n_hidden))
+        initial = self.model.initial
+        out.write('# {} iter {}. Initial probabilities: {}\n'.format(self.group_name, iteration,
+            '\t'.join(map('%d=%.4f'.__mod__, zip(copy_numbers, initial)))))
+        out.write('# {} iter {}. Likelihood: {:.6f}\n'.format(self.group_name, iteration, likelihood / common.LOG10))
+
+        jump_probs = self.model.middle_state_transitions()
+        n_observations = len(self.windows)
+        for obs_ix, window in enumerate(self.windows):
+            out.write('{}\t{}\t{}\t{:.4f}\t{:.4f}\t'.format(self.group_name, iteration, self.windows[obs_ix].ix,
+                self.multipliers[obs_ix], self.mult_weights[obs_ix]))
+            if obs_ix == n_observations - 1:
+                out.write('NA\tNA\tNA\tNA\tNA\n')
+            else:
+                out.write('{:.3f}\t{:.3f}\t'.format(*(self.down_up[obs_ix] / common.LOG10)))
+                out.write('\t'.join(map('{:.3f}'.format, jump_probs[obs_ix] / common.LOG10)))
+                out.write('\n')
 
 
 def _prob_matrices_to_states(model):
@@ -844,59 +891,63 @@ def _get_mult_weights(multipliers, ref_copy_num):
     return common.tricube_kernel(mult_weights)
 
 
-def _single_iteration(depth_matrix, windows, bg_depth, model, group_name, iteration, params_out,
-        possible_states=None, *, min_samples, min_trans_prob, max_trans_prob, use_multipliers):
+def _first_iteration(depth_matrix, windows, bg_depth, model, debug_params, params_out, min_samples):
+    ITERATION = 0
+    model.run_forward_backward(possible_states=None)
+    likelihood = np.sum(model.total_probs)
+    debug_params.write(ITERATION, likelihood, params_out)
+    common.log('        Iteration {:>2}:   Likelihood {:,.3f} (Before multipliers)'.format(
+        ITERATION, likelihood / common.LOG10))
+
+    multipliers = _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples)
+    mult_weights = _get_mult_weights(multipliers, model.ref_copy_num)
+    model.calculate_emission_matrices(depth_matrix, windows, multipliers, mult_weights, bg_depth)
+    debug_params.set_multipliers(multipliers, mult_weights)
+    return likelihood
+
+
+def _single_iteration(model, iteration, debug_params, params_out, possible_states=None, *,
+        min_trans_prob, max_trans_prob, uniform_initial):
     model.run_forward_backward(possible_states)
-    total_prob = np.sum(model.total_probs)
-    common.log('        Iteration {:>2}:   Likelihood {:,.3f}'.format(iteration, total_prob / common.LOG10))
+    likelihood = np.sum(model.total_probs)
+    debug_params.write(iteration, likelihood, params_out)
+    common.log('        Iteration {:>2}:   Likelihood {:,.3f}'.format(iteration, likelihood / common.LOG10))
 
     down_up = model.baum_welch_transitions()
-    n_samples = depth_matrix.shape[1]
-    min_initial_prob = max(min_trans_prob / 2, -np.log(n_samples))
-    model.baum_welch_initial(min_initial_prob)
+    debug_params.down_up = down_up
+    min_initial_prob = max(min_trans_prob / 2, -np.log(model.n_samples))
+    if not uniform_initial:
+        model.baum_welch_initial(min_initial_prob)
     model.recalculate_transition_probs(down_up, min_trans_prob, max_trans_prob)
-    if use_multipliers:
-        multipliers = _find_multipliers(depth_matrix, windows, bg_depth, model, min_samples)
-        mult_weights = _get_mult_weights(multipliers, model.ref_copy_num)
-    else:
-        multipliers = np.ones(model.n_observations)
-        mult_weights = np.ones(model.n_observations)
-
-    _write_hmm_params(group_name, iteration, windows, multipliers, mult_weights, down_up, model, params_out)
-    model.calculate_emission_matrices(depth_matrix, windows, multipliers, mult_weights, bg_depth)
-    params_out.write('# Likelihood for group {} iteration {}: {:.5f}\n'.format(
-        group_name, iteration, total_prob / common.LOG10))
-    return total_prob, multipliers
+    return likelihood
 
 
-def _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, agcn_range):
+def _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, agcn_range, strict_agcn_range):
+    left_states = min(ref_copy_num, agcn_range[0] + 1)
+    right_states = agcn_range[1] + 1
+    if strict_agcn_range:
+        return left_states, right_states
+
     n_observations, n_samples = depth_matrix.shape
     norm_depth = np.zeros((n_observations, n_samples))
-
     for obs_ix, window in enumerate(windows):
         nbinom_params = bg_depth.at(slice(None), window.gc_content)
         nbinom_n = nbinom_params[:, 0]
         nbinom_p = nbinom_params[:, 1]
         mean_depth = 0.5 * (1 - nbinom_p) * nbinom_n / nbinom_p
         norm_depth[obs_ix] = depth_matrix[obs_ix] / mean_depth
-
     norm_means = np.mean(norm_depth, axis=0)
-    min_value = np.min(norm_means)
-    min_value = max(int(np.floor(min_value) - 1), ref_copy_num - 2 * agcn_range[0])
-    min_copy_num = max(0, min(ref_copy_num - agcn_range[0], min_value))
 
-    max_value = np.max(norm_means)
-    max_value = min(int(np.ceil(max_value) + 1), ref_copy_num + 2 * agcn_range[1])
-    max_ref_cn = max(ref_copy_num + agcn_range[1], max_value)
-
-    left_states = ref_copy_num - max(0, min_copy_num - 1)
-    right_states = max_ref_cn - ref_copy_num + 1
+    min_obs_cn = int(np.floor(np.min(norm_means)))
+    max_obs_cn = int(np.ceil(np.max(norm_means)))
+    left_states = max(left_states, ref_copy_num - max(min_obs_cn - 2, 0))
+    right_states = max(right_states, max_obs_cn + 2 - ref_copy_num)
     return left_states, right_states
 
 
 def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, genome, out, model_params, *,
-        min_samples, agcn_range, agcn_jump, min_trans_prob, max_trans_prob=np.log(0.1), use_multipliers=True,
-        update_agcn_qual):
+        min_samples, agcn_range, strict_agcn_range, agcn_jump, min_trans_prob,
+        max_trans_prob=np.log(0.1), uniform_initial=False, use_multipliers=True, update_agcn_qual):
     dupl_hierarchy = region_group_extra.dupl_hierarchy
     windows = region_group_extra.hmm_windows
     ref_copy_num = windows[0].cn
@@ -907,34 +958,30 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
     group_name = region_group.name
 
     window_boundaries = _extract_window_boundaries(windows, dupl_hierarchy)
-
     depth_matrix = full_depth_matrix[window_ixs, :]
     if model_params.is_loaded:
-        model, multipliers = _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_params,
-            agcn_jump, use_multipliers)
-        single_iter = True
+        model, debug_params = _load_model(depth_matrix, windows, window_ixs, bg_depth, group_name, model_params,
+            agcn_jump, uniform_initial, use_multipliers)
+        multi_iter = False
     else:
-        model, multipliers = _setup_model(depth_matrix, windows, bg_depth, agcn_range, agcn_jump, min_trans_prob)
-        assert np.all(multipliers == 1)
-        single_iter = n_samples < min_samples
-    common.log('    Calculating copy number profiles within range [{}, {}]'.format(
+        model, debug_params = _setup_model(depth_matrix, windows, bg_depth, group_name, agcn_range, strict_agcn_range,
+            agcn_jump, min_trans_prob, uniform_initial)
+        multi_iter = n_samples >= min_samples
+    common.log('    Calculating aggregate CN profiles within range [{}, {}]'.format(
         model.get_copy_num(0), model.get_copy_num(model.n_hidden - 1)))
 
-    prev_prob = -np.inf
+    prev_lik = -np.inf
     prev_pseudo_states_matrix = None
     possible_states = None
 
-    if single_iter:
-        mult_weights = _get_mult_weights(multipliers, ref_copy_num)
-        down_up = np.full((n_observations - 1, 2), np.nan)
-        _write_hmm_params(group_name, 0, windows, multipliers, mult_weights, down_up, model, out.hmm_params)
+    if use_multipliers and multi_iter:
+        _first_iteration(depth_matrix, windows, bg_depth, model, debug_params, out.hmm_params, min_samples)
 
     ITERATIONS = 50
     # Do not run this for if there are not enough samples, or if the model was loaded from a previous run.
-    for iteration in range(1, 0 if single_iter else ITERATIONS + 1):
-        prob, multipliers = _single_iteration(depth_matrix, windows, bg_depth, model,
-            group_name, iteration, out.hmm_params, possible_states=possible_states, min_samples=min_samples,
-            min_trans_prob=min_trans_prob, max_trans_prob=max_trans_prob, use_multipliers=use_multipliers)
+    for iteration in range(1, ITERATIONS + 1) if multi_iter else ():
+        lik = _single_iteration(model, iteration, debug_params, out.hmm_params, possible_states=possible_states,
+            min_trans_prob=min_trans_prob, max_trans_prob=max_trans_prob, uniform_initial=uniform_initial)
         possible_states = _narrow_possible_states(model.gammas)
 
         pseudo_states_matrix = _prob_matrices_to_states(model)
@@ -943,28 +990,22 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
 
         same_result = prev_pseudo_states_matrix is not None \
             and np.all(pseudo_states_matrix.round() == prev_pseudo_states_matrix.round())
-
-        rel_improv = (prob - prev_prob) / np.abs(prev_prob) if np.isfinite(prev_prob) else 1
-        improv = prob - prev_prob if np.isfinite(prev_prob) else 1
-        if np.isinf(prob):
+        rel_improv = (lik - prev_lik) / np.abs(prev_lik) if np.isfinite(prev_lik) else 1.0
+        if np.isinf(lik):
             common.log('WARN: HMM likelihood is infinite')
             rel_improv = -1
-            improv = -1
         # Require different improvement based on the number of iterations.
-        if (iteration > 2 and rel_improv <= 0 and same_result) \
-                or (iteration > 2 and improv <= 0.01 and same_result) \
-                or (iteration > 10 and rel_improv <= 1e-8) \
+        if (iteration > 3 and -1e-8 <= rel_improv <= 1e-6 and same_result) \
                 or (iteration > 20 and rel_improv <= 1e-6):
             break
-        prev_prob = prob
+        prev_lik = lik
         prev_pseudo_states_matrix = pseudo_states_matrix
 
-    viterbi_prob, states_matrix = model.viterbi_many()
+    _viterbi_lik, states_matrix = model.viterbi_many()
     _write_states_matrix(model.get_copy_num(states_matrix), window_ixs, group_name + '\tv', out.hmm_states)
     paths, sample_paths = _extract_paths(states_matrix, model, windows, model_params, group_name, window_boundaries)
     _summarize_paths(dupl_hierarchy, windows, paths, genome, samples, out.viterbi_summary)
 
-    # NOTE: Should we use possible_states here?
     model.run_forward_backward(possible_states=None)
     common.log('    Writing detailed copy number profiles')
     _write_detailed_cn(model, samples, windows, genome, out.detailed_cn)
@@ -980,7 +1021,7 @@ def find_cn_profiles(region_group_extra, full_depth_matrix, samples, bg_depth, g
 
     if not model_params.is_loaded:
         common.log('    Saving HMM parameters to model parameters')
-        model_params.set_hmm_results(region_group, window_ixs, model, multipliers, paths)
+        model_params.set_hmm_results(region_group, window_ixs, model, debug_params.multipliers, paths)
 
 
 def _write_detailed_cn(model, samples, windows, genome, out):
