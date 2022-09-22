@@ -49,7 +49,7 @@ conda activate paras_env
 
 Alternatively, you can install it manually using the following commands:
 ```bash
-git clone --recursive https://github.com/tprodanov/parascopy.git
+git clone https://github.com/tprodanov/parascopy.git
 cd parascopy
 python3 setup.py install
 ```
@@ -70,6 +70,8 @@ In case of manual installation, Parascopy requires
 In order to run variant calling (`parascopy call`), Parascopy requires a modified Freebayes executable.
 It is installed automatically via conda, but for manual installation you need to run
 ```bash
+# Within the main parascopy directory.
+git clone --recursive https://github.com/tprodanov/freebayes.git
 cd freebayes
 meson build/ --buildtype release
 cd build
