@@ -1,3 +1,0 @@
-[submodule "freebayes"]
-	path = freebayes
-	url = https://github.com/tprodanov/freebayes
