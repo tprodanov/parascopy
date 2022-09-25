@@ -1545,13 +1545,10 @@ class ParalogEntry:
 
     @classmethod
     def extend_entries(cls, entries, new_subregion, paralog_entries):
-        common.log('      Extend entries    new subregion {}   {} paralog_entries   Sample {}'.format(
-            new_subregion, len(paralog_entries), paralog_entries[0].sample_id))
         if len(paralog_entries) == 1:
             entry = paralog_entries[0]
         else:
             best_i = np.argmax([min(entry.pscn_qual, entry.agcn_qual) for entry in paralog_entries])
-            common.log('        Best i = {}'.format(best_i))
             entry = paralog_entries[best_i]
         if entry.region1 != new_subregion:
             entry = entry.copy(new_subregion)
@@ -1601,15 +1598,8 @@ def summary_to_paralog_bed(in_filename, out_filename, genome, samples, tabix):
                     sample_entries.append(par_entry)
         sample_entries.sort()
 
-        common.log('Sample {}   {}'.format(sample_id, samples[sample_id]))
-        common.log('Entries:')
-        for i, tmp_entry in enumerate(sample_entries):
-            common.log('    [{}]    {}'.format(i, tmp_entry.to_str(genome, samples).strip()))
-
         subregions = Interval.get_disjoint_subregions(map(operator.attrgetter('region1'), sample_entries))
         for subregion, subregion_ixs in subregions:
-            common.log('    Extend {}    (last {})'.format(subregion_ixs,
-                all_entries[-1].to_str(genome, samples).strip() if all_entries else 'None'))
             if len(subregion_ixs) > 1:
                 ParalogEntry.extend_entries(all_entries, subregion, [sample_entries[i] for i in subregion_ixs])
             else:
