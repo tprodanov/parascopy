@@ -33,7 +33,7 @@ class SinglePosition:
 
     @classmethod
     def parse(cls, s, genome):
-        chrom_name, pos = s.split(':')
+        chrom_name, pos = s.rsplit(':', 1)
         chrom_id = genome.chrom_id(chrom_name)
         return cls(chrom_id, int(pos) - 1)
 

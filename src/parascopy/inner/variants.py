@@ -383,13 +383,19 @@ class _PsvPos:
         self.alleles = tuple(psv.alleles)
         self.psv_positions = [_PsvPosAllele(psv_ix,
             Interval(genome.chrom_id(psv.chrom), psv.start, psv.start + len(self.alleles[0])), True, 0)]
+        allele1_len = len(self.alleles[0])
+        self._is_indel = any(len(allele) != allele1_len for allele in self.alleles)
 
         for pos2 in psv.info['pos2']:
-            pos2 = pos2.split(':')
-            allele_ix = int(pos2[3]) if len(pos2) == 4 else 1
-            allele = self.alleles[allele_ix]
+            if pos2.endswith(':+') or pos2.endswith(':-'):
+                pos2 = pos2.rsplit(':', 2)
+                allele_ix = 1
+            else:
+                pos2 = pos2.rsplit(':', 3)
+                allele_ix = int(pos2[3])
             chrom_id = genome.chrom_id(pos2[0])
             start = int(pos2[1]) - 1
+            allele = self.alleles[allele_ix]
             self.psv_positions.append(
                 _PsvPosAllele(psv_ix, Interval(chrom_id, start, start + len(allele)), pos2[2] == '+', allele_ix))
         self._init_pos_weights(varcall_params)
@@ -405,9 +411,14 @@ class _PsvPos:
     def is_reliable(self):
         return self.status == PsvStatus.Reliable
 
+    @property
+    def is_indel(self):
+        return self._is_indel
+
     def _init_pos_weights(self, varcall_params):
-        match_weight = np.log1p(-varcall_params.error_rate)
-        mismatch_weight = np.log(varcall_params.error_rate)
+        error_rate = varcall_params.error_rate[self._is_indel]
+        match_weight = np.log1p(-error_rate)
+        mismatch_weight = np.log(error_rate)
 
         # If a read has allele i what would be "probability" of each homologous position.
         # Stores an array of natural log weights, size = (n_alleles x n_positions).
@@ -513,6 +524,7 @@ class VariantReadObservations:
         self._new_vcf_allele_corresp = None
         # For each variant position, stores the index of the reference allele (old_to_new[self._ref_allele] == 0).
         self._ref_alleles = None
+        self._is_indel = None
 
         if n_samples is not None:
             # list of dictionaries (one for each sample),
@@ -548,6 +560,10 @@ class VariantReadObservations:
     @property
     def is_psv(self):
         return self.parent is not None
+
+    @property
+    def is_indel(self):
+        return self._is_indel
 
     @property
     def has_psvs(self):
@@ -596,6 +612,8 @@ class VariantReadObservations:
         for i in range(n_alleles):
             alleles[i] = _read_string(reader)
         self.tmp_alleles = tuple(alleles)
+        allele1_len = len(alleles[0])
+        self._is_indel = any(len(allele) != allele1_len for allele in alleles)
         self.var_region = Interval(chrom_id, start, start + len(alleles[0]))
         self.psv_observations = []
         return self
@@ -631,10 +649,12 @@ class VariantReadObservations:
         assert variant.start + len(variant.ref) == self.var_region.end
         self.variant = variant
         self.variant_positions, self.pos_out_of_bounds = dupl_pos_finder.find_variant_pos(variant, self.var_region)
+        new_alleles = tuple(variant.alleles)
+        ref_allele_len = len(new_alleles[0])
+        self._is_indel = any(len(allele) != ref_allele_len for allele in new_alleles)
 
         old_alleles = self.tmp_alleles
         self.tmp_alleles = None
-        new_alleles = tuple(variant.alleles)
         if new_alleles != old_alleles:
             allele_corresp = self._simple_allele_corresp(old_alleles, new_alleles)
             self._update_observations(allele_corresp)
@@ -723,6 +743,7 @@ class VariantReadObservations:
         new_psv_obs.variant_positions = [psv_pos.to_variant_pos(new_psv_obs.variant.alleles)
             for psv_pos in new_psv_obs.variant.psv_positions]
         new_psv_obs.parent = self
+        new_psv_obs._is_indel = psv.is_indel
         self.psv_observations.append(new_psv_obs)
         return new_psv_obs
 
@@ -1061,7 +1082,7 @@ class VariantReadObservations:
             vcf_header.add_line('##FORMAT=<ID=GTs,Number=.,Type=String,Description="Possible genotypes.">')
             vcf_header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="The Phred-scaled Genotype Quality">')
             vcf_header.add_line('##FORMAT=<ID=GQ0,Number=1,Type=Float,Description='
-                '"Unedited genotype quality in case there is a sample-specific filter present."')
+                '"Unedited genotype quality in case there is a sample-specific filter present.">')
             vcf_header.add_line('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">')
             vcf_header.add_line('##FORMAT=<ID=AD,Number=R,Type=Integer,'
                 'Description="Number of pooled observation for each allele">')
@@ -1968,7 +1989,7 @@ class VariantGenotypePred:
                     variant.pos, read_hash, 2 - allele_obs.is_first_mate, allele_ix,
                     -10 * allele_obs.ln_qual / common.LOG10))
 
-            if allele_obs.ln_qual <= varcall_params.base_log_qual:
+            if allele_obs.ln_qual <= varcall_params.base_log_qual[self.variant_obs.is_indel]:
                 self.good_allele_counts[allele_ix] += 1
                 paired_read_position = all_read_positions[read_hash]
                 if paired_read_position.is_reverse(allele_obs.is_first_mate):
@@ -2034,7 +2055,7 @@ class VariantGenotypePred:
 
         scaled_pooled_gt_counts = [allele_probs * gt_counts for gt_counts in pooled_gt_counts]
         _, self.start_pooled_genotype_probs = genotype_likelihoods(sample_cn, self.good_allele_counts,
-            error_prob=varcall_params.error_rate, gt_counts=scaled_pooled_gt_counts)
+            error_prob=varcall_params.error_rate[self.variant_obs.is_indel], gt_counts=scaled_pooled_gt_counts)
         n_copies_range = np.arange(len(pooled_gt_counts[0]))
         self.start_pooled_genotypes = [PooledGT(np.repeat(n_copies_range, gt_counts))
             for gt_counts in pooled_gt_counts]
@@ -2098,8 +2119,9 @@ class VariantGenotypePred:
 
         variant = self.variant_obs.variant
         n_alleles = len(variant.alleles)
+        error_rate = varcall_params.error_rate[self.variant_obs.is_indel]
         for gt in self.paralog_genotypes:
-            gt.precompute_read_obs_probs(n_alleles, varcall_params.error_rate)
+            gt.precompute_read_obs_probs(n_alleles, error_rate)
 
         n_copies = len(self.variant_pscn.extended_cn)
         ext_cn = np.maximum(self.variant_pscn.extended_cn, 0.01)
@@ -2238,7 +2260,7 @@ def _find_maximal_clique(adj_matr, fitness):
     retain_nodes = np.ones(n, dtype=np.bool)
 
     sub_ixs = np.where(n_edges > 0)[0]
-    _maximal_clique_subfn(compl_matr[np.ix_(sub_ixs, sub_ixs)], n_edges[sub_ixs], fitness[sub_ixs], 
+    _maximal_clique_subfn(compl_matr[np.ix_(sub_ixs, sub_ixs)], n_edges[sub_ixs], fitness[sub_ixs],
         sub_ixs, retain_nodes)
     return retain_nodes
 
@@ -2247,38 +2269,34 @@ class VarCallParameters:
     def __init__(self, args, samples):
         self.pooled_gt_thresh = args.limit_pooled * common.LOG10
         self.mutation_rate = args.mutation_rate * common.LOG10
-        self._set_use_af(args, samples) # TODO: Actually use AF.
+        # self._set_use_af(args, samples) # TODO: Actually use AF.
         self.no_mate_penalty = args.no_mate_penalty * common.LOG10
         self.psv_ref_gt = args.psv_ref_gt
         self.skip_paralog_gts = args.skip_paralog
 
-        self.error_rate = np.power(10.0, args.error_rate)
-        assert 0 < self.error_rate < 1
-
-        self.base_qual = args.base_qual
-        self.base_log_qual = -0.1 * self.base_qual * common.LOG10
+        # Two error rates and base_log_qual: first for SNPs, second for indels.
+        self.error_rate = (args.error_rate[0], args.error_rate[1])
+        assert 0 < self.error_rate[0] < 1 and 0 < self.error_rate[1] < 1
+        self.base_log_qual = (-0.1 * args.base_qual[0] * common.LOG10, -0.1 * args.base_qual[1] * common.LOG10)
 
         self.min_read_depth = args.limit_depth[0]
         self.max_read_depth = args.limit_depth[1]
         self.max_strand_bias = args.max_strand_bias
         self.min_freebayes_qual = args.limit_qual
 
-    def _set_use_af(self, args, samples):
-        use_af_arg = args.use_af.lower()
-        if use_af_arg in ('yes', 'y', 'true', 't'):
-            self.use_af = True
-
-        elif use_af_arg in ('no', 'n', 'false', 'f'):
-            self.use_af = False
-
-        elif use_af_arg.startswith('over-'):
-            count = use_af_arg.split('-', 1)[-1]
-            if not count.isdigit():
-                raise ValueError('Cannot parse --use-af {}'.format(use_af_arg))
-            self.use_af = len(samples) >= int(count)
-
-        else:
-            raise ValueError('Cannot parse --use-af {}'.format(use_af_arg))
+    # def _set_use_af(self, args, samples):
+    #     use_af_arg = args.use_af.lower()
+    #     if use_af_arg in ('yes', 'y', 'true', 't'):
+    #         self.use_af = True
+    #     elif use_af_arg in ('no', 'n', 'false', 'f'):
+    #         self.use_af = False
+    #     elif use_af_arg.startswith('over-'):
+    #         count = use_af_arg.split('-', 1)[-1]
+    #         if not count.isdigit():
+    #             raise ValueError('Cannot parse --use-af {}'.format(use_af_arg))
+    #         self.use_af = len(samples) >= int(count)
+    #     else:
+    #         raise ValueError('Cannot parse --use-af {}'.format(use_af_arg))
 
 
 def _merge_overlapping_variants(variants):

@@ -197,7 +197,7 @@ def _analyze_sample(locus, sample_id, sample, all_read_allele_obs, coord_index, 
         if debug_out:
             debug_out.write('{}: Examining PSV conflicts\n'.format(sample))
         informative_psv_gts = variants_.VariantGenotypePred.select_non_conflicing_psvs(potential_psv_gts,
-            coord_index.max_mate_dist, varcall_params.error_rate, debug_out)
+            coord_index.max_mate_dist, varcall_params.error_rate[0], debug_out)
         common.log('[{}] Sample {}: selected {} informative PSVs'.format(locus.name, sample, len(informative_psv_gts)))
     else:
         informative_psv_gts = potential_psv_gts
@@ -465,13 +465,13 @@ def main(prog_name=None, in_argv=None):
             'under 10^<float> [default: %(default)s].')
     call_args.add_argument('--mutation-rate', type=float, metavar='<float>', default=-3,
         help='Log10 mutation rate (used for calculating genotype priors) [default: %(default)s].')
-    call_args.add_argument('--error-rate', type=float, metavar='<float>', default=-2,
-        help='Log10 error rate [default: %(default)s].')
-    call_args.add_argument('--base-qual', type=int, metavar='<int>', default=10,
-        help='Ignore base quality [default: %(default)s].')
-    call_args.add_argument('--use-af', metavar='yes|no|over-N', default='over-20',
-        help='Use alternate fraction (AF) for calculating genotype priors:\n'
-            'yes[y], no[n], over-N: use AF if there are at least N samples [default: %(default)s].')
+    call_args.add_argument('--error-rate', nargs=2, type=float, metavar='<float> <float>', default=(0.01, 0.01),
+        help='Two error rates: first for SNPs, second for indels [default: 0.01 0.01].')
+    call_args.add_argument('--base-qual', nargs=2, type=int, metavar='<int> <int>', default=(10, 10),
+        help='Ignore observations with low base quality (first for SNPs, second for indels) [default: 10 10].')
+    # call_args.add_argument('--use-af', metavar='yes|no|over-N', default='over-20',
+    #     help='Use alternate fraction (AF) for calculating genotype priors:\n'
+    #         'yes[y], no[n], over-N: use AF if there are at least N samples [default: %(default)s].')
     call_args.add_argument('--no-mate-penalty', type=float, metavar='<float>', default=-5,
         help='Penalize possible paired-read alignment positions in case they do not match\n'
             'second read alignment position (log10 penalty) [default: %(default)s].')

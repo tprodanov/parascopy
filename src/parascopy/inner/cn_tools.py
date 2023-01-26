@@ -428,12 +428,16 @@ def _psv_matches_const_region(const_region, psv, genome):
         return False
 
     for (region2, reg_strand), pos2_entry in zip(const_region.regions2, pos2):
-        pos2_entry = pos2_entry.split(':')
+        if pos2_entry.endswith(':+') or pos2_entry.endswith(':-'):
+            pos2_entry = pos2_entry.rsplit(':', 2)
+            allele_ix = 1
+        else:
+            pos2_entry = pos2_entry.rsplit(':', 3)
+            allele_ix = int(pos2_entry[3])
         curr_chrom_id = genome.chrom_id(pos2_entry[0])
         curr_start = int(pos2_entry[1]) - 1
         curr_strand = pos2_entry[2] == '+'
-        allele = 1 if len(pos2_entry) < 4 else int(pos2_entry[3])
-        curr_end = curr_start + psv_allele_lengths[allele]
+        curr_end = curr_start + psv_allele_lengths[allele_ix]
 
         if curr_chrom_id != region2.chrom_id or reg_strand != curr_strand:
             common.log('WARN: PSV {}:{:,} does not match with region {}'.format(psv.chrom, psv.pos, const_region.ix))

@@ -155,7 +155,7 @@ def _match_psv_alleles(psv, regions2, genome):
     res = [None] * (len(regions2) + 1)
     res[0] = 0
     for entry in pos2:
-        chrom, pos, strand, allele = entry.split(':')
+        chrom, pos, strand, allele = entry.rsplit(':', 3)
         chrom_id = genome.chrom_id(chrom)
         pos = int(pos) - 1
         strand = strand == '+'

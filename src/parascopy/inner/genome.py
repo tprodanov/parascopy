@@ -39,7 +39,7 @@ class ChromNames:
         if len(chromosomes) != len(self._names):
             return False
         for i, entry in enumerate(chromosomes):
-            name, length = entry.split(':')
+            name, length = entry.rsplit(':', 1)
             if name != self._names[i] or int(length) != self._lengths[i]:
                 return False
         return True
