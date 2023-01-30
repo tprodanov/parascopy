@@ -1882,7 +1882,7 @@ class VariantParalogCN:
                     variant_obs.pos_out_of_bounds, n_regions))
             return
 
-        cn_region_used = np.zeros(n_regions, dtype=np.bool)
+        cn_region_used = np.zeros(n_regions, dtype=np.bool_)
         pos_to_region = np.zeros(n_var_pos, dtype=np.uint16)
         for i, var_pos in enumerate(variant_obs.variant_positions):
             for j, cn_region in enumerate(cn_regions):
@@ -1928,7 +1928,7 @@ class VariantParalogCN:
     def _set_ext_fvals(self, psv):
         n_alleles = len(psv.alleles)
         n_ext_copies = len(self._ext_cn)
-        self._ext_allele_corresp = np.zeros((n_ext_copies, n_alleles), dtype=np.bool)
+        self._ext_allele_corresp = np.zeros((n_ext_copies, n_alleles), dtype=np.bool_)
         self._ext_fvals = np.zeros(n_ext_copies)
         for var_i, ext_copy_i in enumerate(self._var_to_ext):
             allele_ix = psv.psv_positions[var_i].allele_ix
@@ -2166,7 +2166,7 @@ class VariantGenotypePred:
             for gt_pred in gt_preds
         ]
 
-        adj_matr = np.ones((n_psvs, n_psvs), dtype=np.bool)
+        adj_matr = np.ones((n_psvs, n_psvs), dtype=np.bool_)
         any_conflicts = False
         for i in range(n_psvs - 1):
             gt_pred1 = gt_preds[i]
@@ -2205,7 +2205,7 @@ class VariantGenotypePred:
 
         psv1 = self.variant_obs.variant
         psv2 = gt_pred2.variant_obs.variant
-        conflict_alleles = np.ones((len(psv1.alleles), len(psv2.alleles)), dtype=np.bool)
+        conflict_alleles = np.ones((len(psv1.alleles), len(psv2.alleles)), dtype=np.bool_)
         for pos1 in psv1.psv_positions:
             for pos2 in psv2.psv_positions:
                 if pos1.region.distance(pos2.region) <= max_mate_dist:
@@ -2257,7 +2257,7 @@ def _find_maximal_clique(adj_matr, fitness):
     assert adj_matr.shape == (n, n)
     compl_matr = ~adj_matr
     n_edges = np.sum(compl_matr, axis=1)
-    retain_nodes = np.ones(n, dtype=np.bool)
+    retain_nodes = np.ones(n, dtype=np.bool_)
 
     sub_ixs = np.where(n_edges > 0)[0]
     _maximal_clique_subfn(compl_matr[np.ix_(sub_ixs, sub_ixs)], n_edges[sub_ixs], fitness[sub_ixs],

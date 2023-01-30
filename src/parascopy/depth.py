@@ -390,7 +390,7 @@ def _predict_variance(depth_values, curr_keep_window, gc_windows, min_windows=10
 
 def _summarize_sample(sample, sample_window_counts, params, windows, out, res):
     n_windows = len(sample_window_counts)
-    keep_window = np.ones(n_windows, dtype=np.bool)
+    keep_window = np.ones(n_windows, dtype=np.bool_)
     depth1 = np.zeros(n_windows, dtype=np.uint16)
     depth2 = np.zeros(n_windows, dtype=np.uint16)
 

@@ -232,7 +232,7 @@ def _select_psv_sample_pairs(region_group_extra, samples, out, min_samples, samp
 
     for psv_ix, psv_info in enumerate(psv_infos):
         info_str = ''
-        use_samples = np.zeros(n_samples, dtype=np.bool)
+        use_samples = np.zeros(n_samples, dtype=np.bool_)
         for sample_id, sample_region in enumerate(reliable_regions):
             good_obs = psv_info.sample_infos[sample_id] is not None
             is_ref = sample_region is not None \
@@ -475,7 +475,7 @@ def _cluster_psvs(psv_infos, psv_counts, n_samples):
 
     dist_matrix = np.full((n_psvs, n_psvs), np.nan)
     np.fill_diagonal(dist_matrix, 0)
-    use_psvs = np.ones(n_psvs, dtype=np.bool)
+    use_psvs = np.ones(n_psvs, dtype=np.bool_)
     for psv_i in range(n_psvs):
         if not use_psvs[psv_i]:
             continue

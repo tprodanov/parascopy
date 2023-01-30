@@ -61,7 +61,7 @@ class DuplRegion:
 
         assert self._region1.forward_order(other._region1, strict_order)
         new_regions2 = []
-        b_used = np.zeros(len(other._regions2), dtype=np.bool)
+        b_used = np.zeros(len(other._regions2), dtype=np.bool_)
         for i, (a_reg, a_strand) in enumerate(self._regions2):
             for j, (b_reg, b_strand) in enumerate(other._regions2):
                 if b_used[j] or a_strand != b_strand or a_reg.chrom_id != b_reg.chrom_id:
@@ -767,6 +767,6 @@ class RegionGroupExtra:
                 self.psv_is_semirel = np.all(self.psv_f_values >= semirel_threshold, axis=1) & self.psv_in_em
         else:
             n_psvs = len(self._psv_infos)
-            self.psv_in_em = np.zeros(n_psvs, dtype=np.bool)
-            self.psv_is_reliable = np.zeros(n_psvs, dtype=np.bool)
-            self.psv_is_semirel = np.zeros(n_psvs, dtype=np.bool)
+            self.psv_in_em = np.zeros(n_psvs, dtype=np.bool_)
+            self.psv_is_reliable = np.zeros(n_psvs, dtype=np.bool_)
+            self.psv_is_semirel = np.zeros(n_psvs, dtype=np.bool_)

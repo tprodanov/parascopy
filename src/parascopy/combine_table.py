@@ -306,7 +306,7 @@ class _Graph:
                     yield subpath
 
     def add_tangled_nodes(self, tangled_predicate, genome):
-        self._tangled_nodes = np.zeros(len(self._nodes), dtype=np.bool)
+        self._tangled_nodes = np.zeros(len(self._nodes), dtype=np.bool_)
         for i, dupl in enumerate(self._nodes):
             if dupl.is_tangled_region or tangled_predicate(dupl, genome):
                 self._tangled_nodes[i] = True
@@ -397,7 +397,7 @@ def _save_component(graph, chrom_names, component_id, graph_dir):
     MIN_NODES = 4
     paths = list(graph.find_simple_paths(MIN_NODES))
     total_nodes = len(graph)
-    node_in_path = np.zeros(total_nodes, dtype=np.bool)
+    node_in_path = np.zeros(total_nodes, dtype=np.bool_)
     for node_id in itertools.chain(*paths):
         node_in_path[node_id] = True
     n_in_path = sum(node_in_path)

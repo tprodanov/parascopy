@@ -318,7 +318,7 @@ def _validate_read_groups(pooled_bam, read_groups_dict, samples):
         common.log('WARN: Number of read groups does not match: {} in pooled BAM, {} expected.'.format(
             len(pooled_read_groups), len(read_groups_dict)))
 
-    samples_present = np.zeros(len(samples), dtype=np.bool)
+    samples_present = np.zeros(len(samples), dtype=np.bool_)
     for rg, sample in pooled_read_groups:
         if rg not in read_groups_dict:
             common.log('ERROR: Unknown pooled read group {} (sample {}). Perhaps the set of input files has changed?'
