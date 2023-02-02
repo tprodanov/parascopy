@@ -2374,13 +2374,15 @@ def _process_overlapping_variants(variants):
         for sample, fmt in var.samples.items():
             if 'GT' in fmt:
                 gts[sample].add(fmt['GT'])
-                gt_qual[sample] = max(gt_qual[sample], fmt['GQ'])
+                old_qual = fmt['GQ']
+                gt_qual[sample] = max(gt_qual[sample], 0.0 if old_qual is None else old_qual)
             elif 'GTs' in fmt:
                 gts[sample].update(fmt['GTs'])
 
             if 'PGT' in fmt:
                 pooled_gts[sample].add(fmt['PGT'])
-                pooled_gt_qual[sample] = max(pooled_gt_qual[sample], fmt['PGQ'])
+                old_pqual = fmt['PGQ']
+                pooled_gt_qual[sample] = max(pooled_gt_qual[sample], 0.0 if old_pqual is None else old_pqual)
             elif 'PGTs' in fmt:
                 pooled_gts[sample].update(fmt['PGTs'])
 
