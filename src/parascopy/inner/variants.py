@@ -2336,7 +2336,7 @@ def _merge_overlapping_variants(variants):
         for sample, fmt in var.samples.items():
             nfmt = nvar.samples[sample]
             old_gt = fmt.get('GT')
-            if old_gt is not None and old_gt[0] is not None:
+            if old_gt is not None and (len(old_gt) == 0 or old_gt[0] is not None):
                 nfmt['GT'] = tuple(sorted(allele_corresp[i] for i in old_gt))
             old_pgt = fmt.get('PGT')
             if old_pgt is not None:
