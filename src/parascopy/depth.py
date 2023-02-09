@@ -263,12 +263,16 @@ class Params:
         self.neighbours_dist = None
         self.loess_frac = None
         self.gc_bounds = None
+        self._ploidy = 2
+
+    def set_ploidy(self, ploidy):
+        self._ploidy = ploidy
 
     def set_neighbours_dist(self):
         self.neighbours_dist = self.window_size * self.neighbours - self.window_size // 2
 
     def describe(self):
-        s =  'Read depth parameters:\n'
+        s =  'Read depth parameters (ploidy = {}):\n'.format(self._ploidy)
         s += '    Use window size {} bp.\n'.format(self.window_size)
         s += '    Window is irregular in a sample if there are more than:\n'
         s += '    -  {:.1f}% reads with low mapping quality,\n'.format(self.low_mapq_ratio * 100)
@@ -284,6 +288,7 @@ class Params:
     @classmethod
     def from_args(cls, args, window_size, bounds):
         self = cls(args.low_mapq, args.mate_dist)
+        self.set_ploidy(args.ploidy)
         self.window_size = window_size
         self.low_mapq_ratio = args.low_mapq_perc / 100.0
         self.clipped_ratio = args.clipped_perc / 100.0
@@ -295,6 +300,8 @@ class Params:
         return self
 
     def equals(self, other):
+        if self._ploidy != other._ploidy:
+            return False
         if self.window_size != other.window_size:
             return False
         if self.low_mapq_ratio != other.low_mapq_ratio:
@@ -312,6 +319,10 @@ class Params:
         if self.gc_bounds != other.gc_bounds:
             return False
         return True
+
+    @property
+    def ploidy(self):
+        return self._ploidy
 
 
 def _filter_windows(windows, params, depth1, depth2, keep_window):
@@ -518,6 +529,7 @@ def _write_means_header(out_means, windows, params, tail_windows):
     common.log('Calculate background depth')
     window_size = len(windows[0])
     out_means.write('# command: {}\n'.format(common.command_to_str()))
+    out_means.write('# ploidy: {}\n'.format(params.ploidy))
     out_means.write('# window size: {}\n'.format(window_size))
     out_means.write('# number of windows: {}\n'.format(len(windows)))
     out_means.write('# low MAPQ threshold: {}\n'.format(params.low_mapq_thresh))
@@ -559,7 +571,9 @@ class Depth:
                     break
                 if line.count(':') == 1:
                     key, value = map(str.strip, line[1:].split(':'))
-                    if 'window size' in key:
+                    if key == 'ploidy':
+                        self._params.set_ploidy(int(value))
+                    elif 'window size' in key:
                         self._params.window_size = int(value)
                     elif 'MAPQ threshold' in key:
                         self._params.low_mapq_thresh = int(value)
@@ -608,6 +622,7 @@ class Depth:
                         .format(row['sample'], gc_content))
                     exit(1)
                 self._nbinom_params[sample_id, gc_content] = (n, p)
+        self._nbinom_params[:, :, 0] /= self._params.ploidy
 
     @classmethod
     def from_filenames(cls, filenames, samples, *args, **kwargs):
@@ -765,6 +780,9 @@ def main(prog_name, in_argv):
         help='Read mapping quality under <int> is considered as low [default: %(default)s].')
     depth_args.add_argument('--mate-dist', metavar='<int>', type=int, default=pool_reads.DEFAULT_MATE_DISTANCE,
         help='Insert size (~ distance between read mates) is expected to be under <int> [default: %(default)s].')
+    depth_args.add_argument('--ploidy', metavar='<int>', type=int, default=2,
+        help='Genome ploidy. [default: %(default)s].\n'
+             'If not 2, run "parascopy cn[-using]" with "--modify-ref" parameter.')
 
     opt_args = parser.add_argument_group('Optional arguments')
     opt_args.add_argument('-@', '--threads', metavar='<int>', type=int, default=4,

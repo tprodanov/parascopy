@@ -233,7 +233,7 @@ def _calculate_pooled_depth(bam_file, samples, bg_depth, read_groups_dict, dupl_
 
             n, p = bg_depth.at(sample_id, gc_content)
             mean_bg_depth = n * (1 - p) / p
-            outp.write('\t{:.4f}\n'.format(2 * counts.depth_read1 / mean_bg_depth))
+            outp.write('\t{:.4f}\n'.format(counts.depth_read1 / mean_bg_depth))
     return window_counts, psv_observations
 
 

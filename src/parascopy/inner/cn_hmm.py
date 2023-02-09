@@ -335,7 +335,7 @@ class CopyNumHmm(HmmModel):
                     continue
 
                 n_param, p_param = bg_depth.at(sample_id, window.gc_content)
-                n_params = 0.5 * n_param * state_ploidies * mult
+                n_params = n_param * state_ploidies * mult
                 curr_emissions = mult_weight * nbinom.logpmf(observations[obs_ix], n_params, p_param)
                 emission_matrices[sample_id, :, obs_ix] = curr_emissions - logsumexp(curr_emissions)
         self.set_emission_matrices(emission_matrices)
@@ -707,7 +707,7 @@ def _optimize_multipliers(nbinom_params, obs_depth, copy_num_probs, agcn_range, 
     assert nbinom_params.shape == (n_samples, 2)
     assert copy_num_probs.shape == (range_size, n_samples)
     assert agcn_range[0] > 0
-    nbinom_n_matrix = nbinom_params[:, 0] * agcn_range[:, np.newaxis] / 2
+    nbinom_n_matrix = nbinom_params[:, 0] * agcn_range[:, np.newaxis]
     nbinom_ps = nbinom_params[:, 1]
 
     def inner(mult):
@@ -934,7 +934,7 @@ def _select_hidden_states(depth_matrix, windows, bg_depth, ref_copy_num, agcn_ra
         nbinom_params = bg_depth.at(slice(None), window.gc_content)
         nbinom_n = nbinom_params[:, 0]
         nbinom_p = nbinom_params[:, 1]
-        mean_depth = 0.5 * (1 - nbinom_p) * nbinom_n / nbinom_p
+        mean_depth = nbinom_n * (1 - nbinom_p) / nbinom_p
         norm_depth[obs_ix] = depth_matrix[obs_ix] / mean_depth
     norm_means = np.mean(norm_depth, axis=0)
 
