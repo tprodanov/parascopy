@@ -169,7 +169,11 @@ def _analyze_sample(locus, sample_id, sample, all_read_allele_obs, coord_index, 
     all_genotype_predictions = []
     potential_psv_gts = []
     for variant_obs in all_read_allele_obs:
-        gt_pred = variants_.VariantGenotypePred(sample_id, sample, variant_obs, cn_profiles, assume_cn)
+        try:
+            gt_pred = variants_.VariantGenotypePred(sample_id, sample, variant_obs, cn_profiles, assume_cn)
+        except AssertionError:
+            sys.stderr.write('Unhandled assertion error in locus {} sample {}\n'.format(locus.name, sample))
+            raise
         gt_pred.init_read_counts(read_collection.read_positions, varcall_params, out.get('debug_obs'))
         gt_pred.update_read_locations()
         gt_pred.init_genotypes(varcall_params, mean_read_len, out.genotypes, only_pooled=skip_paralog_gts)

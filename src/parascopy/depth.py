@@ -372,7 +372,12 @@ def loess(x, y, xout, frac=2/3, deg=1, w=None):
         weight = common.tricube_kernel((sub_x - xval) / size)
         if in_weight is not None:
             weight *= in_weight[a:b]
-        coef = np.polyfit(sub_x, sub_y, deg=deg, w=weight)
+        try:
+            coef = np.polyfit(sub_x, sub_y, deg=deg, w=weight)
+        except ValueError:
+            sys.stderr.write('Polyfit failed for unknown reason (frac={:.5}, deg={}) at x={}\n'.format(frac, deg, xval))
+            sys.stderr.write('    subx: {}\n    suby: {}\n    w: {}\n'.format(list(sub_x), list(sub_y), list(weight)))
+            raise
         res[i] = np.polyval(coef, xval)
     return res
 
@@ -794,6 +799,7 @@ def main(prog_name, in_argv):
         version=long_version(), help='Show version.')
     args = parser.parse_args(in_argv)
 
+    np.set_printoptions(precision=6, linewidth=sys.maxsize, suppress=True, threshold=sys.maxsize)
     common.mkdir(args.output)
     genome = Genome(args.fasta_ref)
 

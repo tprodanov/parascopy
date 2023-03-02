@@ -1496,6 +1496,8 @@ class ReadCollection:
         self.sample = sample
         self.read_positions = defaultdict(_ReadPositions)
         coordinates = coord_index.load(sample_id)
+        if len(coordinates) == 0:
+            raise RuntimeError('Sample {} has no appropriate reads!'.format(sample))
 
         sum_length = 0
         for read_coord in coordinates.values():
@@ -1909,6 +1911,13 @@ class VariantParalogCN:
 
         sum_ext_cn = sum(self._ext_cn)
         if None in self._var_to_ext:
+            if sum_ext_cn >= self._agcn:
+                sys.stderr.write('Assertion `sum_ext_cn < self._agcn` failed.\n')
+                sys.stderr.write('    agCN: {},  psCN: {},  extCN: {}\n'.format(self._agcn, pscn, self._ext_cn))
+                sys.stderr.write('    Variant positions: {},  pos_to_region: {}\n'.format(variant_obs.variant_positions,
+                    pos_to_region))
+                sys.stderr.write('    cn_region_used: {},   var_to_ext: {},  ext_to_var: {}\n'.format(cn_region_used,
+                    self._var_to_ext, self._ext_to_var))
             assert sum_ext_cn < self._agcn
             j = len(self._ext_to_var)
             last_ext_to_var = []
