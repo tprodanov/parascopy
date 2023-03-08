@@ -775,7 +775,7 @@ def main(prog_name, in_argv):
             'of a skipped window [default: %(default)s].')
 
     depth_args = parser.add_argument_group('Depth calculation arguments')
-    depth_args.add_argument('--loess-frac', metavar='<float>', type=float, default=0.1,
+    depth_args.add_argument('--loess-frac', metavar='<float>', type=float, default=0.2,
         help='Loess parameter: use <float> closest windows to estimate average read depth\n'
             'for each GC-percentage [default: %(default)s].')
     depth_args.add_argument('--tail-windows', metavar='<int>', type=int, default=1000,

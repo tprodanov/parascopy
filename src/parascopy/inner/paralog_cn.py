@@ -813,22 +813,30 @@ def paralog_cn_str(paralog_cn, paralog_qual, min_qual_value=5):
     Returns
         - paralog CN: string,
         - paralog qual: tuple of integers,
-        - any_known: bool (any of the values over the threshold).
+        - any_known: bool (any of the quality values over the threshold).
     If paralog quality is less than min_qual_value, corresponding CN is replaced with '?' and quality
     is replaced with 0. Additionally, quality is rounded down to integers.
     """
     paralog_cn_str = []
     new_paralog_qual = []
-    any_known = False
+    agcn = 0
+    sum_hq_pscn = 0
+    n_hq = 0
     for cn, qual in zip(paralog_cn, paralog_qual):
-        if qual < min_qual_value:
-            paralog_cn_str.append('?')
-            new_paralog_qual.append(0)
-        else:
+        agcn += cn
+        if qual >= min_qual_value:
             paralog_cn_str.append(str(cn))
             new_paralog_qual.append(int(qual))
-            any_known = True
-    return ','.join(paralog_cn_str), tuple(new_paralog_qual), any_known
+            n_hq += 1
+            sum_hq_pscn += cn
+        else:
+            paralog_cn_str.append('?')
+            new_paralog_qual.append(0)
+
+    paralog_cn_str = ','.join(paralog_cn_str)
+    if sum_hq_pscn == agcn and n_hq < len(paralog_cn):
+        paralog_cn_str = paralog_cn_str.replace('?', '0')
+    return paralog_cn_str, tuple(new_paralog_qual), bool(n_hq)
 
 
 def _add_paralog_filter(results, filt):
