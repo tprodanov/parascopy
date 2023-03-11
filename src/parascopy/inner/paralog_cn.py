@@ -831,8 +831,9 @@ def paralog_cn_str(paralog_cn, paralog_qual, min_qual_value=5):
         if qual >= min_qual_value:
             paralog_cn_str.append(str(cn))
             new_paralog_qual.append(int(qual))
-            n_hq += 1
-            sum_hq_pscn += cn
+            if all_int:
+                n_hq += 1
+                sum_hq_pscn += cn
         else:
             paralog_cn_str.append('?')
             new_paralog_qual.append(0)
