@@ -83,7 +83,7 @@ def main(prog_name=None, in_argv=None):
     parser = argparse.ArgumentParser(
         description='Split input regions by reference copy number.',
         formatter_class=argparse.RawTextHelpFormatter, add_help=False,
-        usage='{} <table> [-o <table>] [arguments]'.format(prog_name))
+        usage='{} -t <table> -o <table> [arguments]'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
     io_args.add_argument('-t', '--table', metavar='<file>', required=True,
         help='Input indexed bed.gz homology table.')
