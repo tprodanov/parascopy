@@ -2300,131 +2300,29 @@ class VarCallParameters:
     #         raise ValueError('Cannot parse --use-af {}'.format(use_af_arg))
 
 
-def _merge_overlapping_variants(variants):
-    res = []
-    start = end = variants[0].start
-    ref = ''
-    for var in variants:
-        assert var.start >= start
-        var_ref = var.ref
-        var_end = var.start + len(var_ref)
-        if var_end > end:
-            ref += var_ref[end - var.start : ]
-            end = var_end
-
-    alt_alleles = []
-    alt_dict = {}
-    all_allele_corresp = []
-    for var in variants:
-        prefix = ref[ : var.start - start]
-        suffix = ref[var.start + len(var.ref) - start : ]
-        allele_corresp = [0]
-        for alt in var.alts:
-            allele = prefix + alt + suffix
-            allele_ix = alt_dict.get(allele)
-            if allele_ix is None:
-                alt_alleles.append(allele)
-                alt_dict[allele] = allele_ix = len(alt_alleles)
-            allele_corresp.append(allele_ix)
-        all_allele_corresp.append(allele_corresp)
-
-    new_vars = []
-    for var, allele_corresp in zip(variants, all_allele_corresp):
-        nvar = var.copy()
-        nvar.start = start
-        nvar.ref = ref
-        nvar.alts = alt_alleles
-        for sample, fmt in var.samples.items():
-            nfmt = nvar.samples[sample]
-            old_gt = fmt.get('GT')
-            if old_gt is not None and (len(old_gt) == 0 or old_gt[0] is not None):
-                nfmt['GT'] = tuple(sorted(allele_corresp[i] for i in old_gt))
-            old_pgt = fmt.get('PGT')
-            if old_pgt is not None:
-                new_pgt = sorted(allele_corresp[int(i)] for i in old_pgt.split('/'))
-                nfmt['PGT'] = '/'.join(map(str, new_pgt))
-        # common.log('    Convert:')
-        # common.log('      | {}'.format(str(var).strip()))
-        # common.log('      > {}'.format(str(nvar).strip()))
-        new_vars.append(nvar)
-    return new_vars
-
-
 def _process_overlapping_variants(variants):
-    var0 = variants[0]
-    for i in range(1, len(variants)):
-        if variants[i].start != var0.start or variants[i].alleles != var0.alleles:
-            variants = _merge_overlapping_variants(variants)
-            break
+    var_scores = np.zeros(len(variants))
+    for i, variant in enumerate(variants):
+        score = 0.0
+        for fmt in variant.samples.values():
+            gq = fmt.get('GQ')
+            score += 0 if gq is None else gq
+        var_scores[i] = score
 
-    gts = defaultdict(set)
-    gt_qual = defaultdict(float)
-    pooled_gts = defaultdict(set)
-    pooled_gt_qual = defaultdict(float)
-    filters = defaultdict(Filters)
-
-    best_var = None
-    best_ncopies = 0
-    for i, var in enumerate(variants):
-        pos2 = var.info['pos2']
-        curr_ncopies = 1 if len(pos2) == 0 else len(pos2) + 1
-        if curr_ncopies > best_ncopies:
-            best_var = var
-            best_ncopies = curr_ncopies
-
-        for sample, fmt in var.samples.items():
-            if 'GT' in fmt:
-                gts[sample].add(fmt['GT'])
-                old_qual = fmt['GQ']
-                gt_qual[sample] = max(gt_qual[sample], 0.0 if old_qual is None else old_qual)
-            elif 'GTs' in fmt:
-                gts[sample].update(fmt['GTs'])
-
-            if 'PGT' in fmt:
-                pooled_gts[sample].add(fmt['PGT'])
-                old_pqual = fmt['PGQ']
-                pooled_gt_qual[sample] = max(pooled_gt_qual[sample], 0.0 if old_pqual is None else old_pqual)
-            elif 'PGTs' in fmt:
-                pooled_gts[sample].update(fmt['PGTs'])
-
-            if 'FILT' in fmt:
-                for filt in fmt['FILT']:
-                    if filt != 'PASS':
-                        filters[sample].add(VarFilter.from_str(filt))
-
-    var = best_var.copy()
-    for sample in best_var.samples:
-        fmt = var.samples[sample]
-        curr_gts = tuple(gts[sample])
-        if len(curr_gts) != 1:
-            if 'GT' in fmt:
-                del fmt['GT']
-                del fmt['GQ']
-            if len(curr_gts) > 1:
-                fmt['GTs'] = tuple('/'.join(map(str, gt)) for gt in curr_gts)
+    res_vars = []
+    for i in np.argsort(-var_scores):
+        var = variants[i]
+        start = var.start
+        end = start + len(var.ref)
+        for var2 in res_vars:
+            start2 = var2.start
+            end2 = start2 + len(var2.ref)
+            if start < end2 and start2 < end:
+                break
         else:
-            fmt['GT'] = curr_gts[0]
-            fmt['GQ'] = gt_qual[sample]
-
-        curr_pgts = tuple(pooled_gts[sample])
-        if len(curr_pgts) != 1:
-            if 'PGT' in fmt:
-                del fmt['PGT']
-                del fmt['PGQ']
-            if len(curr_pgts) > 1:
-                fmt['PGTs'] = curr_pgts
-        else:
-            fmt['PGT'] = curr_pgts[0]
-            fmt['PGQ'] = pooled_gt_qual[sample]
-
-        curr_filt = filters[sample]
-        if curr_filt:
-            fmt['FILT'] = curr_filt.to_tuple()
-            if any(curr_filt.map(VarFilter.need_qual0)):
-                if 'GQ' in fmt:
-                    fmt['GQ0'] = fmt['GQ']
-                    fmt['GQ'] = 0
-    return var
+            res_vars.append(var)
+    res_vars.sort(key=itree.start)
+    return res_vars
 
 
 def merge_duplicates(variants):
@@ -2436,7 +2334,7 @@ def merge_duplicates(variants):
     for i, variant in enumerate(variants):
         if variant.chrom != prev_chrom or variant.start >= prev_end:
             if i - start_ix > 1:
-                merged_variants.append(_process_overlapping_variants(variants[start_ix:i]))
+                merged_variants.extend(_process_overlapping_variants(variants[start_ix:i]))
             elif i:
                 merged_variants.append(variants[i - 1])
             prev_chrom = variant.chrom
@@ -2447,7 +2345,7 @@ def merge_duplicates(variants):
 
     n = len(variants)
     if n - start_ix > 1:
-        merged_variants.append(_process_overlapping_variants(variants[start_ix:]))
+        merged_variants.extend(_process_overlapping_variants(variants[start_ix:]))
     elif n:
         merged_variants.append(variants[n - 1])
     return merged_variants
