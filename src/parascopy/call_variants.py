@@ -136,9 +136,12 @@ def _create_complement_dupl_tree(duplications, table, genome, padding):
     query_regions = Interval.combine_overlapping(query_regions, max_dist=padding)
     dupl_regions = []
     for q_region in query_regions:
-        for tup in table.fetch(q_region.chrom_name(genome), q_region.start, q_region.end):
-            region1 = Interval(genome.chrom_id(tup[0]), int(tup[1]), int(tup[2]))
-            dupl_regions.append(region1)
+        try:
+            for tup in table.fetch(q_region.chrom_name(genome), q_region.start, q_region.end):
+                region1 = Interval(genome.chrom_id(tup[0]), int(tup[1]), int(tup[2]))
+                dupl_regions.append(region1)
+        except ValueError:
+            common.log('WARN: Cannot fetch region {} from the table'.format(q_region.to_str(genome)))
     dupl_regions = Interval.combine_overlapping(dupl_regions)
     unique_regions = genome.complement_intervals(dupl_regions, include_full_chroms=False)
     return itree.MultiNonOverlTree(unique_regions)
