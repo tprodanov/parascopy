@@ -86,24 +86,25 @@ def _write_calling_regions(cn_profiles, samples, genome, assume_cn, max_agcn, fi
                 paralog_bed.write(entry.to_str(genome, samples))
 
 
-def _run_freebayes(locus, genome, args, filenames):
-    if args.rerun != 'full' and os.path.isfile(filenames.freebayes) and common.non_empty_file(filenames.read_allele):
-        return
-
+def _find_freebayes_executable(args):
     fb_executables = (
         args.freebayes,
         '_parascopy_freebayes',
         os.path.join(os.path.dirname(__file__), '../../freebayes/build/freebayes'))
     for path in fb_executables:
         if path is not None and shutil.which(path):
-            freebayes = path
-            break
-    else:
-        raise RuntimeError('Cannot run Freebayes, no executable found')
+            args.freebayes = path
+            return
+    raise RuntimeError('Cannot run Freebayes, no executable found')
+
+
+def _run_freebayes(locus, genome, args, filenames):
+    if args.rerun != 'full' and os.path.isfile(filenames.freebayes) and common.non_empty_file(filenames.read_allele):
+        return
 
     common.log('[{}] Running Freebayes'.format(locus.name))
     command = [
-        freebayes,
+        args.freebayes,
         '-f', args.fasta_ref,
         '-@', filenames.psvs,
         '-r', locus.to_str0(genome),
@@ -519,6 +520,8 @@ def main(prog_name=None, in_argv=None):
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
 
     args = parser.parse_args(in_argv)
+    _find_freebayes_executable(args)
+    common.log('Found freebayes executable: {}'.format(args.freebayes))
     common.check_executable(args.samtools)
     if args.tabix != 'none':
         common.check_executable(args.tabix)

@@ -7,7 +7,7 @@ Parascopy
 
 Parascopy is designed for robust and accurate estimation of paralog-specific copy number for duplicated genes using whole-genome sequencing.
 
-Created by Timofey Prodanov `timofey.prodanov[at]gmail.com` and Vikas Bansal `vibansal[at]health.ucsd.edu` at the University of California San Diego.
+Created by Timofey Prodanov `timofey.prodanov[at]hhu.de` and Vikas Bansal `vibansal[at]health.ucsd.edu` at the University of California San Diego.
 
 Table of contents
 -----------------
@@ -28,6 +28,7 @@ Citing Parascopy
 
 If you use Parascopy, please cite:
 * Prodanov, T. & Bansal, V. Robust and accurate estimation of paralog-specific copy number for duplicated genes using whole-genome sequencing. *Nature Communications* **13**, 3221 (2022). https://doi.org/10.1038/s41467-022-30930-3
+* Please check later for a paper on variant calling in duplicated regions.
 
 Installation
 ------------
@@ -162,7 +163,9 @@ install.packages(c('argparse', 'tidyverse', 'ggplot2', 'ComplexHeatmap', 'viridi
 Output files
 ------------
 
-See output file format [here](docs/cn_output.md).
+Copy number variation analysis (`parascopy cn|cn-using`) produces a range of files, described [here](docs/cn_output.md).
+
+Variant calling produces regular `VCF` files, additional information can be found [here](docs/call_output.md).
 
 Precomputed data
 ----------------
