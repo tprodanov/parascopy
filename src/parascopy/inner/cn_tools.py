@@ -449,7 +449,7 @@ def _psv_matches_const_region(const_region, psv, genome):
     return True
 
 
-def _create_region_groups(const_regions, psvs, genome, max_dist=1000):
+def _create_region_groups(const_regions, psvs, genome, max_dist):
     """
     Groups closeby const regions if they have the same CN even if there is a region with a different CN between them.
     """
@@ -482,7 +482,7 @@ class DuplHierarchy:
     Hierarchy of duplicated regions:
         psvs < windows < const_regions < region_groups.
     """
-    def __init__(self, interval, psvs, const_regions, genome, duplications, window_size, max_ref_cn):
+    def __init__(self, interval, psvs, const_regions, genome, duplications, window_size, max_ref_cn, max_dist):
         self.interval = interval
         self._psvs = psvs
         self._psv_searcher = itree.NonOverlTree(self._psvs, itree.start, itree.variant_end)
@@ -497,7 +497,7 @@ class DuplHierarchy:
                 continue
             _extend_windows(self._windows, const_region, interval_start, interval_seq, duplications, window_size)
 
-        self._region_groups = _create_region_groups(const_regions, psvs, genome)
+        self._region_groups = _create_region_groups(const_regions, psvs, genome, max_dist)
         self._group_by_name = { group.name: i for i, group in enumerate(self._region_groups) }
         self._init()
 

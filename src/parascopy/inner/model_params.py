@@ -217,6 +217,7 @@ class ModelParams:
         main_entry['max_ref_cn'] = args.max_ref_cn
         main_entry['agcn_range'] = '{},{}'.format(*args.agcn_range)
         main_entry['agcn_jump'] = args.agcn_jump
+        main_entry['region_dist'] = args.region_dist
 
         assert args.reliable_threshold[0] <= args.reliable_threshold[1]
         main_entry['reliable_threshold'] = '{:.5g},{:.5g}'.format(*args.reliable_threshold)
@@ -232,6 +233,7 @@ class ModelParams:
         args.agcn_range = tuple(map(int, main_entry[('agcn_range', 'copy_num_range')].split(',')))
         args.max_ref_cn = int(main_entry[('max_ref_cn', 'max_copy_num')])
         args.agcn_jump = int(main_entry[('agcn_jump', 'copy_num_jump')])
+        args.region_dist = int(main_entry.get('region_dist', 1000))
 
         if args.reliable_threshold is None:
             args.reliable_threshold = tuple(map(float, main_entry['reliable_threshold'].split(',')))

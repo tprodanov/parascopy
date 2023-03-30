@@ -396,7 +396,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
     const_regions = cn_tools.find_const_regions(duplications, interval, skip_regions, genome,
         min_size=window_size, max_ref_cn=args.max_ref_cn)
     dupl_hierarchy = cn_tools.DuplHierarchy(interval, psv_records, const_regions, genome, duplications,
-        window_size=bg_depth.window_size, max_ref_cn=args.max_ref_cn)
+        window_size=bg_depth.window_size, max_ref_cn=args.max_ref_cn, max_dist=args.region_dist)
     if model_params.is_loaded:
         msg = model_params.check_dupl_hierarchy(dupl_hierarchy, genome)
         if msg:
@@ -947,6 +947,9 @@ def parse_args(prog_name, in_argv, is_new):
         aggr_det_args.add_argument('--min-windows', type=int, metavar='<int>', default=5,
             help='Predict aggregate and paralog copy number only in regions with at\n'
                 'least <int> windows [default: %(default)s].')
+        aggr_det_args.add_argument('--region-dist', type=int, metavar='<int>', default=1000,
+            help='Jointly calculate copy number for nearby duplications with equal reference copy number,\n'
+                'if the distance between them does not exceed <int> [default: %(default)s].')
         aggr_det_args.add_argument('--window-filtering', type=float, metavar='<float>', default=1,
             help='Modify window filtering: by default window filtering is the same as in the background\n'
                 'read depth calculation [default: %(default)s].\n'

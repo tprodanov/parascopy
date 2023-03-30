@@ -1,4 +1,9 @@
 from scipy import stats
+try:
+    from scipy.stats import ConstantInputWarning
+except ImportError:
+    from scipy.stats import PearsonRConstantInputWarning as ConstantInputWarning
+
 from scipy import optimize
 from scipy.special import logsumexp
 from scipy.cluster import hierarchy
@@ -463,7 +468,7 @@ def _cluster_psvs(psv_infos, psv_counts, n_samples):
     cor_matrix = np.full((n_psvs, n_psvs), np.nan)
     np.fill_diagonal(cor_matrix, 1.0)
     with warnings.catch_warnings():
-        warnings.filterwarnings('ignore', category=stats.PearsonRConstantInputWarning)
+        warnings.filterwarnings('ignore', category=ConstantInputWarning)
         for psv_i in range(n_psvs):
             for psv_j in range(psv_i + 1, n_psvs):
                 # Samples with present observations for both PSVs.
