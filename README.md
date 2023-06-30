@@ -28,7 +28,7 @@ Citing Parascopy
 
 If you use Parascopy, please cite:
 * Prodanov, T. & Bansal, V. Robust and accurate estimation of paralog-specific copy number for duplicated genes using whole-genome sequencing. *Nature Communications* **13**, 3221 (2022). https://doi.org/10.1038/s41467-022-30930-3
-* Prodanov, T. & Bansal, V. A multi-locus approach for accurate variant calling in low-copy repeats using whole-genome sequencing. *Bioinformatics* [In Press] (2023). (If you used `parascopy call`)
+* Prodanov, T. & Bansal, V. A multi-locus approach for accurate variant calling in low-copy repeats using whole-genome sequencing. *Bioinformatics* **39**, i279-i287 (2023). https://doi.org/10.1093/bioinformatics/btad268
 
 Installation
 ------------

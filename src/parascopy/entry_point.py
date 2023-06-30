@@ -58,14 +58,17 @@ def _print_citations():
     print(long_version())
     print()
     print('Please cite:')
-    print('  * Prodanov, T. & Bansal, V. Robust and accurate estimation of paralog-specific copy number')
+    print('  * Copy-number variation detection:')
+    print('    Prodanov, T. & Bansal, V. Robust and accurate estimation of paralog-specific copy number')
     print('    for duplicated genes using whole-genome sequencing. \033[3mNature Communications\033[0m '
-        '\033[1m13\033[0m, 3221 (2022).')
+        '\033[1m13\033[0m, 3221 (2022)')
     print('    \033[4mhttps://doi.org/10.1038/s41467-022-30930-3\033[0m')
     print()
-    print('  * Prodanov, T. & Bansal, V. A multi-locus approach for accurate variant calling in low-copy')
-    print('    repeats using whole-genome sequencing. \033[3mBioinformatics\033[0m [In Press] (2023).')
-    print('    (If you used \033[4mparascopy call\033[0m)')
+    print('  * Variant calling:')
+    print('    Prodanov, T. & Bansal, V. A multi-locus approach for accurate variant calling in low-copy')
+    print('    repeats using whole-genome sequencing. \033[3mBioinformatics\033[0m '
+        '\033[1m39\033[0m, i279-i287 (2023)')
+    print('    \033[4mhttps://doi.org/10.1093/bioinformatics/btad268\033[0m')
     print()
 
 
