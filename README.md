@@ -7,7 +7,7 @@ Parascopy
 
 Parascopy is designed for robust and accurate estimation of paralog-specific copy number for duplicated genes using whole-genome sequencing.
 
-Created by Timofey Prodanov `timofey.prodanov[at]hhu.de` and Vikas Bansal `vibansal[at]health.ucsd.edu` at the University of California San Diego.
+Created by Timofey Prodanov `timofey.prodanov[at]hhu.de` and Vikas Bansal `vibansal[at]ucsd.edu` at the University of California San Diego.
 
 Table of contents
 -----------------
