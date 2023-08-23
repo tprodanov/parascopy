@@ -36,7 +36,6 @@ def _write_calling_regions(cn_profiles, samples, genome, assume_cn, max_agcn, fi
             if entry.sample_const_region.regions2 is not None:
                 regions.extend(region for region, _strand in entry.sample_const_region.regions2)
             assert entry.n_copies == len(regions)
-            ref_agcn = entry.n_copies * 2
             pooled_entry = None
 
             if assume_cn:
@@ -241,8 +240,15 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
     if not os.path.isfile(filenames.psvs):
         raise FileNotFoundError('Could not read PSVs from "{}"'.format(filenames.psvs))
 
-    duplications = model_params.get_duplications(table, locus, genome)
-    duplications = [detect_cn.transform_duplication(dupl, locus, genome) for dupl in duplications]
+    pool_interval = detect_cn.get_pool_interval(locus, genome)
+    duplications = []
+    pool_duplications = []
+    for dupl in model_params.get_duplications(table, locus, genome):
+        dupl.set_cigar_from_info()
+        duplications.append(detect_cn.clip_duplication(dupl, locus, genome))
+        pool_duplications.append(
+            None if data.bam_wrappers is None else detect_cn.clip_duplication(dupl, pool_interval, genome))
+
     if data.bam_wrappers is None:
         filenames.pooled = os.path.join(filenames.par_dir, 'pooled_reads.bam')
         if not os.path.isfile(filenames.pooled):
@@ -250,7 +256,7 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
     else:
         filenames.pooled = os.path.join(filenames.out_dir, 'pooled_reads.bam')
         if not os.path.isfile(filenames.pooled) or args.rerun == 'full':
-            pool_reads.pool(data.bam_wrappers, filenames.pooled, locus, duplications, genome,
+            pool_reads.pool(data.bam_wrappers, filenames.pooled, locus, pool_duplications, genome,
                 samtools=args.samtools, verbose=True)
 
     common.log('Analyzing locus [{}]'.format(locus.name))

@@ -270,8 +270,7 @@ def _write_summary(results, region_name, genome, samples, summary_out):
         summary_out.write('\n')
 
 
-def transform_duplication(dupl, interval, genome):
-    dupl.set_cigar_from_info()
+def clip_duplication(dupl, interval, genome):
     dupl = dupl.sub_duplication(interval)
     dupl.set_sequences(genome=genome)
     dupl.set_padding_sequences(genome, 200)
@@ -338,9 +337,16 @@ def _validate_read_groups(pooled_bam, read_groups_dict, samples):
             .format(len(ixs), samples[ixs[0]]))
 
 
+def get_pool_interval(interval, genome, pool_interval=2000):
+    pool_interval = interval.add_padding(pool_interval)
+    pool_interval.trim(genome)
+    return pool_interval
+
+
 def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref_cns):
     subdir = os.path.join(data.args.output, interval.os_name)
     duplications = []
+    pool_duplications = []
     skip_regions = []
     genome = data.genome
     args = data.args
@@ -356,9 +362,12 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
     time_log = _TimeLogger(os.path.join(extra_subdir, 'time.log'))
     time_log.log('Analyzing {}'.format(interval.full_name(genome)))
 
+    pool_interval = get_pool_interval(interval, genome)
     if model_params.is_loaded:
-        duplications = model_params.get_duplications(data.table, interval, genome)
-        duplications = [transform_duplication(dupl, interval, genome) for dupl in duplications]
+        for dupl in model_params.get_duplications(data.table, interval, genome):
+            dupl.set_cigar_from_info()
+            duplications.append(clip_duplication(dupl, interval, genome))
+            pool_duplications.append(clip_duplication(dupl, pool_interval, genome))
         skip_regions = model_params.get_skip_regions(skip_regions, genome)
     else:
         with open(os.path.join(extra_subdir, 'regions.txt'), 'w') as outp:
@@ -383,7 +392,9 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
 
                 outp.write('Use duplication   {}\n'.format(dupl.to_str(genome)))
                 model_params.add_duplication(len(duplications), dupl)
-                duplications.append(transform_duplication(dupl, interval, genome))
+                dupl.set_cigar_from_info()
+                duplications.append(clip_duplication(dupl, interval, genome))
+                pool_duplications.append(clip_duplication(dupl, pool_interval, genome))
         skip_regions = Interval.combine_overlapping(skip_regions)
         model_params.set_skip_regions(skip_regions)
 
@@ -407,7 +418,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
     _write_bed_files(interval, duplications, const_regions, genome, subdir)
     pooled_bam_path = os.path.join(subdir, 'pooled_reads.bam')
     if not os.path.exists(pooled_bam_path):
-        pool_reads.pool(data.bam_wrappers, pooled_bam_path, interval, duplications, genome,
+        pool_reads.pool(data.bam_wrappers, pooled_bam_path, interval, pool_duplications, genome,
             samtools=args.samtools, verbose=True, time_log=time_log)
 
     extra_files = dict(depth='depth.csv', region_groups='region_groups.txt', windows='windows.bed',
