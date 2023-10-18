@@ -673,7 +673,7 @@ def find_reliable_psvs(region_group_extra, samples, genome, modified_ref_cns, ou
 
             n_reliable = len(curr_reliable)
             mean_info_content = np.mean([psv_infos[i].info_content for i in curr_reliable]) if n_reliable else 0.0
-            elapsed_time = str(timedelta(seconds=perf_counter() - timer_start))[:-5]
+            elapsed_time = common.fmt_timedelta(timedelta(seconds=perf_counter() - timer_start))
             out.em_pscn.write('{}\t{}\t{}\t{}\t{:.7f}\t{}\t{:.6f}'.format(group_name, cluster_i, iteration,
                 elapsed_time, total_lik / common.LOG10, n_reliable, mean_info_content))
             for sample_id, curr_pscn_probs in enumerate(poss_pscn_probs):
@@ -1664,8 +1664,8 @@ class PooledEntry:
     def to_str_short(self, genome, samples):
         return '{}\t{}\t{}\n'.format(self.region1.to_bed(genome), samples[self.sample_id], self.cn)
 
-    def to_str_zero(self, genome, samples):
-        return '{}\t{}\t0\n'.format(self.region1.to_bed(genome), samples[self.sample_id])
+    def to_str_with(self, genome, samples, cn):
+        return '{}\t{}\t{}\n'.format(self.region1.to_bed(genome), samples[self.sample_id], cn)
 
     @classmethod
     def parse(cls, tup, genome, samples):

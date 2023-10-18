@@ -390,11 +390,10 @@ def _extend_windows(windows, const_region, interval_start, interval_seq, duplica
         skip_this_window = False
         for j, dupl in enumerate(region_dupls):
             subregion2 = dupl.aligned_region(subregion1)
-            if subregion2 is None:
+            if subregion2 is None or not const_region.regions2[j][0].contains(subregion2):
                 skip_this_window = True
                 # continue because we need to update all prev_ends.
                 continue
-            assert const_region.regions2[j][0].contains(subregion2)
             if dupl.strand:
                 len2 = len(subregion2) if prev_ends2[j] is None else subregion2.end - prev_ends2[j]
                 prev_ends2[j] = subregion2.end
@@ -484,18 +483,16 @@ class DuplHierarchy:
     """
     def __init__(self, interval, psvs, const_regions, genome, duplications, window_size, max_ref_cn, max_dist):
         self.interval = interval
+        self._interval_seq = interval.get_sequence(genome)
         self._psvs = psvs
         self._psv_searcher = itree.NonOverlTree(self._psvs, itree.start, itree.variant_end)
         self._const_regions = const_regions
-
-        interval_seq = interval.get_sequence(genome)
-        interval_start = interval.start
 
         self._windows = []
         for const_region in const_regions:
             if const_region.cn > max_ref_cn:
                 continue
-            _extend_windows(self._windows, const_region, interval_start, interval_seq, duplications, window_size)
+            _extend_windows(self._windows, const_region, interval.start, self._interval_seq, duplications, window_size)
 
         self._region_groups = _create_region_groups(const_regions, psvs, genome, max_dist)
         self._group_by_name = { group.name: i for i, group in enumerate(self._region_groups) }
@@ -516,6 +513,10 @@ class DuplHierarchy:
     def _store_group_windows(self):
         for window in self._windows:
             self.get_group(self.window_group_name(window)).window_ixs.append(window.ix)
+
+    @property
+    def interval_seq(self):
+        return self._interval_seq
 
     @property
     def psvs(self):

@@ -7,7 +7,7 @@ from enum import Enum
 from scipy.stats import poisson, multinomial, fisher_exact, binom
 from scipy.special import logsumexp, gammaln
 from functools import lru_cache
-from collections import namedtuple, defaultdict
+from collections import namedtuple, defaultdict, OrderedDict
 
 from . import duplication as duplication_
 from .cigar import Cigar, Operation
@@ -504,6 +504,27 @@ def _round_qual(qual):
     return round(qual, max(0, 2 - log))
 
 
+_ALN_ARGS = None
+
+
+def _align_alleles(ref_allele, alt_allele):
+    import parasail
+    from . import alignment
+    global _ALN_ARGS
+    if _ALN_ARGS is None:
+        _ALN_ARGS = alignment.Weights().parasail_args()
+    aln = parasail.nw_trace_scan_sat(alt_allele, ref_allele, *_ALN_ARGS)
+    cigar = []
+    for value in aln.cigar.seq:
+        length = value >> 4
+        op_num = value & 0xf
+        Cigar.append(cigar, length, Operation(op_num))
+    cigar = Cigar.from_tuples(cigar)
+    common.log(f'    Fixed CIGAR: {cigar}')
+    assert cigar.ref_len == len(ref_allele) and cigar.read_len == len(alt_allele)
+    return cigar
+
+
 class VariantReadObservations:
     def __init__(self, var_region, alleles, n_samples):
         """
@@ -649,7 +670,10 @@ class VariantReadObservations:
         assert variant.start + len(variant.ref) == self.var_region.end
         self.variant = variant
         self.variant_positions, self.pos_out_of_bounds = dupl_pos_finder.find_variant_pos(variant, self.var_region)
-        new_alleles = tuple(variant.alleles)
+
+        # Use this to remove duplicate alleles, if any.
+        new_alleles = tuple(OrderedDict.fromkeys(variant.alleles))
+        variant.alleles = new_alleles
         ref_allele_len = len(new_alleles[0])
         self._is_indel = any(len(allele) != ref_allele_len for allele in new_alleles)
 
@@ -710,7 +734,10 @@ class VariantReadObservations:
         for i in range(len(var_alleles) - 1):
             cigar = Cigar(variant.info['CIGAR'][i].replace('M', '='))
             var_alt_allele = var_alleles[i + 1]
-            assert cigar.ref_len == var_end - var_start and cigar.read_len == len(var_alt_allele)
+            if cigar.ref_len != var_end - var_start or cigar.read_len != len(var_alt_allele):
+                common.log('WARN: VCF file contains incorrect CIGAR for {}:{} ({} and {} -> {})'.format(
+                    variant.chrom, var_start + 1, var_ref_allele, var_alt_allele, cigar))
+                cigar = _align_alleles(var_ref_allele, var_alt_allele)
             cigar.init_proxy_index()
 
             alt_size_diff = len(var_alt_allele) - len(var_ref_allele)

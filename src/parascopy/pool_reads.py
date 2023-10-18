@@ -42,7 +42,7 @@ def _create_record(orig_record, header, read_groups, status, max_mate_dist,
         record.reference_start = orig_record.reference_start if start is _UNDEF else start
         record.mapping_quality = 60
         record.cigartuples = cigar_tuples
-        if orig_record.is_reverse != dupl_strand:
+        if orig_record.is_reverse == dupl_strand:
             record.is_reverse = True
     else:
         record.is_unmapped = True

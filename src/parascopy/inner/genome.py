@@ -87,7 +87,7 @@ class ChromNames:
 
     def chrom_interval(self, chrom_id, named=True):
         if named:
-            return NamedInterval(chrom_id, 0, self._lengths[chrom_id], name=self._names[chrom_id])
+            return NamedInterval(chrom_id, 0, self._lengths[chrom_id], genome=self, name=self._names[chrom_id])
         return Interval(chrom_id, 0, self._lengths[chrom_id])
 
     def all_chrom_intervals(self, named=True):

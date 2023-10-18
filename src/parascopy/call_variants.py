@@ -71,9 +71,9 @@ def _write_calling_regions(cn_profiles, samples, genome, assume_cn, max_agcn, fi
         for entry in pooled_entries:
             if entry.cn <= max_agcn:
                 pooled_bed.write(entry.to_str(genome, samples))
-                cnv_map.write(entry.to_str_short(genome, samples))
+                cnv_map.write(entry.to_str_with(genome, samples, cn=1))
             else:
-                cnv_map.write(entry.to_str_zero(genome, samples))
+                cnv_map.write(entry.to_str_with(genome, samples, cn=0))
 
     paralog_entries.sort()
     with common.open_possible_gzip(filenames.paralog_bed, 'w', bgzip=True) as paralog_bed:
@@ -110,7 +110,7 @@ def _run_freebayes(locus, genome, args, filenames):
         '-C', args.alternate_count,
         '-F', args.alternate_fraction,
         '-n', args.n_alleles,
-        '-p', 2, # Default ploidy, do we need a parameter for that?
+        '-p', 1,
         '-A', filenames.cnv_map,
         '--read-allele-obs', filenames.read_allele,
         '-v', filenames.freebayes + '.tmp',
@@ -231,8 +231,8 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
     table = data.table
     args = data.args
     filenames = argparse.Namespace()
-    filenames.par_dir = os.path.join(args.parascopy, locus.os_name)
-    filenames.out_dir = os.path.join(args.output, locus.os_name)
+    filenames.par_dir = detect_cn.get_locus_dir(args.parascopy, locus.os_name, move_old=True)
+    filenames.out_dir = detect_cn.get_locus_dir(args.output, locus.os_name, move_old=True)
     common.mkdir(filenames.out_dir)
 
     filenames.cn_res = os.path.join(filenames.par_dir, 'res.samples.bed.gz')
@@ -286,6 +286,7 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
 
     _run_freebayes(locus, genome, args, filenames)
 
+    common.log('    [{}] Loading read-allele observations'.format(locus.name))
     dupl_pos_finder = variants_.DuplPositionFinder(locus.chrom_id, duplications)
     with open(filenames.read_allele, 'rb') as ra_inp, pysam.VariantFile(filenames.freebayes) as vcf_file:
         all_read_allele_obs = variants_.read_freebayes_results(ra_inp, samples, vcf_file, dupl_pos_finder)
@@ -373,17 +374,12 @@ def run(loci, loaded_models, data, samples, assume_cn):
     tabix = args.tabix
     successful_loci = list(itertools.compress(loci, successful))
     common.log('Merging output files')
-    detect_cn.join_vcf_files([os.path.join(out_dir, region.os_name, 'variants.vcf.gz') for region in successful_loci],
-        os.path.join(out_dir, 'variants.vcf.gz'), genome, tabix, merge_duplicates=True)
-    detect_cn.join_vcf_files(
-        [os.path.join(out_dir, region.os_name, 'variants_pooled.vcf.gz') for region in successful_loci],
-        os.path.join(out_dir, 'variants_pooled.vcf.gz'), genome, tabix, merge_duplicates=True)
-    detect_cn.join_bed_files(
-        [os.path.join(out_dir, region.os_name, 'variants.bed.gz') for region in successful_loci],
-        os.path.join(out_dir, 'variants.bed.gz'), genome, tabix)
-    detect_cn.join_bed_files(
-        [os.path.join(out_dir, region.os_name, 'variants_pooled.bed.gz') for region in successful_loci],
-        os.path.join(out_dir, 'variants_pooled.bed.gz'), genome, tabix)
+    loci_dir = [detect_cn.get_locus_dir(out_dir, region.os_name, move_old=False) for region in successful_loci]
+    detect_cn.join_vcf_files(loci_dir, os.path.join(out_dir, 'variants.vcf.gz'), genome, tabix, merge_duplicates=True)
+    detect_cn.join_vcf_files(loci_dir, os.path.join(out_dir, 'variants_pooled.vcf.gz'), genome, tabix,
+        merge_duplicates=True)
+    detect_cn.join_bed_files(loci_dir, os.path.join(out_dir, 'variants.bed.gz'), genome, tabix)
+    detect_cn.join_bed_files(loci_dir, os.path.join(out_dir, 'variants_pooled.bed.gz'), genome, tabix)
 
     n_successes = sum(successful)
     if n_successes < n_loci:
