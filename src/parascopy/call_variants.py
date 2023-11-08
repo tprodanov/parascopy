@@ -71,7 +71,7 @@ def _write_calling_regions(cn_profiles, samples, genome, assume_cn, max_agcn, fi
         for entry in pooled_entries:
             if entry.cn <= max_agcn:
                 pooled_bed.write(entry.to_str(genome, samples))
-                cnv_map.write(entry.to_str_with(genome, samples, cn=1))
+                cnv_map.write(entry.to_str_short(genome, samples))
             else:
                 cnv_map.write(entry.to_str_with(genome, samples, cn=0))
 
@@ -452,7 +452,7 @@ def main(prog_name=None, in_argv=None):
     fb_args.add_argument('--alternate-count', type=int, metavar='<int>', default=4,
         help='Minimum alternate allele read count (in at least one sample),\n'
             'corresponds to freebayes parameter -C <int> [default: %(default)s].')
-    fb_args.add_argument('--alternate-fraction', type=float, metavar='<float>', default=0,
+    fb_args.add_argument('--alternate-fraction', type=float, metavar='<float>', default=0.05,
         help='Minimum alternate allele read fraction (in at least one sample),\n'
             'corresponds to freebayes parameter -F <float> [default: %(default)s].')
     fb_args.add_argument('--n-alleles', type=int, metavar='<int>', default=3,

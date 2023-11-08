@@ -1759,7 +1759,7 @@ def _genotype_probs_to_str(genotypes, probs):
     return ixs[0], s
 
 
-def _calculate_allele_probs(alleles, read_len):
+def _calculate_allele_probs(variant, read_len):
     """
     Calculate probabilities of completely covering each allele based on the allele length and read length.
 
@@ -1768,12 +1768,15 @@ def _calculate_allele_probs(alleles, read_len):
     Next, allele probabilities are normalized in a way that the largest probability will be 1.
     Note, that the resulting array does not sum up to one.
     """
-    allele_probs = np.zeros(len(alleles))
+    alleles = variant.alleles
+    EPS = 0.1 # Should be smaller than 1
+    allele_probs = np.full(len(alleles), EPS)
     for i, allele in enumerate(alleles):
-        allele_probs[i] = max(0, read_len - len(allele) - 1)
+        allele_probs[i] = max(EPS, read_len - len(allele) - 1)
     m = allele_probs.max()
-    if m == 0.0:
-        raise RuntimeError('All alleles are longer than the mean read length')
+    if m == EPS:
+        common.log('WARN: All alleles for {}:{} are longer than the mean read length'.format(
+            variant.chrom, variant.pos + 1))
     allele_probs /= m
     return allele_probs
 
@@ -2078,7 +2081,7 @@ class VariantGenotypePred:
         '''
         sample_cn = self.variant_pscn.agcn if self.variant_pscn.agcn_known else 2
         variant = self.variant_obs.variant
-        allele_probs = _calculate_allele_probs(variant.alleles, mean_read_len)
+        allele_probs = _calculate_allele_probs(variant, mean_read_len)
         pooled_gt_counts = all_gt_counts(len(variant.alleles), sample_cn)
 
         scaled_pooled_gt_counts = [allele_probs * gt_counts for gt_counts in pooled_gt_counts]
