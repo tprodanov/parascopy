@@ -91,7 +91,7 @@ def _extract_reads(in_bam, out_bam, read_groups, region, genome, out_header, rea
                 .format(record.query_name, record.is_read2 + 1, record.reference_name, record.reference_start + 1) +
                 ' Skipping second alignment')
             continue
-        curr_read_pos.record_mate_pos(record, genome, max_mate_dist)
+        curr_read_pos.save_mate_pos(record, genome, max_mate_dist)
         new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.SameLoc, max_mate_dist)
         out_bam.write(new_rec)
 
@@ -100,11 +100,13 @@ class _ReadPositions:
     MAX_REALIGNED_DIST = 100
 
     def __init__(self):
+        self.from_main_copy = False
         self.realigned_pos = ([], [])
         self.mate_written = [False, False]
         self.mate_position = None
 
     def add_primary_pos(self, is_read2, pos):
+        self.from_main_copy = True
         positions = self.realigned_pos[is_read2]
         if positions:
             return False
@@ -118,7 +120,7 @@ class _ReadPositions:
         positions.append(new_pos)
         return True
 
-    def record_mate_pos(self, record, genome, max_mate_dist):
+    def save_mate_pos(self, record, genome, max_mate_dist):
         is_read2 = record.is_read2
         self.mate_written[is_read2] = True
         mate_ix = 1 - is_read2
@@ -163,7 +165,7 @@ def _extract_reads_and_realign(in_bam, out_bam, read_groups, dupl, genome, out_h
         cigar_tuples = reg1_aln.cigar.to_pysam_tuples() if reg1_aln.cigar is not None else None
         new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.Realigned, max_mate_dist,
             dupl_strand=dupl.strand, seq=read_seq, cigar_tuples=cigar_tuples, start=new_start)
-        read_positions[record.query_name].record_mate_pos(record, genome, max_mate_dist)
+        read_positions[record.query_name].save_mate_pos(record, genome, max_mate_dist)
         out_bam.write(new_rec)
 
 
@@ -188,17 +190,11 @@ def _get_fetch_regions(fetch_positions, max_dist=100):
 
 def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_groups, max_mate_dist):
     fetch_positions = []
-    mate_names = set()
-
     for read_name, read_pos in read_positions.items():
         mate_pos = read_pos.mate_pos()
-        if mate_pos is None:
-            continue
-
-        is_read2, chrom_id, pos = mate_pos
-        fetch_positions.append((chrom_id, pos))
-        mate_names.add((read_name, is_read2))
-
+        if mate_pos is not None:
+            _is_read2, chrom_id, pos = mate_pos
+            fetch_positions.append((chrom_id, pos))
     if not fetch_positions:
         return
 
@@ -206,11 +202,16 @@ def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_group
         for record in common.checked_fetch(in_bam, region, genome):
             if record.flag & 3844:
                 continue
-            key = (record.query_name, record.is_read2)
-            if key not in mate_names:
+
+            read_pos = read_positions.get(record.query_name)
+            mate_pos = None if read_pos is None else read_pos.mate_pos()
+            if mate_pos is None or mate_pos[0] != record.is_read2 or mate_pos[2] != record.pos:
                 continue
-            mate_names.remove(key)
-            new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.ReadMate, max_mate_dist)
+            if read_pos.from_main_copy:
+                new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.ReadMate, max_mate_dist)
+            else:
+                new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.ReadMate, max_mate_dist,
+                    cigar_tuples=None, start=read_pos.realigned_pos[1 - record.is_read2])
             out_bam.write(new_rec)
 
 

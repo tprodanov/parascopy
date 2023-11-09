@@ -1093,7 +1093,6 @@ class VariantReadObservations:
             for name, length in genome.names_lengths():
                 vcf_header.add_line('##contig=<ID={},length={}>'.format(name, length))
 
-            vcf_header.add_line('##FILTER=<ID=Conflict,Description="Conflicting variant calls">')
             vcf_header.add_line('##INFO=<ID=pos2,Number=.,Type=String,Description="Second positions of the variant. '
                 'Format: chrom:pos:strand">')
             vcf_header.add_line('##INFO=<ID=overlPSV,Number=1,Type=Character,'
@@ -1224,6 +1223,53 @@ def open_and_write_vcf(filename, header, records, tabix):
         common.Process([tabix, '-p', 'vcf', filename]).finish()
 
 
+def _is_alt_gt(gt):
+    return gt is not None and gt[0] is not None and gt.count(0) != len(gt)
+
+
+def _mark_sample_cluster(cluster):
+    """
+    Mark a cluster for the specific sample.
+    """
+    for _, rec_fmt in cluster:
+        # if rec_fmt.get('GQ') > 0:
+        #     rec_fmt['GQ0'] = rec_fmt['GQ']
+        #     rec_fmt['GQ'] = 0
+        filt = rec_fmt.get('FILT')
+        if filt is None:
+            rec_fmt['FILT'] = (str(VarFilter.VarCluster),)
+        else:
+            rec_fmt['FILT'] = filt + (str(VarFilter.VarCluster),)
+
+
+def _mark_var_clusters(records, n_samples, var_dist=50, var_count=5):
+    """
+    Mark clusters of non-PSV variants where a sample has non-reference allele
+    in at least `var_count` variants, all having at most `var_dist` between each other.
+    """
+    if not records:
+        return
+    assert var_count >= 2
+
+    cluster = []
+    for sample_id in range(n_samples):
+        cluster.clear()
+        for record in records:
+            rec_fmt = record.samples[sample_id]
+            # Ignore PSVs and reference genotypes.
+            if record.info['overlPSV'] == 'T' or not _is_alt_gt(rec_fmt.get('GT')):
+                continue
+            if cluster:
+                last = cluster[-1][0]
+                if last.chrom != record.chrom or last.start + len(last.ref) + var_dist < record.start:
+                    if len(cluster) >= var_count:
+                        _mark_sample_cluster(cluster)
+                    cluster.clear()
+            cluster.append((record, rec_fmt))
+        if len(cluster) >= var_count:
+            _mark_sample_cluster(cluster)
+
+
 def write_vcf_file(filenames, vcf_headers, all_read_allele_obs, genome, tabix):
     pooled_records = []
     records = []
@@ -1235,10 +1281,12 @@ def write_vcf_file(filenames, vcf_headers, all_read_allele_obs, genome, tabix):
     record_key = vcf_record_key(genome)
     records.sort(key=record_key)
     records = merge_duplicates(records)
+    _mark_var_clusters(records, len(vcf_headers[1].samples))
     open_and_write_vcf(filenames.out_vcf, vcf_headers[1], records, tabix)
 
     pooled_records.sort(key=record_key)
     pooled_records = merge_duplicates(pooled_records)
+    _mark_var_clusters(pooled_records, len(vcf_headers[0].samples))
     open_and_write_vcf(filenames.out_pooled_vcf, vcf_headers[0], pooled_records, tabix)
 
 
@@ -1563,6 +1611,7 @@ class VarFilter(Enum):
     LowReadDepth  = 20
     HighReadDepth = 21
     StrandBias    = 22
+    VarCluster    = 23
 
     def __str__(self):
         if self == VarFilter.Pass:
@@ -1589,9 +1638,12 @@ class VarFilter(Enum):
             return VarFilter.HighReadDepth
         if s == 'StrandBias':
             return VarFilter.StrandBias
+        if s == 'VarCluster':
+            return VarFilter.VarCluster
+        assert False
 
     def need_qual0(self):
-        if self == VarFilter.UnknownAgCN or self == VarFilter.StrandBias:
+        if self == VarFilter.UnknownAgCN or self == VarFilter.StrandBias or self == VarFilter.VarCluster:
             return True
         return False
 
