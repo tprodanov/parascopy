@@ -576,9 +576,8 @@ def _get_ref_pscns(samples, genome, region_group, const_regions, modified_ref_cn
             return ([None] * n_samples,) * 2
         return [def_agcn] * n_samples, [def_pscn] * n_samples
 
-    undefined = object()
-    ref_agcns = [undefined] * n_samples
-    ref_pscns = [undefined] * n_samples
+    ref_agcns = [common.UNDEF] * n_samples
+    ref_pscns = [common.UNDEF] * n_samples
 
     for i, region_ix in enumerate(region_group.region_ixs):
         const_region = const_regions[region_ix]

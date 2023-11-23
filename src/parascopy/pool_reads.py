@@ -17,11 +17,11 @@ from .view import parse_expression
 from . import long_version
 
 
-_UNDEF = object()
+UNDEF = common.UNDEF
 
 
 def _create_record(orig_record, header, read_groups, status, max_mate_dist,
-        *, dupl_strand=True, start=_UNDEF, cigar_tuples=_UNDEF, seq=_UNDEF, qual=_UNDEF):
+        *, dupl_strand=True, start=UNDEF, cigar_tuples=UNDEF, seq=UNDEF, qual=UNDEF):
     """
     Creates a new record by taking the orig_record as a template.
     If start, cigar_tuples, seq, qual are not provided, take them frmo the original record.
@@ -29,17 +29,17 @@ def _create_record(orig_record, header, read_groups, status, max_mate_dist,
     record = pysam.AlignedSegment(header)
     record.query_name = orig_record.query_name
     record.query_sequence = common.cond_rev_comp(orig_record.query_sequence, strand=dupl_strand) \
-        if seq is _UNDEF else seq
+        if seq is UNDEF else seq
     record.query_qualities = common.cond_reverse(orig_record.query_qualities, strand=dupl_strand) \
-        if qual is _UNDEF else qual
+        if qual is UNDEF else qual
 
-    if cigar_tuples is _UNDEF:
+    if cigar_tuples is UNDEF:
         assert dupl_strand
         cigar_tuples = orig_record.cigartuples
     # This is either input cigar_tuples, or orig_record.cigartuples.
     if cigar_tuples:
         record.reference_id = 0
-        record.reference_start = orig_record.reference_start if start is _UNDEF else start
+        record.reference_start = orig_record.reference_start if start is UNDEF else start
         record.mapping_quality = 60
         record.cigartuples = cigar_tuples
         if orig_record.is_reverse == dupl_strand:

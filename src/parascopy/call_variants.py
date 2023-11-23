@@ -149,8 +149,13 @@ def _create_complement_dupl_tree(duplications, table, genome, padding):
 
 def _write_record_coordinates(filenames, samples, locus, duplications, table, genome, args):
     ix_filename = bam_file_.CoordinatesIndex.index_name(filenames.read_coord)
-    if args.rerun != 'full' and os.path.isfile(filenames.read_coord) and common.non_empty_file(ix_filename):
-        return
+    if args.rerun != 'full' and os.path.isfile(filenames.read_coord) and os.path.isfile(ix_filename):
+        try:
+            coord_index = bam_file_.CoordinatesIndex(filenames.read_coord, samples, genome)
+            if coord_index.version >= 2:
+                return coord_index
+        except:
+            common.log('WARN: Could not read BAM coordinates file, writing it anew')
 
     common.log('[{}] Writing read coordinates'.format(locus.name))
     with pysam.AlignmentFile(filenames.pooled) as in_bam:
@@ -158,7 +163,7 @@ def _write_record_coordinates(filenames, samples, locus, duplications, table, ge
         max_mate_dist = int(comment_dict['max_mate_dist'])
         unique_tree = _create_complement_dupl_tree(duplications, table, genome, padding=max_mate_dist * 2)
         bam_file_.write_record_coordinates(in_bam, samples, unique_tree, genome, filenames.read_coord, comment_dict)
-    common.log('[{}] Finished writing read coordinates'.format(locus.name))
+    return bam_file_.CoordinatesIndex(filenames.read_coord, samples, genome)
 
 
 def _analyze_sample(locus, sample_id, sample, all_read_allele_obs, coord_index, cn_profiles, assume_cn,
@@ -208,7 +213,7 @@ def _analyze_sample(locus, sample_id, sample, all_read_allele_obs, coord_index, 
         common.log('[{}] Sample {}: selected {} informative PSVs'.format(locus.name, sample, len(informative_psv_gts)))
     else:
         informative_psv_gts = potential_psv_gts
-    read_collection.add_psv_observations(informative_psv_gts, coord_index.max_mate_dist, varcall_params.no_mate_penalty)
+    read_collection.add_psv_observations(informative_psv_gts, varcall_params.no_mate_penalty)
 
     if debug_out is not None:
         read_collection.debug_read_probs(genome, debug_out)
@@ -274,7 +279,7 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
     varcall_params = variants_.VarCallParameters(args, samples)
 
     filenames.read_coord = os.path.join(filenames.subdir, 'read_coordinates.bin')
-    _write_record_coordinates(filenames, samples, locus, duplications, table, genome, args)
+    coord_index = _write_record_coordinates(filenames, samples, locus, duplications, table, genome, args)
 
     cn_profiles = paralog_cn.CopyNumProfiles(filenames.cn_res, genome, samples, locus.chrom_id)
     filenames.read_allele = os.path.join(filenames.subdir, 'read_allele_obs.bin')
@@ -299,8 +304,8 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
     extra_files = dict(genotypes='genotypes.csv', psv_use='psv_use.csv')
     if args.debug:
         extra_files.update(dict(debug_reads='debug_reads.log', debug_obs='debug_obs.log', debug='debug.log'))
-    with bam_file_.CoordinatesIndex(filenames.read_coord, samples, genome) as coord_index, \
-            OutputFiles(filenames.subdir, extra_files) as out:
+    # Use `coord_index as coord_index` to open & close inner files.
+    with coord_index as coord_index, OutputFiles(filenames.subdir, extra_files) as out:
         if args.debug:
             out.debug_reads.write('name\thash\n')
             _debug_write_read_hashes(filenames.pooled, out.debug_reads)
@@ -490,8 +495,10 @@ def main(prog_name=None, in_argv=None):
             'genotype (genotype quality >= <float>) [default: %(default)s].')
     call_args.add_argument('--limit-depth', nargs=2, type=int, metavar='<int> <int>', default=(3, 2000),
         help='Min and max variant read depth [default: 3, 2000].')
-    call_args.add_argument('--max-strand-bias', type=float, metavar='<float>', default=30,
-        help='Maximum strand bias (Phred p-value score) [default: %(default)s].')
+    call_args.add_argument('--strand-bias', type=float, metavar='<float>', default=30,
+        help='Maximum strand bias (Phred score) [default: %(default)s].')
+    call_args.add_argument('--unpaired-bias', type=float, metavar='<float>', default=30,
+        help='Maximum unpaired bias (Phred score) [default: %(default)s].')
     call_args.add_argument('--max-agcn', type=int, metavar='<int>', default=10,
         help='Maximum aggregate copy number [default: %(default)s].')
 
@@ -537,6 +544,7 @@ def main(prog_name=None, in_argv=None):
     else:
         assert args.output != args.parascopy
         common.mkdir(args.output)
+        common.mkdir(os.path.join(args.output, 'loci'))
         separate_output = True
     detect_cn.write_command(os.path.join(args.output, 'command_call.txt'))
 

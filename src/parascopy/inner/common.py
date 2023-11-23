@@ -457,3 +457,11 @@ def letter_suffix(index, chars=string.ascii_lowercase):
     if index < n:
         return chars[index]
     return chars[index // n - 1] + chars[index % n]
+
+
+class Undefined:
+    def __bool__(self):
+        raise ValueError('Cannot cast UNDEF to bool')
+
+
+UNDEF = Undefined()

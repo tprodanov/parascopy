@@ -458,43 +458,38 @@ class _SkipPosition(Exception):
         self.start = start
 
 
-def strand_bias_test(forw_counts, rev_counts):
+def strand_bias_test(strand_counts):
     """
+    Input: np.array((2, n_alleles)).
     Find strand bias for each allele and returns an array with p-values.
     For each allele, run Fisher Exact test comparing forward/reverse counts against
     the sum forward/reverse counts for all other alleles.
+
+    Returns Fisher test Phred-scores for each allele.
     """
-    n_alleles = len(forw_counts)
-    forw_sum = np.sum(forw_counts)
-    rev_sum = np.sum(rev_counts)
+    n_alleles = strand_counts.shape[1]
+    forw_sum, rev_sum = np.sum(strand_counts, axis=1)
     total_sum = forw_sum + rev_sum
 
-    pvals = np.ones(n_alleles)
+    phreds = np.zeros(n_alleles)
     if forw_sum == 0 or rev_sum == 0:
         # One of the rows is 0 -- all p-values = 1.
-        return pvals
+        return phreds
 
     if n_alleles == 2:
-        col_sum1 = forw_counts[0] + rev_counts[0]
-        if col_sum1 == 0 or col_sum1 == total_sum:
-            # One of the columns is 0 -- all p-values = 1.
-            return pvals
-
-        matrix = (forw_counts, rev_counts)
-        pvals[:] = fisher_exact(matrix)[1]
-        return pvals
+        if 0 < np.sum(strand_counts[:, 0]) < total_sum:
+            pval = fisher_exact(strand_counts)[1]
+            # Use +0 to remove -0.
+            phreds[:] = -10.0 * np.log10(pval) + 0.0
+            # Otherwise, if there are no observations for one of the alleles -- all p-values = 1.
+        return phreds
 
     for i in range(n_alleles):
-        forw_i = forw_counts[i]
-        rev_i = rev_counts[i]
-        col_sum_i = forw_i + rev_i
-        if col_sum_i == 0 or col_sum_i == total_sum:
-            # One of the columns is 0 -- current p-values = 1.
-            continue
-
-        matrix = ((forw_i, forw_sum - forw_i), (rev_i, rev_sum - rev_i))
-        pvals[i] = fisher_exact(matrix)[1]
-    return pvals
+        forw_i, rev_i = strand_counts[:, i]
+        if 0 < forw_i + rev_i < total_sum:
+            pval = fisher_exact(((forw_i, forw_sum - forw_i), (rev_i, rev_sum - rev_i)))[1]
+            phreds[i] = -10.0 * np.log10(pval) + 0.0
+    return phreds
 
 
 def _round_qual(qual):
@@ -912,16 +907,24 @@ class VariantReadObservations:
             good_allele_counts = [0] * curr_n_alleles
             strand_allele_counts = [0] * (2 * curr_n_alleles)
             strand_phred = [0] * curr_n_alleles
+            paired_allele_counts = [0] * (2 * curr_n_alleles)
+            paired_phred = [0] * curr_n_alleles
             for old_allele_ix, new_allele_ix in enumerate(old_to_new):
                 all_allele_counts[new_allele_ix] = int(gt_pred.all_allele_counts[old_allele_ix])
                 good_allele_counts[new_allele_ix] = int(gt_pred.good_allele_counts[old_allele_ix])
-                strand_allele_counts[2 * new_allele_ix] = int(gt_pred.forw_counts[old_allele_ix])
-                strand_allele_counts[2 * new_allele_ix + 1] = int(gt_pred.rev_counts[old_allele_ix])
-                strand_phred[new_allele_ix] = gt_pred.strand_phred[old_allele_ix]
+                strand_allele_counts[2 * new_allele_ix] = int(gt_pred.strand_counts[0, old_allele_ix])
+                strand_allele_counts[2 * new_allele_ix + 1] = int(gt_pred.strand_counts[1, old_allele_ix])
+                strand_phred[new_allele_ix] = np.floor(gt_pred.strand_phred[old_allele_ix])
+                paired_allele_counts[2 * new_allele_ix] = int(gt_pred.paired_counts[0, old_allele_ix])
+                paired_allele_counts[2 * new_allele_ix + 1] = int(gt_pred.paired_counts[1, old_allele_ix])
+                paired_phred[new_allele_ix] = np.floor(gt_pred.paired_phred[old_allele_ix])
             rec_fmt['AD'] = all_allele_counts
             rec_fmt['ADq'] = good_allele_counts
             rec_fmt['SB'] = strand_allele_counts
             rec_fmt['FS'] = strand_phred
+            if True: # any(unpaired_count > 0 for unpaired_count in itertools.islice(paired_allele_counts, 1, None, 2)):
+                rec_fmt['PP'] = paired_allele_counts
+                rec_fmt['FP'] = paired_phred
             if gt_filter:
                 rec_fmt['FILT'] = gt_filter.to_tuple()
             if i == 0:
@@ -1118,7 +1121,12 @@ class VariantReadObservations:
                 'Description="Number of pooled observations for each allele and strand '
                 '(forward REF, reverse REF, forward ALT[1], reverse ALT[1], etc).">')
             vcf_header.add_line('##FORMAT=<ID=FS,Number=R,Type=Float,'
-                'Description="Phred-scaled p-value that there is a strand bias">')
+                'Description="Phred-scaled p-value each allele checking if there is a strand bias">')
+            vcf_header.add_line('##FORMAT=<ID=PP,Number=.,Type=Integer,'
+                'Description="Number of pooled reads with/without proper pair for each allele '
+                '(with pair REF, without pair REF, with pair ALT[1], without pair ALT[1], etc).">')
+            vcf_header.add_line('##FORMAT=<ID=FP,Number=.,Type=Integer,'
+                'Description="Phred-scaled p-value each allele checking if there is unpaired reads bias">')
             if i == 1:
                 vcf_header.add_line('##FORMAT=<ID=PGT,Number=1,Type=String,Description="Pooled Genotype">')
                 vcf_header.add_line('##FORMAT=<ID=PGQ,Number=1,Type=Float,'
@@ -1224,7 +1232,7 @@ def open_and_write_vcf(filename, header, records, tabix):
 
 
 def _is_alt_gt(gt):
-    return gt is not None and gt[0] is not None and gt.count(0) != len(gt)
+    return bool(gt) and gt[0] is not None and gt.count(0) != len(gt)
 
 
 def _mark_sample_cluster(cluster):
@@ -1351,6 +1359,8 @@ MISSING_PSV_PENALTY = -4.0 * common.LOG10
 class _ReadEndPositions:
     def __init__(self):
         self.seq_len = None
+        # Original read location.
+        self.original_loc = None
         # If the read is mapped uniquely, unique_loc will have an Interval. Otherwise, it is None.
         self.unique_loc = None
         # tuple: If true location is unknown, but there are locations that are certainly incorrect, store it here.
@@ -1370,13 +1380,16 @@ class _ReadEndPositions:
 
     def add_read_coord(self, read_coord):
         self.seq_len = read_coord.seq_len
-        self.unique_loc = read_coord.get_certainly_correct_location()
-        self.forbidden_locs = read_coord.get_certainly_incorrect_locations()
+        self.original_loc = read_coord.old_region
+        self.unique_loc = read_coord.get_true_location()
+        self.forbidden_locs = read_coord.get_forbidden_locations()
 
     def add_var_positions(self, var_positions):
         self.var_positions.extend(var_positions)
 
     def debug(self, genome, out):
+        out.write('            Original location: {}\n'.format(
+            '*' if self.original_loc is None else self.original_loc.to_str(genome)))
         if self.unique_loc:
             out.write('            Unique location: {}\n'.format(self.unique_loc.to_str(genome)))
         if self.forbidden_locs:
@@ -1468,8 +1481,9 @@ class _ReadPositions:
         # Read positions for the second and second first.
         self._mate_read_pos = (_ReadEndPositions(), _ReadEndPositions())
         self._is_reverse = [None, None]
-        self.requires_mate = True
         self.hash = None
+        self._requires_mate = common.UNDEF
+        self._in_proper_pair = common.UNDEF
 
         self.positions1 = None
         self.probs1 = None
@@ -1481,12 +1495,17 @@ class _ReadPositions:
             self.hash = read_hash
         else:
             assert self.hash == read_hash
-        self.requires_mate = read_coord.is_paired
+        self._requires_mate = read_coord.is_paired
         is_read1 = bool(read_coord.read_hash & np.uint8(1))
         self._mate_read_pos[is_read1].add_read_coord(read_coord)
         self._is_reverse[is_read1] = read_coord.is_reverse
         if self._is_reverse[1 - is_read1] is None:
             self._is_reverse[1 - is_read1] = not read_coord.is_reverse
+
+    def check_proper_pair(self, max_mate_dist):
+        orig1 = self._mate_read_pos[1].original_loc
+        orig2 = self._mate_read_pos[0].original_loc
+        self._in_proper_pair = orig1 is not None and orig2 is not None and orig1.distance(orig2) < max_mate_dist
 
     def add_var_positions(self, var_positions, is_first_mate):
         self._mate_read_pos[is_first_mate].add_var_positions(var_positions)
@@ -1538,8 +1557,11 @@ class _ReadPositions:
     def is_reverse(self, is_read1):
         return self._is_reverse[is_read1]
 
+    def single_end_or_proper_pair(self):
+        return not self._requires_mate or self._in_proper_pair
+
     def debug(self, genome, out):
-        out.write('    {:x}\n'.format(self.hash))
+        out.write('    {:x} ({}proper pair)\n'.format(self.hash, '' if self._in_proper_pair else 'not '))
         out.write('      * Mate 1 ({}):\n'.format('Rev' if self._is_reverse[1] else 'Forw'))
         self._mate_read_pos[1].debug(genome, out)
         if self.positions1:
@@ -1570,6 +1592,7 @@ class ReadCollection:
         self.sample_id = sample_id
         self.sample = sample
         self.read_positions = defaultdict(_ReadPositions)
+        self.max_mate_dist = coord_index.max_mate_dist
         coordinates = coord_index.load(sample_id)
         if len(coordinates) == 0:
             raise RuntimeError('Sample {} has no appropriate reads!'.format(sample))
@@ -1580,19 +1603,21 @@ class ReadCollection:
             read_hash = read_coord.read_hash & CLEAR_LAST_BIT
             self.read_positions[read_hash].add_read_coord(read_hash, read_coord)
         self.mean_len = int(round(sum_length / len(coordinates)))
+        for read_pos in self.read_positions.values():
+            read_pos.check_proper_pair(self.max_mate_dist)
 
     def find_possible_locations(self):
         for read_pos in self.read_positions.values():
             read_pos.find_possible_locations()
 
-    def add_psv_observations(self, psv_gt_preds, max_mate_dist, no_mate_penalty):
+    def add_psv_observations(self, psv_gt_preds, no_mate_penalty):
         for gt_pred in psv_gt_preds:
             variant = gt_pred.variant_obs.variant
             for read_pos, allele_obs in gt_pred.read_obs:
                 read_pos.add_psv_obs(variant, allele_obs)
 
         for read_pos in self.read_positions.values():
-            read_pos.calculate_paired_loc_probs(max_mate_dist, no_mate_penalty)
+            read_pos.calculate_paired_loc_probs(self.max_mate_dist, no_mate_penalty)
 
     def debug_read_probs(self, genome, out):
         out.write('{}: Read probabilities\n'.format(self.sample))
@@ -1611,7 +1636,8 @@ class VarFilter(Enum):
     LowReadDepth  = 20
     HighReadDepth = 21
     StrandBias    = 22
-    VarCluster    = 23
+    UnpairedBias  = 23
+    VarCluster    = 24
 
     def __str__(self):
         if self == VarFilter.Pass:
@@ -1638,12 +1664,14 @@ class VarFilter(Enum):
             return VarFilter.HighReadDepth
         if s == 'StrandBias':
             return VarFilter.StrandBias
+        if s == 'UnpairedBias':
+            return VarFilter.UnpairedBias
         if s == 'VarCluster':
             return VarFilter.VarCluster
         assert False
 
     def need_qual0(self):
-        if self == VarFilter.UnknownAgCN or self == VarFilter.StrandBias or self == VarFilter.VarCluster:
+        if self == VarFilter.UnknownAgCN or self == VarFilter.StrandBias or self == VarFilter.UnpairedBias:
             return True
         return False
 
@@ -2046,9 +2074,11 @@ class VariantGenotypePred:
         self.all_allele_counts = np.zeros(n_alleles, dtype=np.uint16)
         self.good_allele_counts = np.zeros(n_alleles, dtype=np.uint16)
         # Forward/Reverse strand read counts for each allele.
-        self.forw_counts = np.zeros(n_alleles, dtype=np.uint16)
-        self.rev_counts = np.zeros(n_alleles, dtype=np.uint16)
+        self.strand_counts = np.zeros((2, n_alleles), dtype=np.uint16)
         self.strand_phred = None
+        # Count paired and unpaired reads supporting each allele.
+        self.paired_counts = np.zeros((2, n_alleles), dtype=np.uint16)
+        self.paired_phred = None
 
         self.pooled_genotype = None
         self.pooled_genotype_qual = None
@@ -2075,11 +2105,11 @@ class VariantGenotypePred:
             if allele_obs.ln_qual <= varcall_params.base_log_qual[self.variant_obs.is_indel]:
                 self.good_allele_counts[allele_ix] += 1
                 paired_read_position = all_read_positions[read_hash]
-                if paired_read_position.is_reverse(allele_obs.is_first_mate):
-                    self.rev_counts[allele_ix] += 1
-                else:
-                    self.forw_counts[allele_ix] += 1
                 self.read_obs.append((paired_read_position, allele_obs))
+                is_reverse = paired_read_position.is_reverse(allele_obs.is_first_mate)
+                self.strand_counts[np.uint8(is_reverse), allele_ix] += 1
+                proper_pair = paired_read_position.single_end_or_proper_pair()
+                self.paired_counts[np.uint8(not proper_pair), allele_ix] += 1
 
         read_depth = len(self.read_obs)
         if read_depth < varcall_params.min_read_depth:
@@ -2089,12 +2119,12 @@ class VariantGenotypePred:
             self.filter.add(VarFilter.HighReadDepth)
             self.skip = True
 
-        strand_pvals = strand_bias_test(self.forw_counts, self.rev_counts)
-        self.strand_phred = -10 * np.log10(strand_pvals)
+        self.strand_phred = strand_bias_test(self.strand_counts)
         if np.max(self.strand_phred) >= varcall_params.max_strand_bias:
             self.filter.add(VarFilter.StrandBias)
-        # abs to get rid of -0.
-        self.strand_phred = np.abs(np.floor(self.strand_phred))
+        self.paired_phred = strand_bias_test(self.paired_counts)
+        if np.max(self.paired_phred) >= varcall_params.max_unpaired_bias:
+            self.filter.add(VarFilter.UnpairedBias)
 
     def update_read_locations(self):
         var_positions = tuple(var_pos.region for var_pos in self.variant_obs.variant_positions)
@@ -2364,7 +2394,8 @@ class VarCallParameters:
 
         self.min_read_depth = args.limit_depth[0]
         self.max_read_depth = args.limit_depth[1]
-        self.max_strand_bias = args.max_strand_bias
+        self.max_strand_bias = args.strand_bias
+        self.max_unpaired_bias = args.unpaired_bias
         self.min_freebayes_qual = args.limit_qual
 
     # def _set_use_af(self, args, samples):

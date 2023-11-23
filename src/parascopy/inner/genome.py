@@ -433,7 +433,7 @@ class Interval:
 
     def distance(self, other):
         """
-        Returns distance between closest points of two duplications.
+        Returns distance between closest points of two intervals.
         Returns sys.maxsize if intervals lie on different chromosomes.
         """
         if self._chrom_id != other._chrom_id:
