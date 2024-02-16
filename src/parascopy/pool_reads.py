@@ -374,6 +374,19 @@ def load_bam_files(input, input_list, genome):
         bam_wrapper.clear_contigs()
     return bam_wrappers, samples
 
+###
+def get_only_regions(args):
+    """
+    Writes regions used for pooling/realining reads
+    """
+    with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
+        interval = Interval.parse(args.region, genome)
+        duplications = load_duplications(table, genome, interval, args.exclude)
+     
+    hom_regions = [dupl.region2.to_bed(genome) for dupl in duplications]
+    with open(f"{args.only_regions}", "a") as outf:
+        outf.writelines("\n".join(hom_regions) + "\n")
+###
 
 def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
@@ -420,6 +433,10 @@ def main(prog_name=None, in_argv=None):
     opt_args.add_argument('--samtools', metavar='<path>|none', default='samtools',
             help='Path to samtools executable [default: %(default)s].\n'
                 'Use python wrapper if "none", can lead to errors.')
+    ###
+    opt_args.add_argument('-x', '--only-regions', metavar='<file>', 
+        help='File to fetch intervals for pooling and realigning.')
+    ###
 
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
@@ -428,6 +445,12 @@ def main(prog_name=None, in_argv=None):
 
     if args.samtools != 'none':
         common.check_executable(args.samtools)
+
+    ###
+    if args.only_regions:
+        get_only_regions(args)
+        return
+    ###
 
     with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
         interval = Interval.parse(args.region, genome)
