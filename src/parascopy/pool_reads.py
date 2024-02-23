@@ -377,6 +377,7 @@ def load_bam_files(input, input_list, genome):
 ###
 def get_only_regions(args):
     """
+    TESTING
     Writes regions used for pooling/realining reads
     """
     with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
