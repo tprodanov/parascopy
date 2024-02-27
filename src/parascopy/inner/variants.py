@@ -465,31 +465,31 @@ def strand_bias_test(strand_counts):
     For each allele, run Fisher Exact test comparing forward/reverse counts against
     the sum forward/reverse counts for all other alleles.
 
-    Returns Fisher test Phred-scores for each allele.
+    Returns Phred-score of Fisher test p-values for all alleles.
     """
     n_alleles = strand_counts.shape[1]
     forw_sum, rev_sum = np.sum(strand_counts, axis=1)
     total_sum = forw_sum + rev_sum
 
-    phreds = np.zeros(n_alleles)
     if forw_sum == 0 or rev_sum == 0:
         # One of the rows is 0 -- all p-values = 1.
-        return phreds
+        return 0
 
     if n_alleles == 2:
         if 0 < np.sum(strand_counts[:, 0]) < total_sum:
             pval = fisher_exact(strand_counts)[1]
             # Use +0 to remove -0.
-            phreds[:] = -10.0 * np.log10(pval) + 0.0
-            # Otherwise, if there are no observations for one of the alleles -- all p-values = 1.
-        return phreds
+            return -10.0 * np.log10(pval) + 0.0
+        # Otherwise, if there are no observations for one of the alleles -- all p-values = 1.
+        return 0
 
+    max_phred = 0
     for i in range(n_alleles):
         forw_i, rev_i = strand_counts[:, i]
         if 0 < forw_i + rev_i < total_sum:
             pval = fisher_exact(((forw_i, forw_sum - forw_i), (rev_i, rev_sum - rev_i)))[1]
-            phreds[i] = -10.0 * np.log10(pval) + 0.0
-    return phreds
+            max_phred = max(max_phred, -10.0 * np.log10(pval) + 0.0)
+    return max_phred
 
 
 def _round_qual(qual):
@@ -906,25 +906,21 @@ class VariantReadObservations:
             all_allele_counts = [0] * curr_n_alleles
             good_allele_counts = [0] * curr_n_alleles
             strand_allele_counts = [0] * (2 * curr_n_alleles)
-            strand_phred = [0] * curr_n_alleles
             paired_allele_counts = [0] * (2 * curr_n_alleles)
-            paired_phred = [0] * curr_n_alleles
             for old_allele_ix, new_allele_ix in enumerate(old_to_new):
                 all_allele_counts[new_allele_ix] = int(gt_pred.all_allele_counts[old_allele_ix])
                 good_allele_counts[new_allele_ix] = int(gt_pred.good_allele_counts[old_allele_ix])
                 strand_allele_counts[2 * new_allele_ix] = int(gt_pred.strand_counts[0, old_allele_ix])
                 strand_allele_counts[2 * new_allele_ix + 1] = int(gt_pred.strand_counts[1, old_allele_ix])
-                strand_phred[new_allele_ix] = np.floor(gt_pred.strand_phred[old_allele_ix])
                 paired_allele_counts[2 * new_allele_ix] = int(gt_pred.paired_counts[0, old_allele_ix])
                 paired_allele_counts[2 * new_allele_ix + 1] = int(gt_pred.paired_counts[1, old_allele_ix])
-                paired_phred[new_allele_ix] = np.floor(gt_pred.paired_phred[old_allele_ix])
             rec_fmt['AD'] = all_allele_counts
             rec_fmt['ADq'] = good_allele_counts
             rec_fmt['SB'] = strand_allele_counts
-            rec_fmt['FS'] = strand_phred
+            rec_fmt['FS'] = int(gt_pred.strand_phred)
             if True: # any(unpaired_count > 0 for unpaired_count in itertools.islice(paired_allele_counts, 1, None, 2)):
                 rec_fmt['PP'] = paired_allele_counts
-                rec_fmt['FP'] = paired_phred
+                rec_fmt['FP'] = int(gt_pred.paired_phred)
             if gt_filter:
                 rec_fmt['FILT'] = gt_filter.to_tuple()
             if i == 0:
@@ -1120,13 +1116,13 @@ class VariantReadObservations:
             vcf_header.add_line('##FORMAT=<ID=SB,Number=.,Type=Integer,'
                 'Description="Number of pooled observations for each allele and strand '
                 '(forward REF, reverse REF, forward ALT[1], reverse ALT[1], etc).">')
-            vcf_header.add_line('##FORMAT=<ID=FS,Number=R,Type=Float,'
-                'Description="Phred-scaled p-value each allele checking if there is a strand bias">')
+            vcf_header.add_line('##FORMAT=<ID=FS,Number=1,Type=Float,'
+                'Description="Strand bias: maximal Phred-scaled p-value across all alleles.">')
             vcf_header.add_line('##FORMAT=<ID=PP,Number=.,Type=Integer,'
                 'Description="Number of pooled reads with/without proper pair for each allele '
                 '(with pair REF, without pair REF, with pair ALT[1], without pair ALT[1], etc).">')
-            vcf_header.add_line('##FORMAT=<ID=FP,Number=.,Type=Integer,'
-                'Description="Phred-scaled p-value each allele checking if there is unpaired reads bias">')
+            vcf_header.add_line('##FORMAT=<ID=FP,Number=1,Type=Integer,'
+                'Description="Unpaired reads bias: maximal Phred-scaled p-value across all alleles.">')
             if i == 1:
                 vcf_header.add_line('##FORMAT=<ID=PGT,Number=1,Type=String,Description="Pooled Genotype">')
                 vcf_header.add_line('##FORMAT=<ID=PGQ,Number=1,Type=Float,'
@@ -1231,53 +1227,6 @@ def open_and_write_vcf(filename, header, records, tabix):
         common.Process([tabix, '-p', 'vcf', filename]).finish()
 
 
-def _is_alt_gt(gt):
-    return bool(gt) and gt[0] is not None and gt.count(0) != len(gt)
-
-
-def _mark_sample_cluster(cluster):
-    """
-    Mark a cluster for the specific sample.
-    """
-    for _, rec_fmt in cluster:
-        # if rec_fmt.get('GQ') > 0:
-        #     rec_fmt['GQ0'] = rec_fmt['GQ']
-        #     rec_fmt['GQ'] = 0
-        filt = rec_fmt.get('FILT')
-        if filt is None:
-            rec_fmt['FILT'] = (str(VarFilter.VarCluster),)
-        else:
-            rec_fmt['FILT'] = filt + (str(VarFilter.VarCluster),)
-
-
-def _mark_var_clusters(records, n_samples, var_dist=50, var_count=5):
-    """
-    Mark clusters of non-PSV variants where a sample has non-reference allele
-    in at least `var_count` variants, all having at most `var_dist` between each other.
-    """
-    if not records:
-        return
-    assert var_count >= 2
-
-    cluster = []
-    for sample_id in range(n_samples):
-        cluster.clear()
-        for record in records:
-            rec_fmt = record.samples[sample_id]
-            # Ignore PSVs and reference genotypes.
-            if record.info['overlPSV'] == 'T' or not _is_alt_gt(rec_fmt.get('GT')):
-                continue
-            if cluster:
-                last = cluster[-1][0]
-                if last.chrom != record.chrom or last.start + len(last.ref) + var_dist < record.start:
-                    if len(cluster) >= var_count:
-                        _mark_sample_cluster(cluster)
-                    cluster.clear()
-            cluster.append((record, rec_fmt))
-        if len(cluster) >= var_count:
-            _mark_sample_cluster(cluster)
-
-
 def write_vcf_file(filenames, vcf_headers, all_read_allele_obs, genome, tabix):
     pooled_records = []
     records = []
@@ -1289,12 +1238,10 @@ def write_vcf_file(filenames, vcf_headers, all_read_allele_obs, genome, tabix):
     record_key = vcf_record_key(genome)
     records.sort(key=record_key)
     records = merge_duplicates(records)
-    _mark_var_clusters(records, len(vcf_headers[1].samples))
     open_and_write_vcf(filenames.out_vcf, vcf_headers[1], records, tabix)
 
     pooled_records.sort(key=record_key)
     pooled_records = merge_duplicates(pooled_records)
-    _mark_var_clusters(pooled_records, len(vcf_headers[0].samples))
     open_and_write_vcf(filenames.out_pooled_vcf, vcf_headers[0], pooled_records, tabix)
 
 
@@ -1637,7 +1584,6 @@ class VarFilter(Enum):
     HighReadDepth = 21
     StrandBias    = 22
     UnpairedBias  = 23
-    VarCluster    = 24
 
     def __str__(self):
         if self == VarFilter.Pass:
@@ -1666,8 +1612,6 @@ class VarFilter(Enum):
             return VarFilter.StrandBias
         if s == 'UnpairedBias':
             return VarFilter.UnpairedBias
-        if s == 'VarCluster':
-            return VarFilter.VarCluster
         assert False
 
     def need_qual0(self):
@@ -2120,10 +2064,10 @@ class VariantGenotypePred:
             self.skip = True
 
         self.strand_phred = strand_bias_test(self.strand_counts)
-        if np.max(self.strand_phred) >= varcall_params.max_strand_bias:
+        if self.strand_phred >= varcall_params.max_strand_bias:
             self.filter.add(VarFilter.StrandBias)
         self.paired_phred = strand_bias_test(self.paired_counts)
-        if np.max(self.paired_phred) >= varcall_params.max_unpaired_bias:
+        if self.paired_phred >= varcall_params.max_unpaired_bias:
             self.filter.add(VarFilter.UnpairedBias)
 
     def update_read_locations(self):

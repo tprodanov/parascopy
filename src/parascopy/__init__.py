@@ -1,7 +1,7 @@
 
 __pkg_name__ = 'parascopy'
 __title__ = 'Parascopy'
-__version__ = '1.14.1-0'
+__version__ = '1.15.0-0'
 __author__ = 'Timofey Prodanov, Vikas Bansal'
 __license__ = 'MIT'
 

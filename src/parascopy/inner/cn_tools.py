@@ -487,6 +487,7 @@ class DuplHierarchy:
         self._psvs = psvs
         self._psv_searcher = itree.NonOverlTree(self._psvs, itree.start, itree.variant_end)
         self._const_regions = const_regions
+        self._duplications = duplications
 
         self._windows = []
         for const_region in const_regions:
@@ -694,6 +695,34 @@ class RegionGroupExtra:
     def set_from_model_params(self, model_params, n_samples):
         copy_num = self._region_group.cn // 2
         self._psv_f_values = model_params.load_psv_f_values(self._psv_infos, copy_num)
+
+    def use_forced_agcn(self, force_agcn, samples, genome):
+        duplications = self._dupl_hierarchy._duplications
+        self._sample_const_regions = [[] for _ in range(len(samples))]
+        for region_ix in self._region_group.region_ixs:
+            const_region = self._dupl_hierarchy.const_regions[region_ix]
+
+            for sample_id, sample in enumerate(samples):
+                agcn_regions = force_agcn.from_region(sample_id, const_region.region1)
+                if not agcn_regions:
+                    common.log('WARN: Missing region {} for sample {} in `--force-agcn`'
+                        .format(const_region.region1.to_str(genome), sample))
+
+                for subregion, cn in agcn_regions:
+                    if subregion.contains(const_region.region1):
+                        reg1 = const_region.region1
+                        regs2 = const_region.regions2
+                    else:
+                        reg1 = subregion.intersect(const_region.region1)
+                        regs2 = []
+                        for dupl_ix in const_region.dupl_ixs:
+                            dupl = duplications[dupl_ix]
+                            assert dupl.region1.contains(subregion)
+                            reg2 = dupl.subregion2(reg1.start, reg1.end)
+                            regs2.append((reg2, dupl.strand))
+                    pred = CopyNumPrediction(reg1, regs2, cn, str(cn), 10000)
+                    pred.info['region_ix'] = region_ix
+                    self._sample_const_regions[sample_id].append(pred)
 
     def update_psv_records(self, reliable_thresholds):
         from . import paralog_cn

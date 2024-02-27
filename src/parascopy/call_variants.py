@@ -538,11 +538,10 @@ def main(prog_name=None, in_argv=None):
         common.log('Input directory "{}" does not exist'.format(args.parascopy))
         exit(1)
 
-    if args.output is None:
+    if args.output is None or args.output == args.parascopy:
         args.output = args.parascopy
         separate_output = False
     else:
-        assert args.output != args.parascopy
         common.mkdir(args.output)
         common.mkdir(os.path.join(args.output, 'loci'))
         separate_output = True

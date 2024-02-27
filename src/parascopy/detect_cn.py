@@ -344,7 +344,7 @@ def get_pool_interval(interval, genome, pool_interval=2000):
     return pool_interval
 
 
-def analyze_region(interval, subdir, data, samples, bg_depth, model_params, modified_ref_cns):
+def analyze_region(interval, subdir, data, samples, bg_depth, model_params, force_agcn, modified_ref_cns):
     duplications = []
     pool_duplications = []
     skip_regions = []
@@ -462,7 +462,7 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, modi
             model_params.set_dupl_hierarchy(dupl_hierarchy)
 
         time_log.log('Writing read depth and PSV observations')
-        depth_matrix = _create_depth_matrix(dupl_hierarchy.windows, window_counts)
+        depth_matrix = _create_depth_matrix(dupl_hierarchy.windows, window_counts) if force_agcn is None else None
         psv_counts = _count_psv_observations(psv_records, samples, psv_observations)
         dupl_hierarchy.summarize_region_groups(genome, out.region_groups, args.min_windows)
         _write_windows(dupl_hierarchy, genome, out.windows)
@@ -481,14 +481,17 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, modi
                 continue
 
             group_name = region_group.name
-            time_log.log('Group {}: Run HMM to find aggregate copy number profiles'.format(group_name))
-            common.log('[{}] Region group {}'.format(interval.name, group_name))
-            cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
-                min_samples=args.min_samples, agcn_range=args.agcn_range, strict_agcn_range=args.strict_agcn_range,
-                agcn_jump=args.agcn_jump, min_trans_prob=args.transition_prob * common.LOG10,
-                uniform_initial=args.uniform_initial, use_multipliers=args.use_multipliers,
-                update_agcn_qual=args.update_agcn)
-            out.flush()
+            if force_agcn is None:
+                time_log.log('Group {}: Run HMM to find aggregate copy number profiles'.format(group_name))
+                common.log('[{}] Region group {}'.format(interval.name, group_name))
+                cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
+                    min_samples=args.min_samples, agcn_range=args.agcn_range, strict_agcn_range=args.strict_agcn_range,
+                    agcn_jump=args.agcn_jump, min_trans_prob=args.transition_prob * common.LOG10,
+                    uniform_initial=args.uniform_initial, use_multipliers=args.use_multipliers,
+                    update_agcn_qual=args.update_agcn)
+                out.flush()
+            else:
+                group_extra.use_forced_agcn(force_agcn, samples, genome)
 
             time_log.log('Group {}: PSV genotype probabilities'.format(group_name))
             if not args.skip_pscn:
@@ -542,7 +545,7 @@ def get_locus_dir(out_dir, locus_name, *, move_old):
     return locus_dir
 
 
-def single_region(region_ix, region, data, samples, bg_depth, model_params, modified_ref_cns):
+def single_region(region_ix, region, data, samples, bg_depth, model_params, force_agcn, modified_ref_cns):
     """
     Returns tuple (region_ix, exc).
     This is needed because multithreading callback needs to know, how each region finished.
@@ -565,7 +568,8 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params, modi
 
     common.log('Analyzing region {}'.format(region.full_name(data.genome)))
     try:
-        model_params = analyze_region(region, locus_dir, data, samples, bg_depth, model_params, modified_ref_cns)
+        model_params = analyze_region(region, locus_dir, data, samples, bg_depth,
+            model_params, force_agcn, modified_ref_cns)
         if model_params is None:
             return region_ix, 'Skip'
 
@@ -638,7 +642,7 @@ def join_vcf_files(in_entries, out_filename, genome, tabix, merge_duplicates=Fal
     return records
 
 
-def run(regions, data, samples, bg_depth, models, modified_ref_cns):
+def run(regions, data, samples, bg_depth, models, force_agcn, modified_ref_cns):
     n_regions = len(regions)
     if models is None:
         models = [None] * n_regions
@@ -648,7 +652,8 @@ def run(regions, data, samples, bg_depth, models, modified_ref_cns):
     if threads == 1:
         common.log('Using 1 thread')
         for region_ix, (region, model_params) in enumerate(zip(regions, models)):
-            results.append(single_region(region_ix, region, data, samples, bg_depth, model_params, modified_ref_cns))
+            results.append(single_region(region_ix, region, data, samples, bg_depth,
+                model_params, force_agcn, modified_ref_cns))
 
     else:
         def callback(res):
@@ -662,7 +667,7 @@ def run(regions, data, samples, bg_depth, models, modified_ref_cns):
         pool = multiprocessing.Pool(threads)
         for region_ix, (region, model_params) in enumerate(zip(regions, models)):
             pool.apply_async(single_region,
-                args=(region_ix, region, data.copy(), samples, bg_depth, model_params, modified_ref_cns),
+                args=(region_ix, region, data.copy(), samples, bg_depth, model_params, force_agcn, modified_ref_cns),
                 callback=callback, error_callback=err_callback)
         pool.close()
         pool.join()
@@ -971,11 +976,14 @@ def parse_args(prog_name, in_argv, is_new):
         reg_args.add_argument('-R', '--regions-file', nargs='+', metavar='<file> [<file> ...]',
             help='Input bed[.gz] file(s) containing regions (tab-separated, 0-based semi-exclusive).\n'
                 'Optional fourth column will be used as a region name.')
+    reg_args.add_argument('--force-agcn', metavar='<bed>',
+        help='Instead of calculating aggregate copy numbers, use provided bed file.\n'
+            'Columns: chrom, start, end, samples, copy_num. Fourth column can be a single sample name;\n'
+            'list of sample names separated by ","; or "*" to indicate all samples.')
+    if is_new:
         reg_args.add_argument('--modify-ref', metavar='<bed>',
-            help='Modify reference copy number: bed file with columns "chrom start end samples copy_num".\n'
-                'Fourth column can be a single sample name; list of sample names separated by ",";\n'
-                'or "*" to indicate all samples.\n'
-                'Modified reference copy numbers are used for paralog-specific copy number detection.')
+            help='Modify reference copy number using bed file with the same format as `--force-agcn`.\n'
+                'Provided values are used for paralog-specific copy number detection.')
     reg_args.add_argument('--regions-subset', nargs='+', metavar='<str> [<str> ...]',
         help='Additionally filter input regions: only use regions with names that are in this list.\n'
             'If the first argument is "!", only use regions not in this list.')
@@ -1132,6 +1140,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
 
     data.set_bam_wrappers(bam_wrappers)
     depth_.check_duplicated_samples(bam_wrappers)
+    force_agcn = None if args.force_agcn is None else InCopyNums(args.force_agcn, genome, samples)
     modified_ref_cns = None if args.modify_ref is None else InCopyNums(args.modify_ref, genome, samples)
 
     if loaded_models:
@@ -1140,7 +1149,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
         bg_depth = depth_.Depth.from_filenames(args.depth, samples, window_filtering_mult=args.window_filtering)
         common.log(bg_depth.params.describe() + '    ============')
 
-    run(regions, data, samples, bg_depth, loaded_models, modified_ref_cns)
+    run(regions, data, samples, bg_depth, loaded_models, force_agcn, modified_ref_cns)
     data.close()
 
 
