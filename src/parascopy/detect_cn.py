@@ -1022,6 +1022,18 @@ def parse_args(prog_name, in_argv, is_new):
         help='Path to "tabix" executable [default: %(default)s].\n'
             'Use "none" to skip indexing output files.')
 
+    #####
+    vmr_args = parser.add_argument_group('VMR arguments')
+    vmr_args.add_argument('--skip-vmr', action='store_true')
+
+    thresh_args = parser.add_argument_group('Threshold arguments')
+    thresh_mutex = thresh_args.add_mutually_exclusive_group(required=False)
+    thresh_mutex.add_argument("--threshold-value", nargs='?', default=1.15, 
+        help="set max threshold for vmr using values")
+    thresh_mutex.add_argument("--threshold-percentile", nargs='?', 
+        help="set max threshold for vmr using percentiles")
+    #####
+
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
@@ -1079,8 +1091,12 @@ def main(prog_name=None, in_argv=None, is_new=None):
         args.min_samples = None
     common.mkdir_clear(os.path.join(directory, 'model'), args.rerun == 'full')
     regions, loaded_models = filter_regions(regions, loaded_models, args.regions_subset)
-
-    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome)
+    
+    #####
+    vmr_data = (args.depth, (args.threshold_value, args.threshold_percentile))
+    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome, 
+                                                      skip_vmr=args.skip_vmr, vmr_data=vmr_data)
+    
     if args.is_new:
         _check_number_of_samples(len(bam_wrappers), args.min_samples)
 
