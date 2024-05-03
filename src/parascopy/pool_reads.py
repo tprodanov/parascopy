@@ -14,6 +14,7 @@ from .inner.genome import Genome, Interval
 from .inner.alignment import Alignment, Weights
 from .inner import bam_file as bam_file_
 from .view import parse_expression
+from . import vmr
 from . import long_version
 
 
@@ -331,7 +332,7 @@ class BamWrapper:
         return set(map(operator.itemgetter(1), self._old_read_groups))
 
 
-def load_bam_files(input, input_list, genome):
+def load_bam_files(input, input_list, genome, skip_vmr=False, vmr_data=None):
     """
     Loads BAM files from either input or input-list.
     Returns list of BamWrapper's.
@@ -363,11 +364,26 @@ def load_bam_files(input, input_list, genome):
             except UnicodeDecodeError:
                 raise ValueError('Cannot read input list "-I {0}", perhaps you want to use "-i {0}"?'
                     .format(input_list))
-
+    
     bam_wrappers = [BamWrapper(filename, sample, genome, store_contigs=True) for filename, sample in filenames]
     bam_file_.compare_contigs(bam_wrappers, genome)
-
+    
     samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
+    
+    #####
+    if not skip_vmr:
+        
+        # get depth and threshold info
+        depth_dir, threshold_data = vmr_data
+
+        # compute low vmr samples
+        low_vmrs = vmr.compute_vmr(depth_dir[0], threshold_data)
+
+        print("Before checking vmrs", len(bam_wrappers), len(samples))
+        bam_wrappers, samples = bam_file_.Samples.check_vmr(bam_wrappers, low_vmrs)
+        print("After checking vmrs", len(bam_wrappers), len(samples))
+    #####
+    
     for bam_wrapper in bam_wrappers:
         bam_wrapper.init_new_read_groups(samples)
         bam_wrapper.clear_contigs()
