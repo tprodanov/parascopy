@@ -106,6 +106,18 @@ class Samples:
             samples.update(bam_wrapper.present_samples())
         return cls(samples)
 
+    #####
+    @classmethod
+    def check_vmr(cls, bam_wrappers, low_vmrs):
+        new_bam_wrappers = []
+        new_samples = set()
+        for bam_wrapper in bam_wrappers:
+            if bam_wrapper.present_samples() & set(low_vmrs):
+                new_bam_wrappers.append(bam_wrapper)
+                new_samples.update(bam_wrapper.present_samples())
+        return new_bam_wrappers, cls(new_samples)
+    #####
+
     def __contains__(self, sample_name):
         return sample_name in self._sample_ids
 
