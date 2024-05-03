@@ -3,6 +3,7 @@
 import argparse
 import os
 import operator
+import itertools
 import pysam
 import numpy as np
 from collections import defaultdict
@@ -18,11 +19,90 @@ from . import vmr
 from . import long_version
 
 
-_UNDEF = object()
+MAX_REALIGNED_DIST = 100
+
+class ReadPair:
+    def __init__(self, record, max_mate_dist, from_main_copy):
+        self.primary_ref_id = record.reference_id
+        self.is_proper_pair = record.is_paired \
+            and record.reference_id == record.next_reference_id \
+            and abs(record.reference_start - record.next_reference_start) <= max_mate_dist
+
+        self.primary_pos = None
+        if self.is_proper_pair:
+            if record.is_read1:
+                self.primary_pos = (record.reference_start, record.next_reference_start)
+            else:
+                self.primary_pos = (record.next_reference_start, record.reference_start)
+
+        self.records = [[], []]
+        self.from_main_copy = from_main_copy
+
+    def add(self, rec):
+        recs = self.records[rec.is_read2]
+        if all(abs(rec2.reference_start - rec.reference_start) > MAX_REALIGNED_DIST for rec2 in recs):
+            recs.append(rec)
+
+    def need_fetch(self):
+        """
+        Returns (reference id, position) if a second read needs to be fetched.
+        """
+        if self.is_proper_pair:
+            if not self.records[0]:
+                return (self.primary_ref_id, self.primary_pos[0])
+            elif not self.records[1]:
+                return (self.primary_ref_id, self.primary_pos[1])
+        return None
+
+    def connect_pairs(self, max_mate_dist):
+        if not self.is_proper_pair:
+            return
+
+        records1, records2 = self.records
+        n = len(records1)
+        m = len(records2)
+        min1 = [(max_mate_dist + 1, None)] * n
+        min2 = [(max_mate_dist + 1, None)] * m
+        for i, rec1 in enumerate(records1):
+            for j, rec2 in enumerate(records2):
+                dist = abs(rec1.reference_start - rec2.reference_start)
+                if dist < min1[i][0]:
+                    min1[i] = (dist, j)
+                if dist < min2[j][0]:
+                    min2[j] = (dist, i)
+
+        for i, (rec1, (_, j)) in enumerate(zip(records1, min1)):
+            if j is not None and min2[j][1] == i:
+                rec2 = records2[j]
+                rec1.is_proper_pair = True
+                rec2.is_proper_pair = True
+                rec1.next_reference_id = 0
+                rec2.next_reference_id = 0
+                rec1.next_reference_start = rec2.reference_start
+                rec2.next_reference_start = rec1.reference_start
+                rec1.mate_is_reverse = rec2.is_reverse
+                rec2.mate_is_reverse = rec1.is_reverse
+
+                if rec1.is_mapped and rec2.is_mapped:
+                    if rec1.reference_start < rec2.reference_start:
+                        tlen = rec2.reference_end - rec1.reference_start + 1
+                        rec1.template_length = tlen
+                        rec2.template_length = -tlen
+                    else:
+                        tlen = rec1.reference_end - rec2.reference_start + 1
+                        rec2.template_length = tlen
+                        rec1.template_length = -tlen
+
+    def write_all(self, out_bam):
+        for rec in itertools.chain(*self.records):
+            out_bam.write(rec)
 
 
-def _create_record(orig_record, header, read_groups, status, max_mate_dist,
-        *, dupl_strand=True, start=_UNDEF, cigar_tuples=_UNDEF, seq=_UNDEF, qual=_UNDEF):
+UNDEF = common.UNDEF
+
+
+def _create_record(orig_record, header, read_groups, status,
+        *, dupl_strand=True, start=UNDEF, cigar_tuples=UNDEF, seq=UNDEF, qual=UNDEF):
     """
     Creates a new record by taking the orig_record as a template.
     If start, cigar_tuples, seq, qual are not provided, take them frmo the original record.
@@ -30,38 +110,34 @@ def _create_record(orig_record, header, read_groups, status, max_mate_dist,
     record = pysam.AlignedSegment(header)
     record.query_name = orig_record.query_name
     record.query_sequence = common.cond_rev_comp(orig_record.query_sequence, strand=dupl_strand) \
-        if seq is _UNDEF else seq
+        if seq is UNDEF else seq
     record.query_qualities = common.cond_reverse(orig_record.query_qualities, strand=dupl_strand) \
-        if qual is _UNDEF else qual
+        if qual is UNDEF else qual
 
-    if cigar_tuples is _UNDEF:
+    if cigar_tuples is UNDEF:
         assert dupl_strand
         cigar_tuples = orig_record.cigartuples
     # This is either input cigar_tuples, or orig_record.cigartuples.
     if cigar_tuples:
         record.reference_id = 0
-        record.reference_start = orig_record.reference_start if start is _UNDEF else start
+        record.reference_start = orig_record.reference_start if start is UNDEF else start
         record.mapping_quality = 60
         record.cigartuples = cigar_tuples
-        if orig_record.is_reverse != dupl_strand:
+        if orig_record.is_reverse == dupl_strand:
             record.is_reverse = True
     else:
         record.is_unmapped = True
+        if start is not UNDEF:
+            record.reference_id = 0
+            record.reference_start = start
 
     read_group = orig_record.get_tag('RG') if orig_record.has_tag('RG') else None
     new_read_group = read_groups[read_group][0]
     record.set_tag('RG', new_read_group)
 
-    if orig_record.is_paired:
-        record.is_paired = True
-        if orig_record.is_read1:
-            record.is_read1 = True
-        else:
-            record.is_read2 = True
-
-        if orig_record.is_proper_pair and orig_record.reference_id == orig_record.next_reference_id \
-                and abs(orig_record.reference_start - orig_record.next_reference_start) <= max_mate_dist:
-            record.is_proper_pair = True
+    record.is_paired = orig_record.is_paired
+    record.is_read1 = orig_record.is_read1
+    record.is_read2 = orig_record.is_read2
 
     oa_tag = '{},{},{},{},{},{};'.format(orig_record.reference_name, orig_record.reference_start + 1,
         '-' if orig_record.is_reverse else '+', orig_record.cigarstring, orig_record.mapping_quality,
@@ -81,91 +157,36 @@ def _create_header(genome, chrom_id, bam_wrappers, max_mate_dist):
     return pysam.AlignmentHeader.from_text(header)
 
 
-def _extract_reads(in_bam, out_bam, read_groups, region, genome, out_header, read_positions, max_mate_dist):
+def _extract_reads(in_bam, out_reads, read_groups, region, genome, out_header, max_mate_dist):
     for record in common.checked_fetch(in_bam, region, genome):
         if record.flag & 3844:
             continue
 
-        curr_read_pos = read_positions[record.query_name]
-        if not curr_read_pos.add_primary_pos(record.is_read2, record.reference_start):
-            common.log('WARN: Read {} (read mate {}) has several primary alignments ({}:{} and more).'
-                .format(record.query_name, record.is_read2 + 1, record.reference_name, record.reference_start + 1) +
-                ' Skipping second alignment')
-            continue
-        curr_read_pos.record_mate_pos(record, genome, max_mate_dist)
-        new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.SameLoc, max_mate_dist)
-        out_bam.write(new_rec)
+        read_pair = out_reads.get(record.query_name)
+        if read_pair is None:
+            out_reads[record.query_name] = read_pair = ReadPair(record, max_mate_dist, True)
+        read_pair.add(_create_record(record, out_header, read_groups, bam_file_.ReadStatus.SameLoc))
 
 
-class _ReadPositions:
-    MAX_REALIGNED_DIST = 100
-
-    def __init__(self):
-        self.realigned_pos = ([], [])
-        self.mate_written = [False, False]
-        self.mate_position = None
-
-    def add_primary_pos(self, is_read2, pos):
-        positions = self.realigned_pos[is_read2]
-        if positions:
-            return False
-        positions.append(pos)
-        return True
-
-    def add_realigned_pos(self, is_read2, new_pos):
-        positions = self.realigned_pos[is_read2]
-        if any(abs(prev_pos - new_pos) < _ReadPositions.MAX_REALIGNED_DIST for prev_pos in positions):
-            return False
-        positions.append(new_pos)
-        return True
-
-    def record_mate_pos(self, record, genome, max_mate_dist):
-        is_read2 = record.is_read2
-        self.mate_written[is_read2] = True
-        mate_ix = 1 - is_read2
-        if self.mate_written[mate_ix] or not record.is_proper_pair or max_mate_dist == 0:
-            return
-
-        if self.mate_position is not None:
-            assert self.mate_position[0] == mate_ix
-            return
-
-        mate_same_chrom = record.reference_id == record.next_reference_id
-        if not mate_same_chrom and np.isfinite(max_mate_dist):
-            return
-
-        mate_pos = record.next_reference_start
-        if abs(record.reference_start - mate_pos) <= max_mate_dist:
-            self.mate_position = (mate_ix, genome.chrom_id(record.next_reference_name), mate_pos)
-
-    def mate_pos(self):
-        if self.mate_position is None or self.mate_written[self.mate_position[0]]:
-            return None
-        return self.mate_position
-
-
-def _extract_reads_and_realign(in_bam, out_bam, read_groups, dupl, genome, out_header, weights,
-        read_positions, max_mate_dist):
+def _extract_reads_and_realign(in_bam, out_reads, read_groups, dupl, genome, out_header, weights, max_mate_dist):
     """
     Load reads from dupl.region2 and aligns them to dupl.region1.
-
-    read_positions: dictionary, key = read_name, values = _ReadPositions.
     """
     for record in common.checked_fetch(in_bam, dupl.region2, genome):
         if record.flag & 3844:
             continue
 
+        read_pair = out_reads.get(record.query_name)
+        if read_pair is None:
+            out_reads[record.query_name] = read_pair = ReadPair(record, max_mate_dist, False)
+
         orig_aln = Alignment.from_record(record, genome)
         read_seq, reg1_aln = dupl.align_read(record.query_sequence, orig_aln, weights, calc_score=False)
-        new_start = reg1_aln.ref_interval.start
-        if not read_positions[record.query_name].add_realigned_pos(record.is_read2, new_start):
-            continue
 
         cigar_tuples = reg1_aln.cigar.to_pysam_tuples() if reg1_aln.cigar is not None else None
-        new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.Realigned, max_mate_dist,
-            dupl_strand=dupl.strand, seq=read_seq, cigar_tuples=cigar_tuples, start=new_start)
-        read_positions[record.query_name].record_mate_pos(record, genome, max_mate_dist)
-        out_bam.write(new_rec)
+        new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.Realigned,
+            dupl_strand=dupl.strand, seq=read_seq, cigar_tuples=cigar_tuples, start=reg1_aln.ref_interval.start)
+        read_pair.add(new_rec)
 
 
 def _get_fetch_regions(fetch_positions, max_dist=100):
@@ -187,19 +208,12 @@ def _get_fetch_regions(fetch_positions, max_dist=100):
     return fetch_regions
 
 
-def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_groups, max_mate_dist):
+def _add_mates(in_bam, out_reads, genome, out_header, read_groups, max_mate_dist):
     fetch_positions = []
-    mate_names = set()
-
-    for read_name, read_pos in read_positions.items():
-        mate_pos = read_pos.mate_pos()
-        if mate_pos is None:
-            continue
-
-        is_read2, chrom_id, pos = mate_pos
-        fetch_positions.append((chrom_id, pos))
-        mate_names.add((read_name, is_read2))
-
+    for read_pair in out_reads.values():
+        fetch_pos = read_pair.need_fetch()
+        if fetch_pos is not None:
+            fetch_positions.append(fetch_pos)
     if not fetch_positions:
         return
 
@@ -207,12 +221,17 @@ def _write_mates(in_bam, out_bam, read_positions, genome, out_header, read_group
         for record in common.checked_fetch(in_bam, region, genome):
             if record.flag & 3844:
                 continue
-            key = (record.query_name, record.is_read2)
-            if key not in mate_names:
+            read_pair = out_reads.get(record.query_name)
+            if read_pair is None or read_pair.records[record.is_read2]:
                 continue
-            mate_names.remove(key)
-            new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.ReadMate, max_mate_dist)
-            out_bam.write(new_rec)
+
+            if read_pair.from_main_copy:
+                new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.ReadMate)
+            else:
+                unmapped_pos = read_pair.records[1 - record.is_read2][0].reference_start
+                new_rec = _create_record(record, out_header, read_groups, bam_file_.ReadStatus.ReadMate,
+                    cigar_tuples=None, start=unmapped_pos)
+            read_pair.add(new_rec)
 
 
 DEFAULT_MATE_DISTANCE = 5000
@@ -232,17 +251,20 @@ def pool(bam_wrappers, out_path, interval, duplications, genome, *,
         for bam_index, bam_wrapper in enumerate(bam_wrappers, 1):
             if verbose:
                 common.log('    [{:3d} / {}]  {}'.format(bam_index, len(bam_wrappers), bam_wrapper.filename))
-            read_positions = defaultdict(_ReadPositions)
 
+            out_reads = {}
             read_groups = bam_wrapper.read_groups()
             with bam_wrapper.open_bam_file(genome) as bam_file:
-                _extract_reads(bam_file, tmp_bam, read_groups, interval, genome, out_header, read_positions,
-                    max_mate_dist)
+                _extract_reads(bam_file, out_reads, read_groups, interval, genome, out_header, max_mate_dist)
                 for dupl in duplications:
-                    _extract_reads_and_realign(bam_file, tmp_bam, read_groups, dupl, genome,
-                        out_header, weights, read_positions, max_mate_dist)
+                    _extract_reads_and_realign(bam_file, out_reads, read_groups, dupl, genome,
+                        out_header, weights, max_mate_dist)
                 if max_mate_dist != 0:
-                    _write_mates(bam_file, tmp_bam, read_positions, genome, out_header, read_groups, max_mate_dist)
+                    _add_mates(bam_file, out_reads, genome, out_header, read_groups, max_mate_dist)
+
+            for read_pair in out_reads.values():
+                read_pair.connect_pairs(max_mate_dist)
+                read_pair.write_all(tmp_bam)
 
     if verbose:
         common.log('Sorting pooled reads')

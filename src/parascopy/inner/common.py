@@ -43,8 +43,16 @@ def gc_content(seq):
     return 100.0 * (seq.count('C') + seq.count('G')) / len(seq)
 
 
+def fmt_timedelta(d):
+    hours = d.days * 24 + d.seconds // 3600
+    minutes = (d.seconds // 60) % 60
+    seconds = d.seconds % 60
+    deci = d.microseconds // 100000
+    return f'{hours}:{minutes:02}:{seconds:02}.{deci}'
+
+
 def log(string, out=sys.stderr):
-    elapsed = str(timedelta(seconds=perf_counter() - log._timer_start))[:-5]
+    elapsed = fmt_timedelta(timedelta(seconds=perf_counter() - log._timer_start))
     out.write('{}  {}\n'.format(elapsed, string))
     out.flush()
 
@@ -449,3 +457,11 @@ def letter_suffix(index, chars=string.ascii_lowercase):
     if index < n:
         return chars[index]
     return chars[index // n - 1] + chars[index % n]
+
+
+class Undefined:
+    def __bool__(self):
+        raise ValueError('Cannot cast UNDEF to bool')
+
+
+UNDEF = Undefined()

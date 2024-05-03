@@ -625,7 +625,6 @@ class Depth:
                 if (np.isnan(n) or np.isnan(p)) and self.gc_content_defined(gc_content):
                     raise RuntimeError('ERROR: Sample {} is missing read depth parameters (see GC-content {})'
                         .format(row['sample'], gc_content))
-                    exit(1)
                 self._nbinom_params[sample_id, gc_content] = (n, p)
         self._nbinom_params[:, :, 0] /= self._params.ploidy
 

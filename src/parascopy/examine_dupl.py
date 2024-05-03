@@ -120,7 +120,11 @@ def main(prog_name=None, in_argv=None):
             regions.sort()
             regions = Interval.combine_overlapping(regions)
         except errors.EmptyResult:
-            regions = genome.all_chrom_intervals()
+            if args.regions is None and args.regions_file is None:
+                regions = genome.all_chrom_intervals()
+            else:
+                common.log('ERROR: Cannot extract any regions.')
+                exit(1)
 
         out.write('## {}\n'.format(common.command_to_str()))
         out.write('## {} v{}\n'.format(__pkg_name__, __version__))

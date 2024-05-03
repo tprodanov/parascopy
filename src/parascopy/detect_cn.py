@@ -4,6 +4,7 @@ import pysam
 import operator
 import itertools
 import os
+import shutil
 import csv
 import collections
 import numpy as np
@@ -343,8 +344,7 @@ def get_pool_interval(interval, genome, pool_interval=2000):
     return pool_interval
 
 
-def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref_cns):
-    subdir = os.path.join(data.args.output, interval.os_name)
+def analyze_region(interval, subdir, data, samples, bg_depth, model_params, force_agcn, modified_ref_cns):
     duplications = []
     pool_duplications = []
     skip_regions = []
@@ -398,6 +398,10 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
         skip_regions = Interval.combine_overlapping(skip_regions)
         model_params.set_skip_regions(skip_regions)
 
+    if args.skip_unique and not duplications:
+        common.log('WARN: Skipping locus {}: no duplications present'.format(interval.name))
+        return None
+
     psv_header = psvs_.create_vcf_header(genome)
     _update_vcf_header(psv_header, samples)
     psv_records = psvs_.create_psv_records(duplications, genome, psv_header, interval, skip_regions)
@@ -408,6 +412,14 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
         min_size=window_size, max_ref_cn=args.max_ref_cn)
     dupl_hierarchy = cn_tools.DuplHierarchy(interval, psv_records, const_regions, genome, duplications,
         window_size=bg_depth.window_size, max_ref_cn=args.max_ref_cn, max_dist=args.region_dist)
+    unknown_frac = dupl_hierarchy.interval_seq.count('N') / len(dupl_hierarchy.interval_seq)
+    if unknown_frac > args.unknown_seq:
+        common.log('WARN: Skipping locus {}: {:.1f}% of the sequence is unknown'
+            .format(interval.name, 100 * unknown_frac))
+        return None
+    elif unknown_frac > 0:
+        common.log('WARN: [{}] {:.1f}% of the sequence is unknown'.format(interval.name, 100 * unknown_frac))
+
     if model_params.is_loaded:
         msg = model_params.check_dupl_hierarchy(dupl_hierarchy, genome)
         if msg:
@@ -450,7 +462,7 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
             model_params.set_dupl_hierarchy(dupl_hierarchy)
 
         time_log.log('Writing read depth and PSV observations')
-        depth_matrix = _create_depth_matrix(dupl_hierarchy.windows, window_counts)
+        depth_matrix = _create_depth_matrix(dupl_hierarchy.windows, window_counts) if force_agcn is None else None
         psv_counts = _count_psv_observations(psv_records, samples, psv_observations)
         dupl_hierarchy.summarize_region_groups(genome, out.region_groups, args.min_windows)
         _write_windows(dupl_hierarchy, genome, out.windows)
@@ -469,14 +481,17 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
                 continue
 
             group_name = region_group.name
-            time_log.log('Group {}: Run HMM to find aggregate copy number profiles'.format(group_name))
-            common.log('[{}] Region group {}'.format(interval.name, group_name))
-            cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
-                min_samples=args.min_samples, agcn_range=args.agcn_range, strict_agcn_range=args.strict_agcn_range,
-                agcn_jump=args.agcn_jump, min_trans_prob=args.transition_prob * common.LOG10,
-                uniform_initial=args.uniform_initial, use_multipliers=args.use_multipliers,
-                update_agcn_qual=args.update_agcn)
-            out.flush()
+            if force_agcn is None:
+                time_log.log('Group {}: Run HMM to find aggregate copy number profiles'.format(group_name))
+                common.log('[{}] Region group {}'.format(interval.name, group_name))
+                cn_hmm.find_cn_profiles(group_extra, depth_matrix, samples, bg_depth, genome, out, model_params,
+                    min_samples=args.min_samples, agcn_range=args.agcn_range, strict_agcn_range=args.strict_agcn_range,
+                    agcn_jump=args.agcn_jump, min_trans_prob=args.transition_prob * common.LOG10,
+                    uniform_initial=args.uniform_initial, use_multipliers=args.use_multipliers,
+                    update_agcn_qual=args.update_agcn)
+                out.flush()
+            else:
+                group_extra.use_forced_agcn(force_agcn, samples, genome)
 
             time_log.log('Group {}: PSV genotype probabilities'.format(group_name))
             if not args.skip_pscn:
@@ -517,7 +532,20 @@ def analyze_region(interval, data, samples, bg_depth, model_params, modified_ref
     return model_params
 
 
-def single_region(region_ix, region, data, samples, bg_depth, model_params, modified_ref_cns):
+def get_locus_dir(out_dir, locus_name, *, move_old):
+    """
+    Returns the name of the locus directory.
+    If `move_old` is true, moves old directory to a new place.
+    """
+    locus_dir = os.path.join(out_dir, 'loci', locus_name)
+    if move_old:
+        old_dir = os.path.join(out_dir, locus_name)
+        if os.path.exists(old_dir) and not os.path.exists(locus_dir):
+            shutil.move(old_dir, locus_dir)
+    return locus_dir
+
+
+def single_region(region_ix, region, data, samples, bg_depth, model_params, force_agcn, modified_ref_cns):
     """
     Returns tuple (region_ix, exc).
     This is needed because multithreading callback needs to know, how each region finished.
@@ -525,12 +553,13 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params, modi
     if exc is None, region finished successfully.
     """
     if region.os_name is None:
-        common.log('ERROR: Cannot create directory for region {}, os_name is None'.format(region.full_name(data.genome)))
-        return region_ix, 'Skip'
+        return region_ix, \
+            RuntimeError('Cannot create directory for region {}, os_name is None'.format(region.full_name(data.genome)))
     data.prepare()
 
-    common.mkdir_clear(os.path.join(data.args.output, region.os_name), data.args.rerun == 'full')
-    success_path = os.path.join(data.args.output, region.os_name, 'extra', 'success')
+    locus_dir = get_locus_dir(data.args.output, region.os_name, move_old=True)
+    common.mkdir_clear(locus_dir, data.args.rerun == 'full')
+    success_path = os.path.join(locus_dir, 'extra', 'success')
     if os.path.exists(success_path):
         if data.args.rerun == 'none':
             common.log('Skipping region {}'.format(region.full_name(data.genome)))
@@ -539,7 +568,11 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params, modi
 
     common.log('Analyzing region {}'.format(region.full_name(data.genome)))
     try:
-        model_params = analyze_region(region, data, samples, bg_depth, model_params, modified_ref_cns)
+        model_params = analyze_region(region, locus_dir, data, samples, bg_depth,
+            model_params, force_agcn, modified_ref_cns)
+        if model_params is None:
+            return region_ix, 'Skip'
+
         filename = os.path.join(data.args.output, 'model', '{}.gz'.format(region.os_name))
         with gzip.open(filename, 'wt') as model_out:
             model_params.write_to(model_out, data.genome)
@@ -554,11 +587,12 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params, modi
     return region_ix, None
 
 
-def join_bed_files(in_filenames, out_filename, genome, tabix):
+def join_bed_files(in_dirs, out_filename, genome, tabix):
+    basename = os.path.basename(out_filename)
     entries = []
     header = []
-    for in_filename in in_filenames:
-        with common.open_possible_gzip(in_filename) as inp:
+    for in_dir in in_dirs:
+        with common.open_possible_gzip(os.path.join(in_dir, basename)) as inp:
             write_header = not header
             for line in inp:
                 if line.startswith('#'):
@@ -585,10 +619,13 @@ def join_bed_files(in_filenames, out_filename, genome, tabix):
         common.Process([tabix, '-p', 'bed', out_filename]).finish()
 
 
-def join_vcf_files(in_filenames, out_filename, genome, tabix, merge_duplicates=False):
+def join_vcf_files(in_entries, out_filename, genome, tabix, merge_duplicates=False, in_filenames=False):
+    basename = os.path.basename(out_filename)
     records = []
     header = None
-    for in_filename in in_filenames:
+    for in_entry in in_entries:
+        # If `in_filenames`, `in_entries` already contains filenames, otherwise it contains directories.
+        in_filename = in_entry if in_filenames else os.path.join(in_entry, basename)
         with pysam.VariantFile(in_filename) as vcf:
             if header is None:
                 header = vcf.header
@@ -605,7 +642,7 @@ def join_vcf_files(in_filenames, out_filename, genome, tabix, merge_duplicates=F
     return records
 
 
-def run(regions, data, samples, bg_depth, models, modified_ref_cns):
+def run(regions, data, samples, bg_depth, models, force_agcn, modified_ref_cns):
     n_regions = len(regions)
     if models is None:
         models = [None] * n_regions
@@ -615,7 +652,8 @@ def run(regions, data, samples, bg_depth, models, modified_ref_cns):
     if threads == 1:
         common.log('Using 1 thread')
         for region_ix, (region, model_params) in enumerate(zip(regions, models)):
-            results.append(single_region(region_ix, region, data, samples, bg_depth, model_params, modified_ref_cns))
+            results.append(single_region(region_ix, region, data, samples, bg_depth,
+                model_params, force_agcn, modified_ref_cns))
 
     else:
         def callback(res):
@@ -629,7 +667,7 @@ def run(regions, data, samples, bg_depth, models, modified_ref_cns):
         pool = multiprocessing.Pool(threads)
         for region_ix, (region, model_params) in enumerate(zip(regions, models)):
             pool.apply_async(single_region,
-                args=(region_ix, region, data.copy(), samples, bg_depth, model_params, modified_ref_cns),
+                args=(region_ix, region, data.copy(), samples, bg_depth, model_params, force_agcn, modified_ref_cns),
                 callback=callback, error_callback=err_callback)
         pool.close()
         pool.join()
@@ -649,28 +687,33 @@ def run(regions, data, samples, bg_depth, models, modified_ref_cns):
         common.log('Merging output files')
         tabix = data.args.tabix
         out_filename1 = os.path.join(out_dir, 'res.samples.bed.gz')
-        join_bed_files([os.path.join(out_dir, region.os_name, 'res.samples.bed.gz') for region in successful_regions],
-            out_filename1, genome, tabix)
+        loci_dir = [get_locus_dir(out_dir, region.os_name, move_old=False) for region in successful_regions]
+        join_bed_files(loci_dir, out_filename1, genome, tabix)
         paralog_cn.summary_to_paralog_bed(out_filename1,
             os.path.join(out_dir, 'res.paralog.bed.gz'), genome, samples, tabix)
-        join_bed_files([os.path.join(out_dir, region.os_name, 'res.matrix.bed.gz') for region in successful_regions],
-            os.path.join(out_dir, 'res.matrix.bed.gz'), genome, tabix)
-        join_vcf_files([os.path.join(out_dir, region.os_name, 'psvs.vcf.gz') for region in successful_regions],
-            os.path.join(out_dir, 'psvs.vcf.gz'), genome, tabix)
+        join_bed_files(loci_dir, os.path.join(out_dir, 'res.matrix.bed.gz'), genome, tabix)
+        join_vcf_files(loci_dir, os.path.join(out_dir, 'psvs.vcf.gz'), genome, tabix)
 
     n_successes = sum(successful)
     if n_successes < n_regions:
         common.log('==============================================')
         common.log('ERROR: Could not finish the following regions:')
         i = 0
+        skipped = []
         for region, (_, exc) in zip(regions, results):
-            if exc is not None:
+            if exc == 'Skip':
+                skipped.append(region.full_name(genome))
+            elif exc is not None:
                 common.log('    {}: {}'.format(region.full_name(genome), exc))
                 i += 1
                 if i >= 10:
                     break
-        if i < n_regions - n_successes:
+        n_skipped = len(skipped)
+        if i < n_regions - n_successes - n_skipped:
             common.log('    ...')
+        if skipped:
+            common.log('    {} regions skipped: {}{}'.format(
+                n_skipped, ', '.join(skipped[:10]), ', ...' if n_skipped > 10 else ''))
 
     if n_successes == 0:
         common.log('Failure! No regions were analyzed successfully.')
@@ -777,6 +820,7 @@ def get_regions(args, genome, load_models):
 
 
 def filter_regions(regions, loaded_models, regions_subset):
+    start_len = len(regions)
     if regions_subset:
         exclude = regions_subset[0] == '!'
         regions_subset = set(regions_subset)
@@ -789,8 +833,10 @@ def filter_regions(regions, loaded_models, regions_subset):
         regions = [regions[i] for i in ixs]
         if loaded_models:
             loaded_models = [loaded_models[i] for i in ixs]
+    if len(regions) < start_len:
+        common.log('WARN: Discarded {} loci based on --regions-subset'.format(start_len - len(regions)))
     if not regions:
-        common.log('Failure! No regions provided.')
+        common.log('Failure! No remaining regions')
         exit(1)
     return regions, loaded_models
 
@@ -930,17 +976,20 @@ def parse_args(prog_name, in_argv, is_new):
         reg_args.add_argument('-R', '--regions-file', nargs='+', metavar='<file> [<file> ...]',
             help='Input bed[.gz] file(s) containing regions (tab-separated, 0-based semi-exclusive).\n'
                 'Optional fourth column will be used as a region name.')
+    reg_args.add_argument('--force-agcn', metavar='<bed>',
+        help='Instead of calculating aggregate copy numbers, use provided bed file.\n'
+            'Columns: chrom, start, end, samples, copy_num. Fourth column can be a single sample name;\n'
+            'list of sample names separated by ","; or "*" to indicate all samples.')
+    if is_new:
         reg_args.add_argument('--modify-ref', metavar='<bed>',
-            help='Modify reference copy number: bed file with columns "chrom start end samples copy_num".\n'
-                'Fourth column can be a single sample name; list of sample names separated by ",";\n'
-                'or "*" to indicate all samples.\n'
-                'Modified reference copy numbers are used for paralog-specific copy number detection.')
+            help='Modify reference copy number using bed file with the same format as `--force-agcn`.\n'
+                'Provided values are used for paralog-specific copy number detection.')
     reg_args.add_argument('--regions-subset', nargs='+', metavar='<str> [<str> ...]',
         help='Additionally filter input regions: only use regions with names that are in this list.\n'
             'If the first argument is "!", only use regions not in this list.')
 
+    filt_args = parser.add_argument_group('Duplications filtering arguments')
     if is_new:
-        filt_args = parser.add_argument_group('Duplications filtering arguments')
         filt_args.add_argument('-e', '--exclude', metavar='<expr>',
             default='length < 500 && seq_sim < 0.97',
             help='Exclude duplications for which the expression is true\n[default: %(default)s].')
@@ -949,6 +998,10 @@ def parse_args(prog_name, in_argv, is_new):
                 'not excluded in the -e/--exclude argument [default: %(default)s].')
         filt_args.add_argument('--max-ref-cn', type=int, metavar='<int>', default=10,
             help='Skip regions with reference copy number higher than <int> [default: %(default)s].')
+    filt_args.add_argument('--unknown-seq', type=float, metavar='<float>', default=0.1,
+        help='At most this fraction of region sequence can be unknown (N) [default: %(default)s].')
+    filt_args.add_argument('--skip-unique', action='store_true',
+        help='Skip regions without any duplications in the reference genome.')
 
     aggr_det_args = parser.add_argument_group('Aggregate copy number (agCN) detection arguments')
     if is_new:
@@ -1084,6 +1137,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
     directory = args.output
     common.log('Using output directory "{}"'.format(directory))
     common.mkdir(directory)
+    common.mkdir(os.path.join(directory, 'loci'))
     write_command(os.path.join(directory, 'command.txt'))
 
     regions, loaded_models = get_regions(args, genome, load_models=not args.is_new)
@@ -1102,6 +1156,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
 
     data.set_bam_wrappers(bam_wrappers)
     depth_.check_duplicated_samples(bam_wrappers)
+    force_agcn = None if args.force_agcn is None else InCopyNums(args.force_agcn, genome, samples)
     modified_ref_cns = None if args.modify_ref is None else InCopyNums(args.modify_ref, genome, samples)
 
     if loaded_models:
@@ -1110,7 +1165,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
         bg_depth = depth_.Depth.from_filenames(args.depth, samples, window_filtering_mult=args.window_filtering)
         common.log(bg_depth.params.describe() + '    ============')
 
-    run(regions, data, samples, bg_depth, loaded_models, modified_ref_cns)
+    run(regions, data, samples, bg_depth, loaded_models, force_agcn, modified_ref_cns)
     data.close()
 
 
