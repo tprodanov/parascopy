@@ -354,7 +354,7 @@ class BamWrapper:
         return set(map(operator.itemgetter(1), self._old_read_groups))
 
 
-def load_bam_files(input, input_list, genome, skip_vmr=False, vmr_data=None):
+def load_bam_files(input, input_list, genome, run_vmr=False, vmr_data=None):
     """
     Loads BAM files from either input or input-list.
     Returns list of BamWrapper's.
@@ -393,7 +393,7 @@ def load_bam_files(input, input_list, genome, skip_vmr=False, vmr_data=None):
     samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
     
     #####
-    if not skip_vmr:
+    if run_vmr:
         
         # get depth and threshold info
         depth_dir, threshold_data = vmr_data
@@ -401,6 +401,7 @@ def load_bam_files(input, input_list, genome, skip_vmr=False, vmr_data=None):
         # compute low vmr samples
         low_vmrs = vmr.compute_vmr(depth_dir[0], threshold_data)
 
+        print("-"*50)
         print("Before checking vmrs", len(bam_wrappers), len(samples))
         bam_wrappers, samples = bam_file_.Samples.check_vmr(bam_wrappers, low_vmrs)
         print("After checking vmrs", len(bam_wrappers), len(samples))
