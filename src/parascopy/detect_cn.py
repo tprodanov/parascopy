@@ -1077,7 +1077,7 @@ def parse_args(prog_name, in_argv, is_new):
 
     #####
     vmr_args = parser.add_argument_group('VMR arguments')
-    vmr_args.add_argument('--skip-vmr', action='store_true')
+    vmr_args.add_argument('--run-vmr', action='store_true')
 
     thresh_args = parser.add_argument_group('Threshold arguments')
     thresh_mutex = thresh_args.add_mutually_exclusive_group(required=False)
@@ -1149,7 +1149,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
     #####
     vmr_data = (args.depth, (args.threshold_value, args.threshold_percentile))
     bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome, 
-                                                      skip_vmr=args.skip_vmr, vmr_data=vmr_data)
+                                                      run_vmr=args.run_vmr, vmr_data=vmr_data)
     
     if args.is_new:
         _check_number_of_samples(len(bam_wrappers), args.min_samples)
