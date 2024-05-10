@@ -113,6 +113,8 @@ def _run_freebayes(locus, genome, args, filenames):
         '-p', 1,
         '-A', filenames.cnv_map,
         '--read-allele-obs', filenames.read_allele,
+        '--genotyping-max-iterations', 5,
+        '--genotyping-max-banddepth', 2,
         '-v', filenames.freebayes + '.tmp',
         filenames.pooled,
     ]
