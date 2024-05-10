@@ -426,7 +426,7 @@ def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
         description='Call variants in duplicated regions.',
-        formatter_class=argparse.RawTextHelpFormatter, add_help=False,
+        formatter_class=common.SingleMetavar, add_help=False,
         usage='{} -p <dir> [-i <bam> ... | -I <bam-list>] -t <table> -f <fasta> [-o <dir>]'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
     io_args.add_argument('-p', '--parascopy', metavar='<dir>', required=True,
