@@ -72,12 +72,10 @@ In order to run variant calling (`parascopy call`), Parascopy requires a modifie
 It is installed automatically via conda, but for manual installation you need to run
 ```bash
 # Within the main parascopy directory.
-git clone --recursive https://github.com/tprodanov/freebayes.git
+git clone --recursive https://github.com/tprodanov/freebayes
 cd freebayes
-meson build/ --buildtype release
-cd build
-ninja
-cd ../../
+./compile.sh
+cd ..
 ```
 
 General usage
