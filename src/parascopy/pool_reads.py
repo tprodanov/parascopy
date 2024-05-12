@@ -396,6 +396,19 @@ def load_bam_files(input, input_list, genome):
     return bam_wrappers, samples
 
 
+def get_only_regions(args):
+    """
+    Writes regions used for pooling/realining reads
+    """
+    with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
+        interval = Interval.parse(args.region, genome)
+        duplications = load_duplications(table, genome, interval, args.exclude)
+
+    with open(args.only_regions, "a") as out:
+        for dupl in duplications:
+            out.write(dupl.region2.to_bed(genome) + '\n')
+
+
 def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
@@ -441,11 +454,17 @@ def main(prog_name=None, in_argv=None):
     opt_args.add_argument('--samtools', metavar='<path>|none', default='samtools',
             help='Path to samtools executable [default: %(default)s].\n'
                 'Use python wrapper if "none", can lead to errors.')
+    opt_args.add_argument('--only-regions', metavar='<file>',
+        help='Append regions, used for pooling and realigning, to this file, and stop.')
 
     oth_args = parser.add_argument_group('Other arguments')
     oth_args.add_argument('-h', '--help', action='help', help='Show this help message')
     oth_args.add_argument('-V', '--version', action='version', version=long_version(), help='Show version.')
     args = parser.parse_args(in_argv)
+
+    if args.only_regions is not None:
+        get_only_regions(args)
+        return
 
     if args.samtools != 'none':
         common.check_executable(args.samtools)
