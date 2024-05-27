@@ -261,7 +261,11 @@ DEFAULT_MATE_DISTANCE = 5000
 
 def pool(bam_wrappers, out_path, interval, duplications, genome, *,
         samtools='samtools', weights=None, max_mate_dist=DEFAULT_MATE_DISTANCE,
-        verbose=True, time_log=None, write_cram=True, single_out=True):
+        verbose=True, time_log=None, write_cram=True, single_out=False):
+    """
+    Pools reads from multiple BAM/CRAM files.
+    Returns list of output files.
+    """
     if weights is None:
         weights = Weights()
     if verbose:
@@ -269,7 +273,9 @@ def pool(bam_wrappers, out_path, interval, duplications, genome, *,
     if time_log is not None:
         time_log.log('Pooling reads')
 
+    out_filenames = []
     if single_out:
+        out_filenames.append(out_path)
         tmp_path = out_path + '.tmp'
         out_header = _create_header(genome, interval.chrom_id, bam_wrappers, max_mate_dist)
         tmp_bam = pysam.AlignmentFile(tmp_path, 'wb', header=out_header)
@@ -279,6 +285,7 @@ def pool(bam_wrappers, out_path, interval, duplications, genome, *,
     for bam_index, bam_wrapper in enumerate(bam_wrappers):
         if not single_out:
             curr_out_path = '{}/{}.{}'.format(out_path, bam_index, 'cram' if write_cram else 'bam')
+            out_filenames.append(curr_out_path)
             curr_tmp_path = curr_out_path + '.tmp'
             out_header = _create_header(genome, interval.chrom_id, (bam_wrapper,), max_mate_dist)
             tmp_bam = pysam.AlignmentFile(curr_tmp_path, 'wc' if write_cram else 'wb',
@@ -325,6 +332,39 @@ def pool(bam_wrappers, out_path, interval, duplications, genome, *,
         # Touch `success`
         with open(os.path.join(out_path, 'success'), 'w'):
             pass
+    return out_filenames
+
+
+def get_pooled_filenames(n_bams, prefix):
+    """
+    Returns files, if available.
+    """
+    single_bam = os.path.join(f'{prefix}.bam')
+    if os.path.exists(single_bam) and os.path.exists(single_bam + '.bai'):
+        return (single_bam,)
+
+    single_cram = os.path.join(f'{prefix}.cram')
+    if os.path.exists(single_cram) and os.path.exists(single_cram + '.crai'):
+        return (single_cram,)
+
+    inner_dir = prefix
+    if os.path.exists(os.path.join(inner_dir, 'success')):
+        out_filenames = []
+        iterator = range(n_bams) if n_bams is not None else itertools.count()
+        for i in iterator:
+            curr_cram_filename = os.path.join(inner_dir, f'{i}.cram')
+            curr_bam_filename = os.path.join(inner_dir, f'{i}.bam')
+            if os.path.exists(curr_cram_filename) and os.path.exists(curr_cram_filename + '.crai'):
+                out_filenames.append(curr_cram_filename)
+            elif os.path.exists(curr_bam_filename) and os.path.exists(curr_bam_filename + '.bai'):
+                out_filenames.append(curr_bam_filename)
+            elif n_bams is not None:
+                common.log(f'Cannot find {curr_cram_filename} or {curr_bam_filename}')
+                return None
+            else:
+                break
+        return out_filenames
+    return None
 
 
 def load_duplications(table, genome, interval, exclude_str):

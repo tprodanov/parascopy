@@ -125,3 +125,30 @@ class MultiNonOverlTree:
 
     def intersection_size(self, region):
         return sum(interval.intersection_size(region) for interval in self.overlap_iter(region))
+
+
+def create_complement_dupl_tree(duplications, table, genome, padding):
+    from .genome import Interval
+
+    query_regions = []
+    for dupl in duplications:
+        region1 = dupl.region1.add_padding(padding)
+        region1.trim(genome)
+        query_regions.append(region1)
+
+        region2 = dupl.region2.add_padding(padding)
+        region2.trim(genome)
+        query_regions.append(region2)
+
+    query_regions = Interval.combine_overlapping(query_regions, max_dist=padding)
+    dupl_regions = []
+    for q_region in query_regions:
+        try:
+            for tup in table.fetch(q_region.chrom_name(genome), q_region.start, q_region.end):
+                region1 = Interval(genome.chrom_id(tup[0]), int(tup[1]), int(tup[2]))
+                dupl_regions.append(region1)
+        except ValueError:
+            common.log('WARN: Cannot fetch region {} from the table'.format(q_region.to_str(genome)))
+    dupl_regions = Interval.combine_overlapping(dupl_regions)
+    unique_regions = genome.complement_intervals(dupl_regions, include_full_chroms=False)
+    return MultiNonOverlTree(unique_regions)

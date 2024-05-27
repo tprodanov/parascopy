@@ -287,7 +287,7 @@ def mkdir(path):
         pass
 
 
-def mkdir_clear(path, rewrite):
+def mkdir_clear(path, rewrite=True):
     if os.path.exists(path) and rewrite:
         log('Cleaning directory "{}"'.format(path))
         shutil.rmtree(path)

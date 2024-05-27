@@ -8,11 +8,13 @@ import numpy as np
 from collections import defaultdict
 from intervaltree import IntervalTree
 import construct
+import pysam
 
 from .duplication import Duplication
 from .genome import Interval
-from . import common
 from .cigar import Cigar
+from . import itree
+from . import common
 
 
 def get_read_groups(bam_file):
@@ -341,11 +343,8 @@ class RecordCoord:
             self.location_info)
 
 
-def write_record_coordinates(in_bam, samples, unique_tree, genome, out_filename, comment_dict):
+def write_record_coordinates(in_filenames, samples, duplications, table, genome, out_filename):
     n_samples = len(samples)
-    read_groups = {}
-    for read_group, sample in get_read_groups(in_bam):
-        read_groups[read_group] = samples.id_or_none(sample)
 
     with tempfile.TemporaryDirectory(prefix='parascopy') as wdir:
         n_entries = [0] * len(samples)
@@ -354,12 +353,27 @@ def write_record_coordinates(in_bam, samples, unique_tree, genome, out_filename,
             tmp_files = []
             for tmp_filename in tmp_filenames:
                 tmp_files.append(open(tmp_filename, 'wb'))
-            for record in in_bam:
-                coord = RecordCoord.from_pooled_record(record, unique_tree, genome)
-                sample_id = read_groups[record.get_tag('RG')]
-                if sample_id is not None:
-                    coord.write_binary(tmp_files[sample_id])
-                    n_entries[sample_id] += 1
+
+            unique_tree = None
+            comment_dict = None
+            read_groups = {}
+
+            for filename in in_filenames:
+                with pysam.AlignmentFile(filename, reference_filename=genome.filename) as in_bam:
+                    if unique_tree is None:
+                        comment_dict = get_comment_items(in_bam)
+                        max_mate_dist = int(comment_dict['max_mate_dist'])
+                        unique_tree = itree.create_complement_dupl_tree(duplications, table, genome,
+                            padding=max_mate_dist * 2)
+                    for read_group, sample in get_read_groups(in_bam):
+                        read_groups[read_group] = samples.id_or_none(sample)
+
+                    for record in in_bam:
+                        coord = RecordCoord.from_pooled_record(record, unique_tree, genome)
+                        sample_id = read_groups[record.get_tag('RG')]
+                        if sample_id is not None:
+                            coord.write_binary(tmp_files[sample_id])
+                            n_entries[sample_id] += 1
         finally:
             for f in tmp_files:
                 f.close()

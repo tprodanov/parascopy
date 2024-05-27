@@ -185,7 +185,7 @@ def _filter_windows(window_counts, bg_depth, dupl_hierarchy, min_windows, perc_s
                 window.in_hmm = False
 
 
-def _calculate_pooled_depth(bam_file, samples, bg_depth, read_groups_dict, dupl_hierarchy, outp):
+def _calculate_pooled_depth(pooled_filenames, genome, samples, bg_depth, read_groups_dict, dupl_hierarchy, outp):
     """
     Returns:
         - window_counts: matrix of WindowCounts (n_windows x n_samples),
@@ -208,20 +208,22 @@ def _calculate_pooled_depth(bam_file, samples, bg_depth, read_groups_dict, dupl_
     window_counts = [[depth_.WindowCounts(bg_depth.params) for _j in range(n_samples)] for _i in range(n_windows)]
 
     read_centers = [[] for _ in range(n_samples)]
-    for record in bam_file:
-        if record.is_unmapped:
-            continue
-        sample_id = read_groups_dict[record.get_tag('RG')]
-        _update_psv_observations(record, sample_id, psvs, psv_searcher, psv_observations)
+    for bam_filename in pooled_filenames:
+        with pysam.AlignmentFile(bam_filename, require_index=True, reference_filename=genome.filename) as bam_file:
+            for record in bam_file:
+                if record.is_unmapped:
+                    continue
+                sample_id = read_groups_dict[record.get_tag('RG')]
+                _update_psv_observations(record, sample_id, psvs, psv_searcher, psv_observations)
 
-        cigar = Cigar.from_pysam_tuples(record.cigartuples)
-        middle = depth_.get_read_middle(record, cigar)
-        if middle is None:
-            continue
-        window_ix = window_starts.searchsorted(middle, side='right') - 1
-        if window_ix == -1 or middle >= window_starts[window_ix] + window_size:
-            continue
-        window_counts[window_ix][sample_id].add_read(record, cigar, trust_proper_pair=True, look_at_oa=True)
+                cigar = Cigar.from_pysam_tuples(record.cigartuples)
+                middle = depth_.get_read_middle(record, cigar)
+                if middle is None:
+                    continue
+                window_ix = window_starts.searchsorted(middle, side='right') - 1
+                if window_ix == -1 or middle >= window_starts[window_ix] + window_size:
+                    continue
+                window_counts[window_ix][sample_id].add_read(record, cigar, trust_proper_pair=True, look_at_oa=True)
 
     outp.write('window_ix\tsample\tdepth1\tdepth2\tlow_mapq\tclipped\tunpaired\tnorm_cn1\n')
     for window, window_counts_row in zip(windows, window_counts):
@@ -358,7 +360,7 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, forc
         args = model_params.load_args(args)
 
     extra_subdir = os.path.join(subdir, 'extra')
-    common.mkdir_clear(extra_subdir, rewrite=True)
+    common.mkdir_clear(extra_subdir)
     time_log = _TimeLogger(os.path.join(extra_subdir, 'time.log'))
     time_log.log('Analyzing {}'.format(interval.full_name(genome)))
 
@@ -428,10 +430,13 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, forc
             raise RuntimeError('Model parameters mismatch')
 
     _write_bed_files(interval, duplications, const_regions, genome, subdir)
-    pooled_bam_path = os.path.join(subdir, 'pooled_reads.bam')
-    if not os.path.exists(pooled_bam_path):
-        pool_reads.pool(data.bam_wrappers, pooled_bam_path, interval, pool_duplications, genome,
-            samtools=args.samtools, verbose=True, time_log=time_log)
+    pooled_prefix = os.path.join(subdir, 'pooled_reads')
+    pooled_filenames = pool_reads.get_pooled_filenames(len(data.bam_wrappers), pooled_prefix)
+    if pooled_filenames is None:
+        common.mkdir_clear(pooled_prefix)
+        pooled_filenames = pool_reads.pool(data.bam_wrappers, pooled_prefix,
+            interval, pool_duplications, genome, samtools=args.samtools,
+            verbose=True, time_log=time_log, write_cram=True, single_out=False)
 
     extra_files = dict(depth='depth.csv', region_groups='region_groups.txt', windows='windows.bed',
         hmm_states='hmm_states.csv', hmm_params='hmm_params.csv',
@@ -452,11 +457,12 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, forc
         for bam_wrapper in data.bam_wrappers:
             for read_group, sample in bam_wrapper.read_groups().values():
                 read_groups_dict[read_group] = samples.id(sample)
-        with pysam.AlignmentFile(pooled_bam_path, require_index=True) as bam_file:
-            time_log.log('Calculating aggregate read depth')
-            common.log('[{}] Calculating aggregate read depth'.format(interval.name))
-            window_counts, psv_observations = _calculate_pooled_depth(bam_file, samples, bg_depth, read_groups_dict,
-                dupl_hierarchy, out.depth)
+
+        time_log.log('Calculating aggregate read depth')
+        common.log('[{}] Calculating aggregate read depth'.format(interval.name))
+        window_counts, psv_observations = _calculate_pooled_depth(pooled_filenames, genome,
+            samples, bg_depth, read_groups_dict, dupl_hierarchy, out.depth)
+
         if not model_params.is_loaded:
             _filter_windows(window_counts, bg_depth, dupl_hierarchy, min_windows=args.min_windows, perc_samples=10.0)
             model_params.set_dupl_hierarchy(dupl_hierarchy)
@@ -558,7 +564,7 @@ def single_region(region_ix, region, data, samples, bg_depth, model_params, forc
     data.prepare()
 
     locus_dir = get_locus_dir(data.args.output, region.os_name, move_old=True)
-    common.mkdir_clear(locus_dir, data.args.rerun == 'full')
+    common.mkdir_clear(locus_dir, rewrite=data.args.rerun == 'full')
     success_path = os.path.join(locus_dir, 'extra', 'success')
     if os.path.exists(success_path):
         if data.args.rerun == 'none':
@@ -1131,7 +1137,7 @@ def main(prog_name=None, in_argv=None, is_new=None):
     regions, loaded_models = get_regions(args, genome, load_models=not args.is_new)
     if loaded_models:
         args.min_samples = None
-    common.mkdir_clear(os.path.join(directory, 'model'), args.rerun == 'full')
+    common.mkdir_clear(os.path.join(directory, 'model'), rewrite=args.rerun == 'full')
     regions, loaded_models = filter_regions(regions, loaded_models, args.regions_subset)
 
     bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome)

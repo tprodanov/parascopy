@@ -116,37 +116,12 @@ def _run_freebayes(locus, genome, args, filenames):
         '--genotyping-max-iterations', 10,
         '--genotyping-max-banddepth', 3,
         '-v', filenames.freebayes + '.tmp',
-        filenames.pooled,
+        *filenames.pooled,
     ]
     if not common.Process(command).finish():
         raise RuntimeError('Freebayes finished with non-zero code for locus {}'.format(locus.name))
     os.rename(filenames.freebayes + '.tmp', filenames.freebayes)
     common.log('[{}] Freebayes finished'.format(locus.name))
-
-
-def _create_complement_dupl_tree(duplications, table, genome, padding):
-    query_regions = []
-    for dupl in duplications:
-        region1 = dupl.region1.add_padding(padding)
-        region1.trim(genome)
-        query_regions.append(region1)
-
-        region2 = dupl.region2.add_padding(padding)
-        region2.trim(genome)
-        query_regions.append(region2)
-
-    query_regions = Interval.combine_overlapping(query_regions, max_dist=padding)
-    dupl_regions = []
-    for q_region in query_regions:
-        try:
-            for tup in table.fetch(q_region.chrom_name(genome), q_region.start, q_region.end):
-                region1 = Interval(genome.chrom_id(tup[0]), int(tup[1]), int(tup[2]))
-                dupl_regions.append(region1)
-        except ValueError:
-            common.log('WARN: Cannot fetch region {} from the table'.format(q_region.to_str(genome)))
-    dupl_regions = Interval.combine_overlapping(dupl_regions)
-    unique_regions = genome.complement_intervals(dupl_regions, include_full_chroms=False)
-    return itree.MultiNonOverlTree(unique_regions)
 
 
 def _write_record_coordinates(filenames, samples, locus, duplications, table, genome, args):
@@ -160,11 +135,7 @@ def _write_record_coordinates(filenames, samples, locus, duplications, table, ge
             common.log('WARN: Could not read BAM coordinates file, writing it anew')
 
     common.log('[{}] Writing read coordinates'.format(locus.name))
-    with pysam.AlignmentFile(filenames.pooled) as in_bam:
-        comment_dict = bam_file_.get_comment_items(in_bam)
-        max_mate_dist = int(comment_dict['max_mate_dist'])
-        unique_tree = _create_complement_dupl_tree(duplications, table, genome, padding=max_mate_dist * 2)
-        bam_file_.write_record_coordinates(in_bam, samples, unique_tree, genome, filenames.read_coord, comment_dict)
+    bam_file_.write_record_coordinates(filenames.pooled, samples, duplications, table, genome, filenames.read_coord)
     return bam_file_.CoordinatesIndex(filenames.read_coord, samples, genome)
 
 
@@ -225,12 +196,13 @@ def _analyze_sample(locus, sample_id, sample, all_read_allele_obs, coord_index, 
         variant_obs.update_vcf_records(gt_pred, genome)
 
 
-def _debug_write_read_hashes(bam_filename, out):
+def _debug_write_read_hashes(bam_filenames, ref_filename, out):
     common.log('DEBUG: Get read hashes')
-    with pysam.AlignmentFile(bam_filename) as in_bam:
-        for record in in_bam.fetch():
-            out.write('{}\t{:x}\n'.format(record.query_name,
-                bam_file_.string_hash_fnv1(record.query_name, record.is_read1)))
+    for filename in bam_filenames:
+        with pysam.AlignmentFile(filename, reference_filename=ref_filename) as in_bam:
+            for record in in_bam.fetch():
+                out.write('{}\t{:x}\n'.format(record.query_name,
+                    bam_file_.string_hash_fnv1(record.query_name, record.is_read1)))
 
 
 def analyze_locus(locus, model_params, data, samples, assume_cn):
@@ -257,14 +229,17 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
             None if data.bam_wrappers is None else detect_cn.clip_duplication(dupl, pool_interval, genome))
 
     if data.bam_wrappers is None:
-        filenames.pooled = os.path.join(filenames.par_dir, 'pooled_reads.bam')
-        if not os.path.isfile(filenames.pooled):
-            raise FileNotFoundError('Could not read pooled reads from "{}"'.format(filenames.pooled))
+        prefix = os.path.join(filenames.par_dir, 'pooled_reads')
+        filenames.pooled = pool_reads.get_pooled_filenames(None, prefix)
+        if filenames.pooled is None:
+            raise FileNotFoundError('Could not find pooled reads at "{}*"'.format(prefix))
     else:
-        filenames.pooled = os.path.join(filenames.out_dir, 'pooled_reads.bam')
-        if not os.path.isfile(filenames.pooled) or args.rerun == 'full':
-            pool_reads.pool(data.bam_wrappers, filenames.pooled, locus, pool_duplications, genome,
-                samtools=args.samtools, verbose=True)
+        prefix = os.path.join(filenames.out_dir, 'pooled_reads')
+        filenames.pooled = pool_reads.get_pooled_filenames(len(data.bam_wrappers), prefix)
+        if filenames.pooled is None:
+            common.mkdir_clear(prefix)
+            filenames.pooled = pool_reads.pool(data.bam_wrappers, prefix, locus, pool_duplications, genome,
+                samtools=args.samtools, verbose=True, write_cram=True, single_out=False)
 
     common.log('Analyzing locus [{}]'.format(locus.name))
     filenames.subdir = os.path.join(filenames.out_dir, 'var_extra')
@@ -310,7 +285,7 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
     with coord_index as coord_index, OutputFiles(filenames.subdir, extra_files) as out:
         if args.debug:
             out.debug_reads.write('name\thash\n')
-            _debug_write_read_hashes(filenames.pooled, out.debug_reads)
+            _debug_write_read_hashes(filenames.pooled, genome.filename, out.debug_reads)
             out.debug_obs.write('variant\tread_hash\tread_mate\tobs_allele\tbasequal\n')
 
         out.genotypes.write('# Format: genotype=-log10(prob).\n')
