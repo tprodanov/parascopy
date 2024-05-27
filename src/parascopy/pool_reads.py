@@ -92,9 +92,8 @@ class ReadPair:
                         rec2.template_length = tlen
                         rec1.template_length = -tlen
 
-    def write_all(self, out_bam):
-        for rec in itertools.chain(*self.records):
-            out_bam.write(rec)
+    def get_all(self):
+        return itertools.chain(*self.records)
 
 
 UNDEF = common.UNDEF
@@ -233,34 +232,36 @@ def _add_mates(in_bam, out_reads, genome, out_header, read_groups, max_mate_dist
             read_pair.add(new_rec)
 
 
-def _sort_and_index(tmp_path, out_path, write_cram, ref_filename, samtools):
-    tmp_path2 = tmp_path + '2'
-    out_ext = 'cram' if write_cram else 'bam'
-
-    args = ('-o', tmp_path2, '-O', out_ext, '--reference', ref_filename, tmp_path)
+def _sort_output(in_path, out_path, write_cram, ref_filename, samtools):
+    args = (
+        '--reference', ref_filename,
+        '-O', 'cram' if write_cram else 'bam',
+        '-o', out_path, in_path)
     if samtools == 'none' or samtools is None:
         pysam.sort(*args)
     else:
         if not common.Process((samtools, 'sort') + args).finish(zero_code_stderr=False):
             raise RuntimeError('Samtools finished with non-zero status')
-    os.remove(tmp_path)
+    os.remove(in_path)
 
+
+def _index_and_move(tmp_path, out_path, write_cram, samtools):
     if samtools == 'none' or samtools is None:
-        pysam.index(tmp_path2)
+        pysam.index(tmp_path)
     else:
-        if not common.Process([samtools, 'index', tmp_path2]).finish(zero_code_stderr=False):
+        if not common.Process([samtools, 'index', tmp_path]).finish(zero_code_stderr=False):
             raise RuntimeError('Samtools finished with non-zero status')
 
     ix_suffix = '.crai' if write_cram else '.bai'
-    os.rename(tmp_path2 + ix_suffix, out_path + ix_suffix)
-    os.rename(tmp_path2, out_path)
+    os.rename(tmp_path + ix_suffix, out_path + ix_suffix)
+    os.rename(tmp_path, out_path)
 
 
 DEFAULT_MATE_DISTANCE = 5000
 
 def pool(bam_wrappers, out_path, interval, duplications, genome, *,
         samtools='samtools', weights=None, max_mate_dist=DEFAULT_MATE_DISTANCE,
-        verbose=True, time_log=None, write_cram=True, use_dir=True):
+        verbose=True, time_log=None, write_cram=True, single_out=True):
     if weights is None:
         weights = Weights()
     if verbose:
@@ -268,32 +269,62 @@ def pool(bam_wrappers, out_path, interval, duplications, genome, *,
     if time_log is not None:
         time_log.log('Pooling reads')
 
-    out_header = _create_header(genome, interval.chrom_id, bam_wrappers, max_mate_dist)
-    tmp_path = out_path + '.tmp'
-    with pysam.AlignmentFile(tmp_path, 'wb', header=out_header) as tmp_bam:
-        for bam_index, bam_wrapper in enumerate(bam_wrappers, 1):
+    if single_out:
+        tmp_path = out_path + '.tmp'
+        out_header = _create_header(genome, interval.chrom_id, bam_wrappers, max_mate_dist)
+        tmp_bam = pysam.AlignmentFile(tmp_path, 'wb', header=out_header)
+    else:
+        tmp_path = out_header = tmp_bam = None
+
+    for bam_index, bam_wrapper in enumerate(bam_wrappers):
+        if not single_out:
+            curr_out_path = '{}/{}.{}'.format(out_path, bam_index, 'cram' if write_cram else 'bam')
+            curr_tmp_path = curr_out_path + '.tmp'
+            out_header = _create_header(genome, interval.chrom_id, (bam_wrapper,), max_mate_dist)
+            tmp_bam = pysam.AlignmentFile(curr_tmp_path, 'wc' if write_cram else 'wb',
+                header=out_header, reference_filename=genome.filename)
             if verbose:
-                common.log('    [{:3d} / {}]  {}'.format(bam_index, len(bam_wrappers), bam_wrapper.filename))
+                common.log('    [{:3d} / {}]  {} -> {}'.format(bam_index + 1, len(bam_wrappers),
+                    bam_wrapper.filename, curr_out_path))
+        elif verbose:
+            common.log('    [{:3d} / {}]  {}'.format(bam_index + 1, len(bam_wrappers), bam_wrapper.filename))
 
-            out_reads = {}
-            read_groups = bam_wrapper.read_groups()
-            with bam_wrapper.open_bam_file(genome) as bam_file:
-                _extract_reads(bam_file, out_reads, read_groups, interval, genome, out_header, max_mate_dist)
-                for dupl in duplications:
-                    _extract_reads_and_realign(bam_file, out_reads, read_groups, dupl, genome,
-                        out_header, weights, max_mate_dist)
-                if max_mate_dist != 0:
-                    _add_mates(bam_file, out_reads, genome, out_header, read_groups, max_mate_dist)
+        out_reads = {}
+        read_groups = bam_wrapper.read_groups()
+        with bam_wrapper.open_bam_file(genome) as bam_file:
+            _extract_reads(bam_file, out_reads, read_groups, interval, genome, out_header, max_mate_dist)
+            for dupl in duplications:
+                _extract_reads_and_realign(bam_file, out_reads, read_groups, dupl, genome,
+                    out_header, weights, max_mate_dist)
+            if max_mate_dist != 0:
+                _add_mates(bam_file, out_reads, genome, out_header, read_groups, max_mate_dist)
 
-            for read_pair in out_reads.values():
-                read_pair.connect_pairs(max_mate_dist)
-                read_pair.write_all(tmp_bam)
+        records = []
+        for read_pair in out_reads.values():
+            read_pair.connect_pairs(max_mate_dist)
+            records.extend(read_pair.get_all())
 
-    if verbose:
-        common.log('Sorting pooled reads')
-    if time_log is not None:
-        time_log.log('Sorting pooled reads')
-    _sort_and_index(tmp_path, out_path, write_cram, genome.filename, samtools)
+        if not single_out:
+            records.sort(key=operator.attrgetter('reference_start'))
+        for rec in records:
+            tmp_bam.write(rec)
+        if not single_out:
+            tmp_bam.close()
+            _index_and_move(curr_tmp_path, curr_out_path, write_cram, samtools)
+
+    if single_out:
+        tmp_bam.close()
+        if verbose:
+            common.log('Sorting pooled reads')
+        if time_log is not None:
+            time_log.log('Sorting pooled reads')
+        tmp_path2 = tmp_path + '2'
+        _sort_output(tmp_path, tmp_path2, write_cram, genome.filename, samtools)
+        _index_and_move(tmp_path2, out_path, write_cram, samtools)
+    else:
+        # Touch `success`
+        with open(os.path.join(out_path, 'success'), 'w'):
+            pass
 
 
 def load_duplications(table, genome, interval, exclude_str):
@@ -488,14 +519,15 @@ def main(prog_name=None, in_argv=None):
 
     out_lower = args.output.lower()
     if out_lower.endswith('.bam'):
-        use_dir = False
+        single_out = True
         write_cram = False
     elif out_lower.endswith('.cram'):
-        use_dir = False
+        single_out = True
         write_cram = True
     else:
-        use_dir = True
+        single_out = False
         write_cram = not args.bam
+        common.mkdir(args.output)
 
     with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
         interval = Interval.parse(args.region, genome)
@@ -503,7 +535,9 @@ def main(prog_name=None, in_argv=None):
         duplications = load_duplications(table, genome, interval, args.exclude)
         pool(bam_wrappers, args.output, interval, duplications, genome,
             samtools=args.samtools, max_mate_dist=args.mate_dist, verbose=args.verbose,
-            use_dir=use_dir, write_cram=write_cram)
+            single_out=single_out, write_cram=write_cram)
+    if args.verbose:
+        common.log('Success')
 
 
 if __name__ == '__main__':
