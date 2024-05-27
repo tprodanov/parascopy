@@ -413,7 +413,7 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, forc
     const_regions = cn_tools.find_const_regions(duplications, interval, skip_regions, genome,
         min_size=window_size, max_ref_cn=args.max_ref_cn)
     dupl_hierarchy = cn_tools.DuplHierarchy(interval, psv_records, const_regions, genome, duplications,
-        window_size=bg_depth.window_size, max_ref_cn=args.max_ref_cn, max_dist=args.region_dist)
+        window_size=window_size, max_ref_cn=args.max_ref_cn, max_dist=args.region_dist)
     unknown_frac = dupl_hierarchy.interval_seq.count('N') / len(dupl_hierarchy.interval_seq)
     if unknown_frac > args.unknown_seq:
         common.log('WARN: Skipping locus {}: {:.1f}% of the sequence is unknown'
