@@ -233,10 +233,34 @@ def _add_mates(in_bam, out_reads, genome, out_header, read_groups, max_mate_dist
             read_pair.add(new_rec)
 
 
+def _sort_and_index(tmp_path, out_path, write_cram, ref_filename, samtools):
+    tmp_path2 = tmp_path + '2'
+    out_ext = 'cram' if write_cram else 'bam'
+
+    args = ('-o', tmp_path2, '-O', out_ext, '--reference', ref_filename, tmp_path)
+    if samtools == 'none' or samtools is None:
+        pysam.sort(*args)
+    else:
+        if not common.Process((samtools, 'sort') + args).finish(zero_code_stderr=False):
+            raise RuntimeError('Samtools finished with non-zero status')
+    os.remove(tmp_path)
+
+    if samtools == 'none' or samtools is None:
+        pysam.index(tmp_path2)
+    else:
+        if not common.Process([samtools, 'index', tmp_path2]).finish(zero_code_stderr=False):
+            raise RuntimeError('Samtools finished with non-zero status')
+
+    ix_suffix = '.crai' if write_cram else '.bai'
+    os.rename(tmp_path2 + ix_suffix, out_path + ix_suffix)
+    os.rename(tmp_path2, out_path)
+
+
 DEFAULT_MATE_DISTANCE = 5000
 
 def pool(bam_wrappers, out_path, interval, duplications, genome, *,
-        samtools='samtools', weights=None, max_mate_dist=DEFAULT_MATE_DISTANCE, verbose=True, time_log=None):
+        samtools='samtools', weights=None, max_mate_dist=DEFAULT_MATE_DISTANCE,
+        verbose=True, time_log=None, write_cram=True, use_dir=True):
     if weights is None:
         weights = Weights()
     if verbose:
@@ -269,18 +293,7 @@ def pool(bam_wrappers, out_path, interval, duplications, genome, *,
         common.log('Sorting pooled reads')
     if time_log is not None:
         time_log.log('Sorting pooled reads')
-    if samtools == 'none' or samtools is None:
-        pysam.sort('-o', out_path, tmp_path)
-    else:
-        common.Process([samtools, 'sort', '-o', out_path, tmp_path]).finish(zero_code_stderr=False)
-    os.remove(tmp_path)
-
-    if time_log is not None:
-        time_log.log('Indexing pooled reads')
-    if samtools == 'none' or samtools is None:
-        pysam.index(out_path)
-    else:
-        common.Process([samtools, 'index', out_path]).finish(zero_code_stderr=False)
+    _sort_and_index(tmp_path, out_path, write_cram, genome.filename, samtools)
 
 
 def load_duplications(table, genome, interval, exclude_str):
@@ -414,7 +427,7 @@ def main(prog_name=None, in_argv=None):
     parser = argparse.ArgumentParser(
         description='Pool reads from various copies of a duplication.',
         formatter_class=argparse.RawTextHelpFormatter, add_help=False,
-        usage='{} (-i <bam> [...] | -I <bam-list>) -t <table> -f <fasta> -r <region> -o <bam>'.format(prog_name))
+        usage='{} (-i <bam> [...] | -I <bam-list>) -t <table> -f <fasta> -r <region> -o <dir>'.format(prog_name))
     io_args = parser.add_argument_group('Input/output arguments')
 
     inp_me = io_args.add_mutually_exclusive_group(required=True)
@@ -434,9 +447,13 @@ def main(prog_name=None, in_argv=None):
     io_args.add_argument('-f', '--fasta-ref', metavar='<file>', required=True,
         help='Input reference fasta file.')
     io_args.add_argument('-r', '--region', metavar='<region>',
-        help='Single region in format "chr:start-end". Start and end are 1-based inclusive.\nCommas are ignored.')
-    io_args.add_argument('-o', '--output', metavar='<file>', required=True,
-        help='Output BAM file.')
+        help='Single region in format "chr:start-end". Start and end are 1-based inclusive.\n'
+            'Commas are ignored.')
+    io_args.add_argument('-o', '--output', metavar='<dir>|<file>', required=True,
+        help='Output BAM/CRAM file if corresponding extension is used.\n'
+            'Otherwise, write CRAM files in the output directory.')
+    io_args.add_argument('-b', '--bam', action='store_true',
+        help='Write BAM files to the output directory instead of CRAM.')
 
     filt_args = parser.add_argument_group('Duplications filtering arguments')
     filt_args.add_argument('-e', '--exclude', metavar='<expr>',
@@ -469,12 +486,24 @@ def main(prog_name=None, in_argv=None):
     if args.samtools != 'none':
         common.check_executable(args.samtools)
 
+    out_lower = args.output.lower()
+    if out_lower.endswith('.bam'):
+        use_dir = False
+        write_cram = False
+    elif out_lower.endswith('.cram'):
+        use_dir = False
+        write_cram = True
+    else:
+        use_dir = True
+        write_cram = not args.bam
+
     with Genome(args.fasta_ref) as genome, pysam.TabixFile(args.table, parser=pysam.asTuple()) as table:
         interval = Interval.parse(args.region, genome)
         bam_wrappers, _samples = load_bam_files(args.input, args.input_list, genome)
         duplications = load_duplications(table, genome, interval, args.exclude)
         pool(bam_wrappers, args.output, interval, duplications, genome,
-            samtools=args.samtools, max_mate_dist=args.mate_dist, verbose=args.verbose)
+            samtools=args.samtools, max_mate_dist=args.mate_dist, verbose=args.verbose,
+            use_dir=use_dir, write_cram=write_cram)
 
 
 if __name__ == '__main__':
