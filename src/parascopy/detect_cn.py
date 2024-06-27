@@ -436,7 +436,7 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, forc
         common.mkdir_clear(pooled_prefix)
         pooled_filenames = pool_reads.pool(data.bam_wrappers, pooled_prefix,
             interval, pool_duplications, genome, samtools=args.samtools,
-            verbose=True, time_log=time_log, write_cram=True, single_out=False)
+            verbose=True, time_log=time_log, write_cram=args.pool_cram, single_out=False)
 
     extra_files = dict(depth='depth.csv', region_groups='region_groups.txt', windows='windows.bed',
         hmm_states='hmm_states.csv', hmm_params='hmm_params.csv',
@@ -1072,6 +1072,8 @@ def parse_args(prog_name, in_argv, is_new):
             'calculates read depth for duplicated windows and PSV-allelic read depth.')
     exec_args.add_argument('--skip-pscn', action='store_true',
         help='Do not calculate psCN profiles.')
+    exec_args.add_argument('--pool-cram', action='store_true',
+        help='Pool reads into CRAM files (currently, BAM by default).')
     exec_args.add_argument('-@', '--threads', type=int, metavar='<int>', default=4,
         help='Number of available threads [default: %(default)s].')
     exec_args.add_argument('--samtools', metavar='<path>|none', default='samtools',
