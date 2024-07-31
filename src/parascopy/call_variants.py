@@ -97,16 +97,26 @@ def _find_freebayes_executable(args):
     raise RuntimeError('Cannot run Freebayes, no executable found')
 
 
-def _run_freebayes(locus, genome, args, filenames):
+def _run_freebayes(locus, genome, args, filenames, limit_regions):
     if args.rerun != 'full' and os.path.isfile(filenames.freebayes) and common.non_empty_file(filenames.read_allele):
         return
+
+    if len(limit_regions) > 1:
+        targets_filename = filenames.freebayes + '.targets'
+        with open(targets_filename, 'w') as out:
+            for region in limit_regions:
+                out.write(region.to_bed(genome) + '\n')
+        targets_args = ('-t', targets_filename)
+    else:
+        targets_filename = None
+        targets_args = ('-r', limit_regions[0].to_str0(genome))
 
     common.log('[{}] Running Freebayes'.format(locus.name))
     command = [
         args.freebayes,
         '-f', args.fasta_ref,
         '-@', filenames.psvs,
-        '-r', locus.to_str0(genome),
+        *targets_args,
         '-C', args.alternate_count,
         '-F', args.alternate_fraction,
         '-n', args.n_alleles,
@@ -120,7 +130,10 @@ def _run_freebayes(locus, genome, args, filenames):
     ]
     if not common.Process(command).finish():
         raise RuntimeError('Freebayes finished with non-zero code for locus {}'.format(locus.name))
+
     os.rename(filenames.freebayes + '.tmp', filenames.freebayes)
+    if targets_filename:
+        os.remove(targets_filename)
     common.log('[{}] Freebayes finished'.format(locus.name))
 
 
@@ -205,10 +218,18 @@ def _debug_write_read_hashes(bam_filenames, ref_filename, out):
                     bam_file_.string_hash_fnv1(record.query_name, record.is_read1)))
 
 
-def analyze_locus(locus, model_params, data, samples, assume_cn):
+def analyze_locus(locus, model_params, data, samples, limit_regions, assume_cn):
     genome = data.genome
     table = data.table
     args = data.args
+
+    if limit_regions is None:
+        call_regions = (locus,)
+    else:
+        call_regions = tuple(region.intersect(locus) for region in limit_regions.overlap_iter(locus))
+        if not call_regions:
+            raise RuntimeError('Skipping locus {}, no overlap with --regions'.format(locus.to_str(genome)))
+
     filenames = argparse.Namespace()
     filenames.par_dir = detect_cn.get_locus_dir(args.parascopy, locus.os_name, move_old=True)
     filenames.out_dir = detect_cn.get_locus_dir(args.output, locus.os_name, move_old=True)
@@ -266,7 +287,7 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
     filenames.paralog_bed = os.path.join(filenames.out_dir, 'variants.bed.gz')
     _write_calling_regions(cn_profiles, samples, genome, assume_cn, args.max_agcn, filenames)
 
-    _run_freebayes(locus, genome, args, filenames)
+    _run_freebayes(locus, genome, args, filenames, call_regions)
 
     common.log('    [{}] Loading read-allele observations'.format(locus.name))
     dupl_pos_finder = variants_.DuplPositionFinder(locus.chrom_id, duplications)
@@ -304,10 +325,10 @@ def analyze_locus(locus, model_params, data, samples, assume_cn):
     common.log('[{}] Success'.format(locus.name))
 
 
-def _analyze_locus_wrapper(locus_ix, locus, model_params, data, samples, assume_cn):
+def _analyze_locus_wrapper(locus_ix, locus, model_params, data, samples, limit_regions, assume_cn):
     try:
         data.prepare()
-        res = analyze_locus(locus, model_params, data, samples, assume_cn)
+        res = analyze_locus(locus, model_params, data, samples, limit_regions, assume_cn)
         assert res is None
         return locus_ix, res
     except Exception as exc:
@@ -320,14 +341,15 @@ def _analyze_locus_wrapper(locus_ix, locus, model_params, data, samples, assume_
         data.close()
 
 
-def run(loci, loaded_models, data, samples, assume_cn):
+def run(loci, loaded_models, data, samples, limit_regions, assume_cn):
     n_loci = len(loci)
     threads = max(1, min(n_loci, data.args.threads))
     results = []
     if threads == 1:
         common.log('Using 1 thread')
         for locus_ix, (locus, model_params) in enumerate(zip(loci, loaded_models)):
-            results.append(_analyze_locus_wrapper(locus_ix, locus, model_params, data, samples, assume_cn))
+            results.append(_analyze_locus_wrapper(
+                locus_ix, locus, model_params, data, samples, limit_regions, assume_cn))
 
     else:
         def callback(res):
@@ -341,7 +363,7 @@ def run(loci, loaded_models, data, samples, assume_cn):
         pool = multiprocessing.Pool(threads)
         for locus_ix, (locus, model_params) in enumerate(zip(loci, loaded_models)):
             pool.apply_async(_analyze_locus_wrapper,
-            args=(locus_ix, locus, model_params, data.copy(), samples, assume_cn),
+            args=(locus_ix, locus, model_params, data.copy(), samples, limit_regions, assume_cn),
             callback=callback, error_callback=err_callback)
         pool.close()
         pool.join()
@@ -397,6 +419,24 @@ def _check_sample_subset(samples, sample_subset, missing_where):
         exit(1)
 
 
+def _load_limiting_regions(filename, genome):
+    if filename is None:
+        return None
+
+    regions = []
+    with common.open_possible_gzip(filename) as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+            line = line.strip().split('\t')
+            chrom_id = genome.chrom_id(line[0])
+            start = int(line[1])
+            end = int(line[2])
+            regions.append(Interval(chrom_id, start, end))
+    regions = Interval.combine_overlapping(regions, max_dist=10)
+    return itree.MultiNonOverlTree(regions)
+
+
 def main(prog_name=None, in_argv=None):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
@@ -427,6 +467,8 @@ def main(prog_name=None, in_argv=None):
         help='Input reference fasta file.')
     io_args.add_argument('-o', '--output', metavar='<dir>', required=False,
         help='Output directory. Required if -i or -I arguments were used.')
+    io_args.add_argument('-R', '--regions', metavar='<file>', required=False,
+        help='Limit analysis to regions in the provided BED file.')
 
     fb_args = parser.add_argument_group('Freebayes parameters')
     fb_args.add_argument('--freebayes', metavar='<path>', required=False,
@@ -528,6 +570,7 @@ def main(prog_name=None, in_argv=None):
     data = detect_cn.DataStructures(args)
     data.prepare()
     genome = data.genome
+    limit_regions = _load_limiting_regions(args.regions, genome)
 
     with pysam.VariantFile(os.path.join(args.parascopy, 'psvs.vcf.gz')) as psvs_vcf:
         samples = bam_file_.Samples(psvs_vcf.header.samples)
@@ -558,7 +601,7 @@ def main(prog_name=None, in_argv=None):
     regions, loaded_models = detect_cn.get_regions(args, genome, load_models=True)
     regions, loaded_models = detect_cn.filter_regions(regions, loaded_models, args.regions_subset)
 
-    run(regions, loaded_models, data, samples, assume_cn)
+    run(regions, loaded_models, data, samples, limit_regions, assume_cn)
     data.close()
 
 

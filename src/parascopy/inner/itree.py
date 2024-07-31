@@ -74,7 +74,7 @@ class MultiChromTree:
         self._trees[region.chrom_id].addi(region.start, region.end, len(self._objects))
         self._objects.append(obj)
 
-    def overlap_ixs(self, region):
+    def overlap(self, region):
         tree = self._trees.get(region.chrom_id)
         if tree is None:
             return
