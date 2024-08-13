@@ -222,7 +222,7 @@ class _PrecomputedData:
         gt_coefs = self._gt_coefs_cache.get(fval_tup)
         if gt_coefs is None:
             f_pow = f_values[:, np.newaxis] ** range(0, self.cn + 1)
-            f_pow_comb = np.product(f_pow[range(self.n_copies), self.f_combinations], axis=1)
+            f_pow_comb = np.prod(f_pow[range(self.n_copies), self.f_combinations], axis=1)
 
             gt_coefs = np.zeros((self.n_poss_pscns, self.n_psv_genotypes))
             with np.errstate(divide='ignore'):
