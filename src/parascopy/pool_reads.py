@@ -14,6 +14,7 @@ from .inner import duplication as duplication_
 from .inner.genome import Genome, Interval
 from .inner.alignment import Alignment, Weights
 from .inner import bam_file as bam_file_
+from .inner import vmr
 from .view import parse_expression
 from . import long_version
 
@@ -437,7 +438,7 @@ class BamWrapper:
         return set(map(operator.itemgetter(1), self._old_read_groups))
 
 
-def load_bam_files(input, input_list, genome):
+def load_bam_files(input, input_list, genome, *, vmr_threshold=None, depth_dir=None):
     """
     Loads BAM files from either input or input-list.
     Returns list of BamWrapper's.
@@ -472,8 +473,22 @@ def load_bam_files(input, input_list, genome):
 
     bam_wrappers = [BamWrapper(filename, sample, genome, store_contigs=True) for filename, sample in filenames]
     bam_file_.compare_contigs(bam_wrappers, genome)
-
     samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
+
+    if vmr_threshold is not None:
+        subset_samples = vmr.select_samples(set(samples), vmr_threshold, depth_dir)
+        new_bam_wrappers = []
+        for bam_wrapper in bam_wrappers:
+            n_present = sum(sample in subset_samples for sample in bam_wrapper.present_samples())
+            if n_present > 0:
+                new_bam_wrappers.append(bam_wrapper)
+                if n_present < len(bam_wrapper.present_samples()):
+                    common.log('WARN: BAM file {} contains {} samples, but only {} of them passed VMR filter.'
+                        .format(bam_wrapper.filename, n_present, len(bam_wrapper.present_samples())))
+                    common.log('WARN: For simplicity, all present samples will be used for CN analysis.')
+        bam_wrappers = new_bam_wrappers
+        samples = bam_file_.Samples.from_bam_wrappers(bam_wrappers)
+
     for bam_wrapper in bam_wrappers:
         bam_wrapper.init_new_read_groups(samples)
         bam_wrapper.clear_contigs()

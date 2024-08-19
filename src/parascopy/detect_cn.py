@@ -1009,7 +1009,7 @@ def parse_args(prog_name, in_argv, is_new):
     filt_args.add_argument('--skip-unique', action='store_true',
         help='Skip regions without any duplications in the reference genome.')
 
-    aggr_det_args = parser.add_argument_group('Aggregate copy number (agCN) detection arguments')
+    aggr_det_args = parser.add_argument_group('Aggregate copy number detection arguments')
     if is_new:
         aggr_det_args.add_argument('--min-samples', type=int, metavar='<int>', default=50,
             help='Use multi-sample information if there are at least <int> samples present\n'
@@ -1040,8 +1040,11 @@ def parse_args(prog_name, in_argv, is_new):
         help='Do not estimate or use read depth multipliers.')
     aggr_det_args.add_argument('--update-agcn', type=float, metavar='<float>', default=40,
         help='Update agCN using psCN probabilities when agCN quality is less than <float> [default: %(default)s].')
+    aggr_det_args.add_argument('--vmr', type=str, metavar='<str>',
+        help='Sort samples by variance-mean ratio, and only use samples with smallest values.\n'
+            'Value should be either <float> (ratio threshold), or <float>% (use this percentile).')
 
-    par_det_args = parser.add_argument_group('Paralog-specific copy number (psCN) detection arguments')
+    par_det_args = parser.add_argument_group('Paralog-specific copy number detection arguments')
     if is_new:
         par_det_args.add_argument('--reliable-threshold', type=float, metavar='<float> <float>',
             nargs=2, default=(0.8, 0.95),
@@ -1142,7 +1145,8 @@ def main(prog_name=None, in_argv=None, is_new=None):
     common.mkdir_clear(os.path.join(directory, 'model'), rewrite=args.rerun == 'full')
     regions, loaded_models = filter_regions(regions, loaded_models, args.regions_subset)
 
-    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome)
+    bam_wrappers, samples = pool_reads.load_bam_files(args.input, args.input_list, genome,
+        vmr_threshold=args.vmr, depth_dir=args.depth)
     if args.is_new:
         _check_number_of_samples(len(bam_wrappers), args.min_samples)
 
