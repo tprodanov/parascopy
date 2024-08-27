@@ -245,7 +245,7 @@ def _create_depth_matrix(windows, window_counts):
         return None
     n_windows = len(windows)
     n_samples = len(window_counts[0])
-    depth_matrix = np.full((n_windows, n_samples), np.iinfo(np.int16).min, dtype=np.int16)
+    depth_matrix = np.full((n_windows, n_samples), np.iinfo(np.int32).min, dtype=np.int32)
 
     for window_ix, window in enumerate(windows):
         if window.in_hmm:

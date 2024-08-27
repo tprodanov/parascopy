@@ -213,7 +213,7 @@ class _PrecomputedData:
                 res_poly.get_slice(power, poly_matrix[i])
             f_ix_convert = np.fromiter(
                 (f_comb_ixs.get(gt, 0) for gt in itertools.product(*(range(count + 1) for count in sample_gt))),
-                dtype=np.int16)
+                dtype=np.int32)
             self.poly_matrices.append(poly_matrix)
             self.f_ix_converts.append(f_ix_convert)
 
@@ -546,7 +546,7 @@ class VariantReadObservations:
             # list of dictionaries (one for each sample),
             # each dictionary: key = read hash (47 bits), value = AlleleObservation.
             self.observations = [{} for _ in range(n_samples)]
-            self.other_observations = np.zeros(n_samples, dtype=np.int16)
+            self.other_observations = np.zeros(n_samples, dtype=np.int32)
         else:
             self.observations = None
             self.other_observations = None
@@ -1939,7 +1939,7 @@ class VariantParalogCN:
             return
 
         cn_region_used = np.zeros(n_regions, dtype=np.bool_)
-        pos_to_region = np.zeros(n_var_pos, dtype=np.uint16)
+        pos_to_region = np.zeros(n_var_pos, dtype=np.uint32)
         for i, var_pos in enumerate(variant_obs.variant_positions):
             for j, cn_region in enumerate(cn_regions):
                 if not cn_region_used[j] and cn_region.intersects(var_pos.region):
@@ -2015,13 +2015,13 @@ class VariantGenotypePred:
         # List of pairs (_ReadPositions, AlleleObservation).
         self.read_obs = None
         n_alleles = len(self.variant_obs.variant.alleles)
-        self.all_allele_counts = np.zeros(n_alleles, dtype=np.uint16)
-        self.good_allele_counts = np.zeros(n_alleles, dtype=np.uint16)
+        self.all_allele_counts = np.zeros(n_alleles, dtype=np.uint32)
+        self.good_allele_counts = np.zeros(n_alleles, dtype=np.uint32)
         # Forward/Reverse strand read counts for each allele.
-        self.strand_counts = np.zeros((2, n_alleles), dtype=np.uint16)
+        self.strand_counts = np.zeros((2, n_alleles), dtype=np.uint32)
         self.strand_phred = None
         # Count paired and unpaired reads supporting each allele.
-        self.paired_counts = np.zeros((2, n_alleles), dtype=np.uint16)
+        self.paired_counts = np.zeros((2, n_alleles), dtype=np.uint32)
         self.paired_phred = None
 
         self.pooled_genotype = None
