@@ -1042,7 +1042,7 @@ def parse_args(prog_name, in_argv, is_new):
         help='Update agCN using psCN probabilities when agCN quality is less than <float> [default: %(default)s].')
     aggr_det_args.add_argument('--vmr', type=str, metavar='<str>',
         help='Sort samples by variance-mean ratio, and only use samples with smallest values.\n'
-            'Value should be either <float> (ratio threshold), or <float>% (use this percentile).')
+            'Value should be either <float> (ratio threshold), or <float>%% (use this percentile).')
 
     par_det_args = parser.add_argument_group('Paralog-specific copy number detection arguments')
     if is_new:

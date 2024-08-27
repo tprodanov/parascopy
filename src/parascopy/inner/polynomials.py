@@ -81,7 +81,7 @@ def multiply_polynomials_f_values(alleles, powers):
     sum_power = sum(powers)
 
     max_power = 0
-    f_powers = np.zeros(copy_num, dtype=np.int16)
+    f_powers = np.zeros(copy_num, dtype=np.int32)
     for i in range(copy_num - 1, -1, -1):
         f_powers[i] = max_power + 1
         max_power += (max_power + 1) * powers[i]
