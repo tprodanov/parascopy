@@ -837,6 +837,7 @@ def _move_everything_left(cigar, start1, seq1, start2, seq2, from_full_cigar=Tru
     match_op = Operation.SeqMatch if from_full_cigar else Operation.AlnMatch
 
     for length, op in cigar:
+        length = int(length)
         if op.consumes_both():
             pos1 += length
             pos2 += length
