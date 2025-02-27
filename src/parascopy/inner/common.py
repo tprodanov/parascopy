@@ -32,7 +32,7 @@ def cond_rev_comp(seq, *, strand):
 
 
 def cond_reverse(qual, *, strand):
-    return qual if strand else qual[::-1]
+    return qual if strand or qual is None else qual[::-1]
 
 
 def gc_count(seq):
