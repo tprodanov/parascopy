@@ -439,6 +439,8 @@ class Cigar:
         else:
             cigar_start = ref_pos = read_pos = 0
 
+        ref_start = np.int32(ref_start)
+        ref_pos = np.int32(ref_pos)
         for length, op in itertools.islice(self._tuples, cigar_start, len(self._tuples)):
             if op.consumes_both():
                 for j in range(max(ref_start - ref_pos, 0), length):

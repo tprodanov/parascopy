@@ -228,7 +228,7 @@ def combine_psvs(psvs, aligned_pos, duplication_starts1):
 
         if to_save.defined() and to_save.end > psv.start:
             skip_append = False
-            end_shift = max(0, psv.end - to_save.end)
+            end_shift = max(0, int(psv.end) - int(to_save.end))
             to_save.end += end_shift
             for region2 in to_save.reg2:
                 region2.end += end_shift

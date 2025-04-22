@@ -250,7 +250,9 @@ _DEFAULT_LOW_MAPQ = 10
 
 
 class Params:
-    def __init__(self, low_mapq_thresh=_DEFAULT_LOW_MAPQ, max_mate_dist=pool_reads.DEFAULT_MATE_DISTANCE,
+    def __init__(self,
+            low_mapq_thresh=_DEFAULT_LOW_MAPQ,
+            max_mate_dist=pool_reads.DEFAULT_MATE_DISTANCE,
             window_filtering_mult=1):
         self.low_mapq_thresh = low_mapq_thresh
         self.max_mate_dist = max_mate_dist
@@ -264,6 +266,7 @@ class Params:
         self.loess_frac = None
         self.gc_bounds = None
         self._ploidy = 2
+        self.stratify_gc = True
 
     def set_ploidy(self, ploidy):
         self._ploidy = ploidy
@@ -297,28 +300,20 @@ class Params:
         self.set_neighbours_dist()
         self.loess_frac = args.loess_frac
         self.gc_bounds = tuple(bounds)
+        self.stratify_gc = args.stratify_gc
         return self
 
     def equals(self, other):
-        if self._ploidy != other._ploidy:
-            return False
-        if self.window_size != other.window_size:
-            return False
-        if self.low_mapq_ratio != other.low_mapq_ratio:
-            return False
-        if self.clipped_ratio != other.clipped_ratio:
-            return False
-        if self.unpaired_ratio != other.unpaired_ratio:
-            return False
-        if self.neighbours != other.neighbours:
-            return False
-        if self.neighbours_dist != other.neighbours_dist:
-            return False
-        if self.loess_frac != other.loess_frac:
-            return False
-        if self.gc_bounds != other.gc_bounds:
-            return False
-        return True
+        return self._ploidy == other._ploidy \
+            and self.window_size == other.window_size \
+            and self.low_mapq_ratio == other.low_mapq_ratio \
+            and self.clipped_ratio == other.clipped_ratio \
+            and self.unpaired_ratio == other.unpaired_ratio \
+            and self.neighbours == other.neighbours \
+            and self.neighbours_dist == other.neighbours_dist \
+            and self.loess_frac == other.loess_frac \
+            and self.gc_bounds == other.gc_bounds \
+            and self.stratify_gc == other.stratify_gc
 
     @property
     def ploidy(self):
@@ -372,10 +367,12 @@ def loess(x, y, xout, frac=2/3, deg=1, w=None):
         weight = common.tricube_kernel((sub_x - xval) / size)
         if in_weight is not None:
             weight *= in_weight[a:b]
+        assert max(weight) > 0
         try:
             coef = np.polyfit(sub_x, sub_y, deg=deg, w=weight)
         except ValueError:
-            sys.stderr.write('Polyfit failed for unknown reason (frac={:.5}, deg={}) at x={}\n'.format(frac, deg, xval))
+            sys.stderr.write('Polyfit failed for unknown reason (frac={:.5f}, deg={}) at x={}\n'
+                .format(frac, deg, xval))
             sys.stderr.write('    subx: {}\n    suby: {}\n    w: {}\n'.format(list(sub_x), list(sub_y), list(weight)))
             raise
         res[i] = np.polyval(coef, xval)
@@ -423,16 +420,23 @@ def _summarize_sample(sample, sample_window_counts, params, windows, out, res):
         counts.write_to(out)
         out.write('\t{}\n'.format('T' if keep_window[window_ix] else 'F'))
 
-    gc_contents = np.array([window.gc_content for window in windows], dtype=np.int16)
+    gc_contents = np.array([window.gc_content for window in windows], dtype=np.int32)
     gc_windows = [np.where(gc_contents == gc_content)[0] for gc_content in range(101)]
 
-    bg_depth = None
     for read_end, depth_values in enumerate((depth1, depth2), start=1):
-        mean_loess = loess(gc_contents[keep_window], depth_values[keep_window],
-            xout=np.arange(101), frac=params.loess_frac)
-        assert np.all(~np.isnan(mean_loess))
-        var_loess = _predict_variance(depth_values, keep_window, gc_windows)
-        assert np.all(~np.isnan(var_loess))
+        if read_end == 2 and max(depth_values) == 0:
+            continue
+        if params.stratify_gc:
+            mean_loess = loess(gc_contents[keep_window], depth_values[keep_window],
+                xout=np.arange(101), frac=params.loess_frac)
+            assert np.all(~np.isnan(mean_loess))
+            var_loess = _predict_variance(depth_values, keep_window, gc_windows)
+            assert np.all(~np.isnan(var_loess))
+        else:
+            m = np.mean(depth_values)
+            v = np.var(depth_values)
+            mean_loess = [m] * 101
+            var_loess = [v] * 101
 
         for gc_content, curr_gc_windows in enumerate(gc_windows):
             filt_gc_windows = np.compress(keep_window[curr_gc_windows], curr_gc_windows)
@@ -546,6 +550,7 @@ def _write_means_header(out_means, windows, params, tail_windows):
     out_means.write('# loess fraction: {:.4f}\n'.format(params.loess_frac))
     out_means.write('# tail windows: {}\n'.format(tail_windows))
     out_means.write('# GC-content range: [{} {}]\n'.format(params.gc_bounds[0], params.gc_bounds[1] + 1))
+    out_means.write('# stratify GC: {}\n'.format(params.stratify_gc))
     out_means.write('sample\tgc_content\tread_end\tn_windows\tmean\tvar\tquartiles'
         '\tmean_loess\tvar_loess\tnbinom_n\tnbinom_p\n')
 
@@ -596,6 +601,8 @@ class Depth:
                     elif 'GC-content range' in key:
                         m = re.search(r'\[(\d+)[, \t]+(\d+)\]', value)
                         self._params.gc_bounds = (int(m.group(1)), int(m.group(2)) + 1)
+                    elif 'stratify QC' in key:
+                        self.stratify_gc = bool(value)
 
             if self._params.window_size is None:
                 common.log('ERROR: Input file does not contain line "# window size: INT"')
@@ -774,6 +781,8 @@ def main(prog_name, in_argv):
             'of a skipped window [default: %(default)s].')
 
     depth_args = parser.add_argument_group('Depth calculation arguments')
+    depth_args.add_argument('--no-gc', action='store_false', dest='stratify_gc',
+        help='Do not stratify by GC-content. Useful for long reads.')
     depth_args.add_argument('--loess-frac', metavar='<float>', type=float, default=0.2,
         help='Loess parameter: use <float> closest windows to estimate average read depth\n'
             'for each GC-percentage [default: %(default)s].')
@@ -825,6 +834,8 @@ def main(prog_name, in_argv):
         out.write('#chrom\tstart\tend\tgc_content\n')
         windows = _load_windows(bed_lines, genome, out)
     bounds = _summarize_windows(windows, args.tail_windows)
+    if not args.stratify_gc:
+        bounds = [10, 90]
 
     window_size = len(windows[0])
     fetch_regions = _get_fetch_regions(windows, genome, window_size)

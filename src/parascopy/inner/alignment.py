@@ -228,7 +228,7 @@ class AlnStats(ShortAlnStats):
 
     def calculate_score(self, aligned_len, weights):
         self._score = aligned_len - weights.mismatch * self._mismatches
-        self._score -= sum(weights.open_gap + weights.extend_gap * length
+        self._score -= sum(float(weights.open_gap + weights.extend_gap * length)
             for length in itertools.chain(self._insertions, self._deletions))
 
     def update_info(self, info):
