@@ -736,6 +736,30 @@ def _write_readme(out_dir):
         out.write('These files are not important for downstream analysis and can be removed.\n')
 
 
+def _load_background_regions(genome):
+    g = genome.lower()
+    if g == 'hg19':
+        g = 'grch37'
+    elif g == 'hg38':
+        g = 'grch38'
+    elif g == 'chm13-fast':
+        g = 'chm13'
+
+    try:
+        bed_data = pkgutil.get_data(__pkg_name__, os.path.join('data', 'depth_regions', g + '.bed.gz'))
+    except FileNotFoundError:
+        # Based on documentation, returned data will be None, if the file does not exist.
+        # In practice, FileNotFoundError is thrown.
+        # To handle both cases, set data to None manually.
+        bed_data = None
+
+    if bed_data is None:
+        raise ValueError(f'Could not identify background regions for {genome}. '
+            'Possible genomes are: GRCh37|hg19, GRCh38|hg38, CHM13; with an optional suffix `-fast`.')
+    bed_data = gzip.decompress(bed_data)
+    return bed_data.decode().split('\n')
+
+
 def main(prog_name, in_argv):
     prog_name = prog_name or '%(prog)s'
     parser = argparse.ArgumentParser(
@@ -757,8 +781,10 @@ def main(prog_name, in_argv):
             'Mutually exclusive with --input.\n\n')
 
     reg_me = io_args.add_mutually_exclusive_group(required=True)
-    reg_me.add_argument('-g', '--genome', choices=('hg19', 'hg38'), metavar='hg19|hg38',
-        help='Use predefined windows for the human genome. Mutually exclusive with --bed-regions.')
+    reg_me.add_argument('-g', '--genome', metavar='<str>',
+        help='Use predefined windows for the human genome, possible values are:\n'
+            'GRCh37, GRCh38, CHM13; with an optional suffix `-fast`.\n'
+            'Mutually exclusive with --bed-regions.')
     reg_me.add_argument('-b', '--bed-regions', metavar='<file>',
         help='Input bed[.gz] file containing windows (tab-separated, 0-based semi-exclusive),\n'
             'which will be used to calculate read depth. Windows must be non-overlapping\n'
@@ -826,9 +852,7 @@ def main(prog_name, in_argv):
         bed_lines = common.open_possible_gzip(args.bed_regions).readlines()
     else:
         common.log('Loading predefined windows for {}'.format(args.genome))
-        bed_data = pkgutil.get_data(__pkg_name__, os.path.join('data', 'depth_regions', args.genome + '.bed.gz'))
-        bed_data = gzip.decompress(bed_data)
-        bed_lines = bed_data.decode().split('\n')
+        bed_lines = _load_background_regions(args.genome)
 
     with gzip.open(os.path.join(args.output, 'windows.bed.gz'), 'wt') as out:
         out.write('#chrom\tstart\tend\tgc_content\n')
