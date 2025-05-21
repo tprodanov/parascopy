@@ -51,7 +51,7 @@ class Duplication:
         self._region2 = region2
         self._strand = strand
         self._info = {}
-        self._info['SEP'] = region2.start_distance(region1)
+        self._info['SEP'] = -1 if region1.chrom_id != region2.chrom_id else region1.start_distance(region2)
 
         self._seq1 = None
         # Not reversed-complimented even if the duplication has - strand.

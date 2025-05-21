@@ -7,6 +7,7 @@ import sys
 import csv
 import os
 import numpy as np
+import scipy.stats
 import traceback
 import shutil
 import re
@@ -203,23 +204,58 @@ def get_read_middle(read, cigar):
     return None
 
 
-class _FetchRegion:
-    def __init__(self, start_ix, windows, genome, window_size):
+class Windows:
+    def __init__(self, start_ix, windows, genome, window_size, are_long_reads):
         self._start_ix = start_ix
         self._window_size = window_size
+        self._half_size = max(1, window_size // 2)
         self._starts = np.fromiter(map(operator.attrgetter('start'), windows), np.int32, len(windows))
         self._chrom = genome.chrom_name(windows[0].chrom_id)
         self._reg_start = windows[0].start
         self._reg_end = windows[-1].end
+        self.get_windows = self._get_all_windows if are_long_reads else self._get_middle_window
 
-    def get_window_ix(self, read, cigar):
+    def _get_middle_window(self, read, cigar):
         middle = get_read_middle(read, cigar)
         if middle is None:
-            return None
+            return ()
         ix = self._starts.searchsorted(middle, side='right') - 1
         if ix == -1 or middle >= self._starts[ix] + self._window_size:
-            return None
-        return ix
+            return ()
+        return (ix,)
+
+    def _get_all_windows(self, read, cigar):
+        """
+        Identify all windows, covered by this read (at least 50% of the read maps to the window).
+        """
+        if read.reference_start >= self._reg_end or read.reference_end <= self._reg_start:
+            return
+        ref_start = read.reference_start
+        window_ix = max(0, self._starts.searchsorted(ref_start, side='right') - 1)
+        window_start = self._starts[window_ix]
+        window_end = window_start + self._window_size
+        window_cov = 0
+
+        for _, ref_pos0 in cigar.aligned_pairs():
+            ref_pos = ref_pos0 + ref_start
+            while window_end <= ref_pos:
+                if window_cov >= self._half_size:
+                    yield window_ix
+                window_cov = 0
+                window_ix += 1
+                if window_ix == len(self._starts):
+                    return
+                window_start = self._starts[window_ix]
+                window_end = window_start + self._window_size
+
+            if window_start <= ref_pos:
+                window_cov += 1
+
+        if window_cov >= self._half_size:
+            yield window_ix
+
+    # def get_windows(self, read, cigar, many=False):
+    #     return self._get_all_windows(read, cigar) if many else self._get_middle_window(read, cigar)
 
     def fetch_from(self, bam_file):
         return common.checked_fetch_coord(bam_file, self._chrom, self._reg_start, self._reg_end)
@@ -233,16 +269,16 @@ class _FetchRegion:
         return len(self._starts)
 
 
-def _get_fetch_regions(windows, genome, window_size, max_distance=100):
+def _get_fetch_regions(windows, genome, window_size, are_long_reads, max_distance=100):
     start_ix = 0
     regions = []
     for i in range(1, len(windows)):
         assert not windows[i - 1].intersects(windows[i])
         if windows[i - 1].distance(windows[i]) > max_distance:
-            regions.append(_FetchRegion(start_ix, windows[start_ix : i], genome, window_size))
+            regions.append(Windows(start_ix, windows[start_ix : i], genome, window_size, are_long_reads))
             start_ix = i
     if windows:
-        regions.append(_FetchRegion(start_ix, windows[start_ix :], genome, window_size))
+        regions.append(Windows(start_ix, windows[start_ix :], genome, window_size, are_long_reads))
     return regions
 
 
@@ -266,6 +302,7 @@ class Params:
         self.loess_frac = None
         self.gc_bounds = None
         self._ploidy = 2
+        self.long_reads = False
         self.stratify_gc = True
 
     def set_ploidy(self, ploidy):
@@ -300,7 +337,8 @@ class Params:
         self.set_neighbours_dist()
         self.loess_frac = args.loess_frac
         self.gc_bounds = tuple(bounds)
-        self.stratify_gc = args.stratify_gc
+        self.long = args.long
+        self.stratify_gc = not args.long and args.stratify_gc
         return self
 
     def equals(self, other):
@@ -313,6 +351,7 @@ class Params:
             and self.neighbours_dist == other.neighbours_dist \
             and self.loess_frac == other.loess_frac \
             and self.gc_bounds == other.gc_bounds \
+            and self.long == other.long \
             and self.stratify_gc == other.stratify_gc
 
     @property
@@ -401,7 +440,79 @@ def _predict_variance(depth_values, curr_keep_window, gc_windows, min_windows=10
     return loess(x, y, xout=np.arange(101), w=w, frac=1)
 
 
-def _summarize_sample(sample, sample_window_counts, params, windows, out, res):
+# def _get_faraway_pairs(windows, distance):
+#     """
+#     Returns a generator of window indices that satisfy two conditions:
+#         - windows ixs[i] and ixs[i] + 1 are closeby (distance is less than window size),
+#         - windows ixs[i] and ixs[i + 1] are far away (threshold in the function arguments).
+#     """
+#     last_end = -np.inf
+#     n = len(windows)
+#     for i, w in enumerate(windows):
+#         if last_end + distance <= w.start and i + 1 < n and windows[i + 1].start < w.end + len(w):
+#             yield i
+#             last_end = w.end
+
+
+# def _calculate_nearby_correlation(sample, windows, window_counts, mean_read_len):
+#     MIN_OBSERVATIONS = 10
+#     MAX_DIST = 50_000
+#     ixs = _get_faraway_pairs(windows, min(mean_read_len, MAX_DIST))
+
+#     x = []
+#     y = []
+#     for i in ixs:
+#         x.append(window_counts[i].depth_read1)
+#         y.append(window_counts[i].depth_read1)
+#         print(x[-1], y[-1])
+#     if len(x) < MIN_OBSERVATIONS:
+#         raise RuntimeError(f'ERROR: Could not calculate correlations for {sample}. '
+#             'Consider using more background windows.')
+#     return np.corrcoef((x, y))
+
+
+def _calculate_correlations(sample, windows, window_counts, mean_read_len):
+    MIN_OBSERVATIONS = 10
+    MAX_DIST = 50_000
+
+    dist_thresh = int(min(round(mean_read_len), MAX_DIST))
+    window_size = len(windows[0])
+    n_shifts = (dist_thresh - 1) // window_size + 1
+    # Will be a matrix NxM, where M = n_shifts, and N = number of sufficiently far-away windows.
+    nearby_counts = []
+
+    i = 0
+    n = len(windows)
+    while i < n:
+        w = windows[i]
+        curr_counts = np.full(n_shifts, np.nan)
+        curr_counts[0] = window_counts[i].depth_read1
+        print(i, i, 0, window_counts[i].depth_read1, sep='\t')
+
+        for j in range(i + 1, n):
+            u = windows[j]
+            d = w.start_distance(u)
+            if d >= dist_thresh:
+                i = j
+                break
+            curr_counts[d // window_size] = window_counts[j].depth_read1
+            print(i, j, d // window_size, window_counts[j].depth_read1, sep='\t')
+        else:
+            break
+        nearby_counts.append(curr_counts)
+
+    nearby_counts = np.array(nearby_counts)
+    print('# Correlations:')
+    x = nearby_counts[:, 0]
+    for i in range(1, n_shifts):
+        y = nearby_counts[:, i]
+        avail = ~np.isnan(y)
+        if np.sum(avail) >= MIN_OBSERVATIONS:
+            c = scipy.stats.pearsonr(x[avail], y[avail])
+            print(f'#{i}\t{np.sum(avail)}\t{c.statistic}')
+
+
+def _summarize_sample(sample, sample_window_counts, mean_read_len, params, windows, out, res):
     n_windows = len(sample_window_counts)
     keep_window = np.ones(n_windows, dtype=np.bool_)
     depth1 = np.zeros(n_windows, dtype=np.uint32)
@@ -422,6 +533,10 @@ def _summarize_sample(sample, sample_window_counts, params, windows, out, res):
 
     gc_contents = np.array([window.gc_content for window in windows], dtype=np.int32)
     gc_windows = [np.where(gc_contents == gc_content)[0] for gc_content in range(101)]
+
+    if params.long:
+        cor = _calculate_correlations(sample, windows, sample_window_counts, mean_read_len)
+        #out.write(f'# cor {sample} {cor:.10f}\n')
 
     for read_end, depth_values in enumerate((depth1, depth2), start=1):
         if read_end == 2 and max(depth_values) == 0:
@@ -464,7 +579,12 @@ def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_fi
     """
     need_close = False
     common.log('    Calculating background depth for file {:3}: {}'.format(bam_index, bam_wrapper.filename))
+
     with bam_wrapper.open_bam_file(genome_filename) as bam_file:
+        # NOTE: Ideally, we should split by sample, and, potentially, by read group?
+        sum_read_len = 0
+        total_reads = 0
+
         n_windows = len(windows)
         read_groups = bam_wrapper.read_groups()
         samples = list(set(map(operator.itemgetter(1), read_groups.values())))
@@ -478,18 +598,24 @@ def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_fi
             for read in read_iter:
                 if read.flag & 3844:
                     continue
-                cigar = Cigar.from_pysam_tuples(read.cigartuples)
-                window_ix = region.get_window_ix(read, cigar)
-                if window_ix is None:
-                    continue
 
+                sum_read_len += len(read.query_sequence)
+                total_reads += 1
+                cigar = Cigar.from_pysam_tuples(read.cigartuples)
                 sample = read_groups[read.get_tag('RG') if read.has_tag('RG') else None][1]
-                window_counts[sample][start_ix + window_ix].add_read(read, cigar)
+                for window_ix in region.get_windows(read, cigar):
+                    window_counts[sample][start_ix + window_ix].add_read(read, cigar)
+
+        mean_read_len = sum_read_len / total_reads
+        if (mean_read_len >= 500) != params.long:
+            common.log('File {} contains {} reads (mean length = {:.0f}), but `--long` argument was {}used'.format(
+                bam_wrapper.filename, 'long' if mean_read_len >= 500 else 'short', mean_read_len,
+                '' if params.long else 'not '))
 
         res = []
         for sample in samples:
-            with open('{}.{}.csv'.format(out_prefix, sample), 'w') as out:
-                _summarize_sample(sample, window_counts[sample], params, windows, out, res)
+            with open(f'{out_prefix}.{sample}.csv', 'w') as out:
+                _summarize_sample(sample, window_counts[sample], mean_read_len, params, windows, out, res)
     return res
 
 
@@ -537,20 +663,21 @@ def all_files_depth(bam_wrappers, windows, fetch_regions, genome_filename, threa
 def _write_means_header(out_means, windows, params, tail_windows):
     common.log('Calculate background depth')
     window_size = len(windows[0])
-    out_means.write('# command: {}\n'.format(common.command_to_str()))
-    out_means.write('# ploidy: {}\n'.format(params.ploidy))
-    out_means.write('# window size: {}\n'.format(window_size))
-    out_means.write('# number of windows: {}\n'.format(len(windows)))
-    out_means.write('# low MAPQ threshold: {}\n'.format(params.low_mapq_thresh))
-    out_means.write('# max mate distance: {}\n'.format(params.max_mate_dist))
-    out_means.write('# max percentage of low MAPQ reads: {:.1f}\n'.format((params.low_mapq_ratio * 100)))
-    out_means.write('# max percentage of clipped reads: {:.1f}\n'.format((params.clipped_ratio * 100)))
-    out_means.write('# max percentage of unpaired reads: {:.1f}\n'.format((params.unpaired_ratio * 100)))
-    out_means.write('# skip neighbour windows: {}\n'.format(params.neighbours))
-    out_means.write('# loess fraction: {:.4f}\n'.format(params.loess_frac))
-    out_means.write('# tail windows: {}\n'.format(tail_windows))
-    out_means.write('# GC-content range: [{} {}]\n'.format(params.gc_bounds[0], params.gc_bounds[1] + 1))
-    out_means.write('# stratify GC: {}\n'.format(params.stratify_gc))
+    out_means.write(f'# command: {common.command_to_str()}\n')
+    out_means.write(f'# ploidy: {params.ploidy}\n')
+    out_means.write(f'# window size: {window_size}\n')
+    out_means.write(f'# number of windows: {len(windows)}\n')
+    out_means.write(f'# low MAPQ threshold: {params.low_mapq_thresh}\n')
+    out_means.write(f'# max mate distance: {params.max_mate_dist}\n')
+    out_means.write(f'# max percentage of low MAPQ reads: {params.low_mapq_ratio * 100:.1f}\n')
+    out_means.write(f'# max percentage of clipped reads: {params.clipped_ratio * 100:.1f}\n')
+    out_means.write(f'# max percentage of unpaired reads: {params.unpaired_ratio * 100:.1f}\n')
+    out_means.write(f'# skip neighbour windows: {params.neighbours}\n')
+    out_means.write(f'# loess fraction: {params.loess_frac:.4f}\n')
+    out_means.write(f'# tail windows: {tail_windows}\n')
+    out_means.write(f'# GC-content range: [{params.gc_bounds[0]} {params.gc_bounds[1] + 1}]\n')
+    out_means.write(f'# long: {params.long}\n')
+    out_means.write(f'# stratify GC: {params.stratify_gc}\n')
     out_means.write('sample\tgc_content\tread_end\tn_windows\tmean\tvar\tquartiles'
         '\tmean_loess\tvar_loess\tnbinom_n\tnbinom_p\n')
 
@@ -598,10 +725,12 @@ class Depth:
                         self._params.unpaired_ratio = float(value) / 100 * window_filtering_mult
                     elif 'neighbour' in key:
                         self._params.neighbours = int(value)
-                    elif 'GC-content range' in key:
+                    elif key == 'GC-content range':
                         m = re.search(r'\[(\d+)[, \t]+(\d+)\]', value)
                         self._params.gc_bounds = (int(m.group(1)), int(m.group(2)) + 1)
-                    elif 'stratify QC' in key:
+                    elif key == 'long':
+                        self.long = bool(value)
+                    elif key == 'stratify QC':
                         self.stratify_gc = bool(value)
 
             if self._params.window_size is None:
@@ -807,6 +936,8 @@ def main(prog_name, in_argv):
             'of a skipped window [default: %(default)s].')
 
     depth_args = parser.add_argument_group('Depth calculation arguments')
+    depth_args.add_argument('--long', action='store_true',
+        help='Prepare read depth for long reads. Implies --no-gc.')
     depth_args.add_argument('--no-gc', action='store_false', dest='stratify_gc',
         help='Do not stratify by GC-content. Useful for long reads.')
     depth_args.add_argument('--loess-frac', metavar='<float>', type=float, default=0.2,
@@ -861,17 +992,18 @@ def main(prog_name, in_argv):
     if not args.stratify_gc:
         bounds = [10, 90]
 
-    window_size = len(windows[0])
-    fetch_regions = _get_fetch_regions(windows, genome, window_size)
-    genome.close()
-    common.log('{} continuous regions'.format(len(fetch_regions)))
-
     _write_readme(args.output)
     with open(os.path.join(args.output, 'depth.csv'), 'w') as out_means:
         common.log('Start calculating coverage')
+        window_size = len(windows[0])
         params = Params.from_args(args, window_size, bounds)
         common.log(params.describe() + '    ============')
         _write_means_header(out_means, windows, params, args.tail_windows)
+
+        fetch_regions = _get_fetch_regions(windows, genome, window_size, params.long)
+        genome.close()
+        common.log('{} continuous regions'.format(len(fetch_regions)))
+
         prefix = os.path.join(args.output, 'tmp')
         all_files_depth(bam_wrappers, windows, fetch_regions, args.fasta_ref, threads, params, prefix, out_means)
 

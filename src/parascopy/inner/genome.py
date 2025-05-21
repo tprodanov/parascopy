@@ -425,10 +425,10 @@ class Interval:
 
     def start_distance(self, other):
         """
-        Returns distance between starts. Returns -1 if intervals lie on different chromosomes.
+        Returns distance between starts. Returns sys.maxsize if intervals lie on different chromosomes.
         """
         if self._chrom_id != other._chrom_id:
-            return -1
+            return sys.maxsize
         return abs(self._start - other._start)
 
     def distance(self, other):
