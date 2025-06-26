@@ -203,7 +203,7 @@ def _calculate_pooled_depth(pooled_filenames, genome, samples, bg_depth, read_gr
     psv_observations = [[collections.Counter() for _j in range(n_samples)] for _i in range(len(psvs))]
 
     window_size = bg_depth.window_size
-    window_starts = np.array([window.region1.start for window in windows])
+    window_getter = depth_.Windows(0, [w.region1 for w in windows], genome, window_size, bg_depth.long)
     # Matrix of WindowCounts (n_samples x n_windows).
     window_counts = [[depth_.WindowCounts(bg_depth.params) for _j in range(n_samples)] for _i in range(n_windows)]
 
@@ -217,13 +217,9 @@ def _calculate_pooled_depth(pooled_filenames, genome, samples, bg_depth, read_gr
                 _update_psv_observations(record, sample_id, psvs, psv_searcher, psv_observations)
 
                 cigar = Cigar.from_pysam_tuples(record.cigartuples)
-                middle = depth_.get_read_middle(record, cigar)
-                if middle is None:
-                    continue
-                window_ix = window_starts.searchsorted(middle, side='right') - 1
-                if window_ix == -1 or middle >= window_starts[window_ix] + window_size:
-                    continue
-                window_counts[window_ix][sample_id].add_read(record, cigar, trust_proper_pair=True, look_at_oa=True)
+                for window_ix in window_getter.get_windows(record, cigar):
+                    window_counts[window_ix][sample_id].add_read(record, cigar,
+                        trust_proper_pair=True, look_at_oa=True)
 
     outp.write('window_ix\tsample\tdepth1\tdepth2\tlow_mapq\tclipped\tunpaired\tnorm_cn1\n')
     for window, window_counts_row in zip(windows, window_counts):

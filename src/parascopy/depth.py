@@ -85,7 +85,7 @@ def _load_windows(bed_lines, genome, out):
     return windows
 
 
-def _summarize_windows(windows, tail_windows):
+def _summarize_windows(windows, tail_windows, stratify_gc):
     n_chroms = len(set(map(operator.attrgetter('chrom_id'), windows)))
     n_windows = len(windows)
     common.log('Using {:,} windows on {} chromosomes'.format(n_windows, n_chroms))
@@ -102,7 +102,8 @@ def _summarize_windows(windows, tail_windows):
     gc_cumsum = np.cumsum(gc_bin_count)
     left_bound = np.where(gc_cumsum >= tail_windows)[0][0]
     right_bound = np.where(n_windows - gc_cumsum >= tail_windows)[0][-1]
-    common.log('Using GC-content in range [{}, {}]'.format(left_bound, right_bound))
+    if stratify_gc:
+        common.log('Using GC-content in range [{}, {}]'.format(left_bound, right_bound))
     return left_bound, right_bound + 1
 
 
@@ -214,6 +215,10 @@ class Windows:
         self._reg_start = windows[0].start
         self._reg_end = windows[-1].end
         self.get_windows = self._get_all_windows if are_long_reads else self._get_middle_window
+
+    # # Function, that is either `get_middle_window` or `get_all_windows` depending on `are_long_reads` switch.
+    # def get_windows(self, read, cigar):
+    #     pass
 
     def _get_middle_window(self, read, cigar):
         middle = get_read_middle(read, cigar)
@@ -336,7 +341,7 @@ class Params:
         self.neighbours = args.neighbours
         self.set_neighbours_dist()
         self.loess_frac = args.loess_frac
-        self.gc_bounds = tuple(bounds)
+        self.gc_bounds = tuple(bounds) if bounds is not None else None
         self.long = args.long
         self.stratify_gc = not args.long and args.stratify_gc
         return self
@@ -534,9 +539,9 @@ def _summarize_sample(sample, sample_window_counts, mean_read_len, params, windo
     gc_contents = np.array([window.gc_content for window in windows], dtype=np.int32)
     gc_windows = [np.where(gc_contents == gc_content)[0] for gc_content in range(101)]
 
-    if params.long:
-        cor = _calculate_correlations(sample, windows, sample_window_counts, mean_read_len)
-        #out.write(f'# cor {sample} {cor:.10f}\n')
+    # if params.long:
+    #     cor = _calculate_correlations(sample, windows, sample_window_counts, mean_read_len)
+    #     out.write(f'# cor {sample} {cor:.10f}\n')
 
     for read_end, depth_values in enumerate((depth1, depth2), start=1):
         if read_end == 2 and max(depth_values) == 0:
@@ -675,7 +680,10 @@ def _write_means_header(out_means, windows, params, tail_windows):
     out_means.write(f'# skip neighbour windows: {params.neighbours}\n')
     out_means.write(f'# loess fraction: {params.loess_frac:.4f}\n')
     out_means.write(f'# tail windows: {tail_windows}\n')
-    out_means.write(f'# GC-content range: [{params.gc_bounds[0]} {params.gc_bounds[1] + 1}]\n')
+    if params.gc_bounds is not None:
+        out_means.write(f'# GC-content range: [{params.gc_bounds[0]} {params.gc_bounds[1] + 1}]\n')
+    else:
+        out_means.write(f'# GC-content range: None\n')
     out_means.write(f'# long: {params.long}\n')
     out_means.write(f'# stratify GC: {params.stratify_gc}\n')
     out_means.write('sample\tgc_content\tread_end\tn_windows\tmean\tvar\tquartiles'
@@ -726,8 +734,11 @@ class Depth:
                     elif 'neighbour' in key:
                         self._params.neighbours = int(value)
                     elif key == 'GC-content range':
-                        m = re.search(r'\[(\d+)[, \t]+(\d+)\]', value)
-                        self._params.gc_bounds = (int(m.group(1)), int(m.group(2)) + 1)
+                        if value == 'None':
+                            self._params.gc_bounds = None
+                        else:
+                            m = re.search(r'\[(\d+)[, \t]+(\d+)\]', value)
+                            self._params.gc_bounds = (int(m.group(1)), int(m.group(2)) + 1)
                     elif key == 'long':
                         self.long = bool(value)
                     elif key == 'stratify QC':
@@ -791,7 +802,10 @@ class Depth:
                 depth._nbinom_params[sample_id] = curr_depth._nbinom_params[sample_id]
                 has_samples[sample_id] = True
 
-        gc_bounds = slice(depth._params.gc_bounds[0], depth._params.gc_bounds[1])
+        if depth._params.gc_bounds is None:
+            gc_bounds = slice(0, 101)
+        else:
+            gc_bounds = slice(depth._params.gc_bounds[0], depth._params.gc_bounds[1])
         for sample_id, sample in enumerate(samples):
             if np.any(np.isnan(depth._nbinom_params[sample_id, gc_bounds, :])):
                 raise RuntimeError('Cannot load background read depth: Sample {} is missing some/all values.'
@@ -817,6 +831,8 @@ class Depth:
         return counts.passes(self._params)
 
     def gc_content_defined(self, gc_content):
+        if self._params.gc_bounds is None:
+            return True
         bound_left, bound_right = self._params.gc_bounds
         return bound_left <= gc_content < bound_right
 
@@ -866,12 +882,8 @@ def _write_readme(out_dir):
 
 
 def _load_background_regions(genome):
-    g = genome.lower()
-    if g == 'hg19':
-        g = 'grch37'
-    elif g == 'hg38':
-        g = 'grch38'
-    elif g == 'chm13-fast':
+    g = genome.lower().replace('hg19', 'grch37').replace('hg38', 'grch38')
+    if g == 'chm13-fast':
         g = 'chm13'
 
     try:
@@ -988,9 +1000,9 @@ def main(prog_name, in_argv):
     with gzip.open(os.path.join(args.output, 'windows.bed.gz'), 'wt') as out:
         out.write('#chrom\tstart\tend\tgc_content\n')
         windows = _load_windows(bed_lines, genome, out)
-    bounds = _summarize_windows(windows, args.tail_windows)
-    if not args.stratify_gc:
-        bounds = [10, 90]
+    bounds = _summarize_windows(windows, args.tail_windows, args.stratify_gc and not args.long)
+    if not args.stratify_gc or args.long:
+        bounds = None
 
     _write_readme(args.output)
     with open(os.path.join(args.output, 'depth.csv'), 'w') as out_means:
