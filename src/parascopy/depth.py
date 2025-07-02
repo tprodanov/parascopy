@@ -740,9 +740,11 @@ class Depth:
                             m = re.search(r'\[(\d+)[, \t]+(\d+)\]', value)
                             self._params.gc_bounds = (int(m.group(1)), int(m.group(2)) + 1)
                     elif key == 'long':
-                        self.long = bool(value)
+                        assert value == 'True' or value == 'False'
+                        self.long = value == 'True'
                     elif key == 'stratify QC':
-                        self.stratify_gc = bool(value)
+                        assert value == 'True' or value == 'False'
+                        self.stratify_gc = value == 'True'
 
             if self._params.window_size is None:
                 common.log('ERROR: Input file does not contain line "# window size: INT"')
