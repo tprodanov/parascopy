@@ -35,7 +35,7 @@ simpleeval==0.9.13
 six==1.16.0
 sortedcontainers==2.4.0
 stack-data==0.6.3
-tornado==6.4.2
+tornado==6.5
 tqdm==4.66.2
 traitlets==5.14.2
 typing_extensions==4.10.0
