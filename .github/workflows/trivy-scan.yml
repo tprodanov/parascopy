@@ -1,0 +1,33 @@
+name: build
+on:
+  push:
+    branches:
+      - ilyasoifer/ug.tags
+  pull_request:
+jobs:
+  trivy-scan-dockers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: aquasecurity/trivy-action@0.32.0
+        with:
+          scan-type: 'config'
+          scan-ref: './'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          
+  trivy-scan-fs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: aquasecurity/trivy-action@0.32.0
+        with:
+          scan-type: 'fs'
+          skip-dirs: './dv_training'
+          scan-ref: './'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
