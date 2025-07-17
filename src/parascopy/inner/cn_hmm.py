@@ -117,7 +117,7 @@ class HmmModel:
         """
         Runs Viterbi algorithm for a single sample.
         """
-        prev_matrix = np.zeros((self._n_hidden, self._n_observations), dtype=np.int16)
+        prev_matrix = np.zeros((self._n_hidden, self._n_observations), dtype=np.int32)
         # Two consecutive columns of the values matrix (no need to store more).
 
         col_a = None
@@ -142,7 +142,7 @@ class HmmModel:
 
         state = np.argmax(col_b)
         final_prob = col_b[state]
-        states_vec = np.zeros(self._n_observations, dtype=np.int16)
+        states_vec = np.zeros(self._n_observations, dtype=np.int32)
         for obs_ix in reversed(range(self._n_observations)):
             states_vec[obs_ix] = state
             state = prev_matrix[state, obs_ix]
@@ -155,7 +155,7 @@ class HmmModel:
             - Matrix of best hidden states (n_samples x n_observations).
         """
         probs = np.full(self._n_samples, np.nan)
-        states_matrix = np.zeros((self._n_samples, self._n_observations), dtype=np.int16)
+        states_matrix = np.zeros((self._n_samples, self._n_observations), dtype=np.int32)
 
         for sample_id in range(self._n_samples):
             sample_prob, states_vec = self.viterbi(sample_id)
@@ -444,7 +444,7 @@ def _narrow_possible_states(prob_matrices, min_prev_prob=np.log(0.001), margin=1
     n_samples, n_hidden, _n_observations = prob_matrices.shape
     assert min_prev_prob < 0
 
-    res = np.zeros((n_samples, 2), dtype=np.uint16)
+    res = np.zeros((n_samples, 2), dtype=np.int32)
     for sample_id, prob_matrix in enumerate(prob_matrices):
         res[:, 1] = n_hidden
         possible_states = np.where(np.max(prob_matrix, axis=1) >= min_prev_prob)[0]

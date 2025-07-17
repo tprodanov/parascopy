@@ -252,9 +252,11 @@ def analyze_locus(locus, model_params, data, samples, limit_regions, assume_cn):
     if data.bam_wrappers is None:
         prefix = os.path.join(filenames.par_dir, 'pooled_reads')
         filenames.pooled = pool_reads.get_pooled_filenames(None, prefix)
+        keep_pooled = filenames.par_dir != filenames.out_dir # Pooled reads are located in a different directory
         if filenames.pooled is None:
             raise FileNotFoundError('Could not find pooled reads at "{}*"'.format(prefix))
     else:
+        keep_pooled = True
         prefix = os.path.join(filenames.out_dir, 'pooled_reads')
         filenames.pooled = pool_reads.get_pooled_filenames(len(data.bam_wrappers), prefix)
         if filenames.pooled is None:
@@ -321,6 +323,8 @@ def analyze_locus(locus, model_params, data, samples, limit_regions, assume_cn):
     filenames.out_vcf = os.path.join(filenames.out_dir, 'variants.vcf.gz')
     filenames.out_pooled_vcf = os.path.join(filenames.out_dir, 'variants_pooled.vcf.gz')
     variants_.write_vcf_file(filenames, vcf_headers, all_read_allele_obs, genome, args.tabix)
+
+    detect_cn.clean_subdir(locus.name, filenames.out_dir, args.clean, () if keep_pooled else filenames.pooled)
     os.mknod(filenames.success)
     common.log('[{}] Success'.format(locus.name))
 
@@ -535,6 +539,10 @@ def main(prog_name=None, in_argv=None):
     exec_args.add_argument('--regions-subset', nargs='+', metavar='<str> [<str> ...]',
         help='Additionally filter input regions: only use regions with names that are in this list.\n'
             'If the first argument is "!", only use regions not in this list.')
+    exec_args.add_argument('--clean', metavar='<str>', default='',
+        help='Which temporary files to remove (multi-letter code, default: empty):\n'
+            '    v - files in `var_extra` subdirectories,\n'
+            '    p - pooled reads BAM/CRAM files.')
     exec_args.add_argument('--samtools', metavar='<path>', default='samtools',
         help='Path to "samtools" executable [default: %(default)s].')
     exec_args.add_argument('--tabix', metavar='<path>', default='tabix',

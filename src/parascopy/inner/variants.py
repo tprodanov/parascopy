@@ -1939,7 +1939,7 @@ class VariantParalogCN:
             return
 
         cn_region_used = np.zeros(n_regions, dtype=np.bool_)
-        pos_to_region = np.zeros(n_var_pos, dtype=np.uint32)
+        pos_to_region = np.zeros(n_var_pos, dtype=np.int32)
         for i, var_pos in enumerate(variant_obs.variant_positions):
             for j, cn_region in enumerate(cn_regions):
                 if not cn_region_used[j] and cn_region.intersects(var_pos.region):

@@ -81,7 +81,7 @@ def multiply_polynomials_f_values(alleles, powers):
     sum_power = sum(powers)
 
     max_power = 0
-    f_powers = np.zeros(copy_num, dtype=np.int32)
+    f_powers = np.zeros(copy_num, dtype=np.int64)
     for i in range(copy_num - 1, -1, -1):
         f_powers[i] = max_power + 1
         max_power += (max_power + 1) * powers[i]
@@ -93,7 +93,7 @@ def multiply_polynomials_f_values(alleles, powers):
 
     res_poly = None
     if max_power >= 1000:
-        create_polynomial = lambda: SparsePolynomial()
+        create_polynomial = SparsePolynomial
     else:
         uni_len = x_powers[-1] + f_powers[0] - f_modulo + 1
         create_polynomial = lambda: DensePolynomial(uni_len)

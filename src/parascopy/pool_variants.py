@@ -296,7 +296,7 @@ def _pre_psv_to_variant(pre_psv, header, interval, interval_seq, duplications, g
     record.chrom = interval.chrom_name(genome)
     record.start = pre_psv.start
     assert pre_psv.start >= interval.start and pre_psv.end <= interval.end
-    alleles = [interval_seq[pre_psv.start - interval.start : pre_psv.end - interval.end]]
+    alleles = [interval_seq[int(pre_psv.start) - int(interval.start) : int(pre_psv.end) - int(interval.end)]]
 
     n_samples = len(header.samples)
     active_dupl = sorted(pre_psv.active_dupl)
