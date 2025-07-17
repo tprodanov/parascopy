@@ -37,7 +37,16 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
 
 COPY --from=samtools /usr/local/bin/samtools /usr/local/bin/
 
-WORKDIR /parascopy
+# Create a non-root user and group
+RUN groupadd app && useradd -m app -d /home/app -g app
+
+# Set ownership for writable directories
+RUN chown -R app:app /usr/local/bin
+
+USER app
+
+WORKDIR /home/app/parascopy
+
 COPY . .
 
 RUN python3 setup.py install
