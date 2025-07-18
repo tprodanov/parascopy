@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import operator
+from collections import defaultdict
 import argparse
 import pysam
 import sys
@@ -307,7 +308,7 @@ class Params:
         self.loess_frac = None
         self.gc_bounds = None
         self._ploidy = 2
-        self.long_reads = False
+        self.long = False
         self.stratify_gc = True
 
     def set_ploidy(self, ploidy):
@@ -317,7 +318,7 @@ class Params:
         self.neighbours_dist = self.window_size * self.neighbours - self.window_size // 2
 
     def describe(self):
-        s =  'Read depth parameters (ploidy = {}):\n'.format(self._ploidy)
+        s =  'Read depth parameters (ploidy = {}, {} reads):\n'.format(self._ploidy, 'long' if self.long else 'short')
         s += '    Use window size {} bp.\n'.format(self.window_size)
         s += '    Window is irregular in a sample if there are more than:\n'
         s += '    -  {:.1f}% reads with low mapping quality,\n'.format(self.low_mapq_ratio * 100)
@@ -577,6 +578,26 @@ def _summarize_sample(sample, sample_window_counts, mean_read_len, params, windo
             res.append(line)
 
 
+class ReadLengths:
+    def __init__(self):
+        self.count = 0
+        self.sum = 0
+        # self.values = []
+        # self.max_size = max_size
+
+    def add(self, val):
+        self.count += 1
+        self.sum += val
+        # if len(self.values) < self.max_size:
+        #     self.values.append(val)
+
+    def mean(self):
+        return self.sum / self.count
+
+    # def fit_skewnorm(self):
+    #     return scipy.stats.skewnorm.fit(self.values)
+
+
 def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_filename, out_prefix, params):
     """
     bam_file: either str or pysam.AlignmentFile.
@@ -586,14 +607,14 @@ def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_fi
     common.log('    Calculating background depth for file {:3}: {}'.format(bam_index, bam_wrapper.filename))
 
     with bam_wrapper.open_bam_file(genome_filename) as bam_file:
-        # NOTE: Ideally, we should split by sample, and, potentially, by read group?
-        sum_read_len = 0
-        total_reads = 0
-
         n_windows = len(windows)
         read_groups = bam_wrapper.read_groups()
         samples = list(set(map(operator.itemgetter(1), read_groups.values())))
-        window_counts = { sample: [WindowCounts(params) for _ in range(n_windows)] for sample in samples }
+        # max_size = 5000 if params.long else 0
+        sample_data = { sample: (
+            ReadLengths(),
+            [WindowCounts(params) for _ in range(n_windows)]
+        ) for sample in samples }
 
         for region in fetch_regions:
             start_ix = region.start_ix
@@ -604,23 +625,27 @@ def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_fi
                 if read.flag & 3844:
                     continue
 
-                sum_read_len += len(read.query_sequence)
-                total_reads += 1
                 cigar = Cigar.from_pysam_tuples(read.cigartuples)
                 sample = read_groups[read.get_tag('RG') if read.has_tag('RG') else None][1]
+                read_lengths, window_counts = sample_data[sample]
+                read_lengths.add(len(read.query_sequence))
                 for window_ix in region.get_windows(read, cigar):
-                    window_counts[sample][start_ix + window_ix].add_read(read, cigar)
-
-        mean_read_len = sum_read_len / total_reads
-        if (mean_read_len >= 500) != params.long:
-            common.log('File {} contains {} reads (mean length = {:.0f}), but `--long` argument was {}used'.format(
-                bam_wrapper.filename, 'long' if mean_read_len >= 500 else 'short', mean_read_len,
-                '' if params.long else 'not '))
+                    window_counts[start_ix + window_ix].add_read(read, cigar)
 
         res = []
-        for sample in samples:
+        SHORT_READ_LEN = 500
+        for sample, (read_lengths, window_counts) in sample_data.items():
+            mean_read_len = read_lengths.mean()
+            if (mean_read_len > SHORT_READ_LEN) != params.long:
+                common.log((
+                    'WARN: Sample {} ({}) contains {} reads (mean length = {:.0f}), '
+                    'but `--long` argument was {}used').format(
+                        sample, bam_wrapper.filename, 'long' if mean_read_len >= 500 else 'short', mean_read_len,
+                        '' if params.long else 'not '))
+            res.append(f'#rl {sample} {mean_read_len:.1f}\n')
+
             with open(f'{out_prefix}.{sample}.csv', 'w') as out:
-                _summarize_sample(sample, window_counts[sample], mean_read_len, params, windows, out, res)
+                _summarize_sample(sample, window_counts, mean_read_len, params, windows, out, res)
     return res
 
 
@@ -741,10 +766,10 @@ class Depth:
                             self._params.gc_bounds = (int(m.group(1)), int(m.group(2)) + 1)
                     elif key == 'long':
                         assert value == 'True' or value == 'False'
-                        self.long = value == 'True'
+                        self._params.long = value == 'True'
                     elif key == 'stratify QC':
                         assert value == 'True' or value == 'False'
-                        self.stratify_gc = value == 'True'
+                        self._params.stratify_gc = value == 'True'
 
             if self._params.window_size is None:
                 common.log('ERROR: Input file does not contain line "# window size: INT"')
@@ -759,11 +784,20 @@ class Depth:
             # Matrix n_samples x 101 x 2
             #     <sample> x <gc_content> x <nbinom params: first n, second p>.
             self._nbinom_params = np.full((len(samples), 101, 2), np.nan)
+            self._read_lengths = np.full(len(samples), np.nan)
 
             for row in reader:
-                if row['sample'] not in samples or row['read_end'] != '1':
+                sample = row['sample']
+                if sample.startswith('#rl'):
+                    _, sample, read_len = sample.split(' ')
+                    sample_id = samples.id_or_none(sample)
+                    if sample_id is not None:
+                        self._read_lengths[sample_id] = float(read_len)
                     continue
-                sample_id = samples.id(row['sample'])
+
+                sample_id = samples.id_or_none(sample)
+                if sample_id is None or row['read_end'] != '1':
+                    continue
                 gc_content = int(row['gc_content'])
 
                 if not np.isnan(self._nbinom_params[sample_id, gc_content, 0]):
@@ -801,6 +835,7 @@ class Depth:
                 if has_samples[sample_id]:
                     raise RuntimeError('Cannot load background read depth: sample {} appears twice.'
                         .format(samples[sample_id]))
+                depth._read_lengths[sample_id] = curr_depth._read_lengths[sample_id]
                 depth._nbinom_params[sample_id] = curr_depth._nbinom_params[sample_id]
                 has_samples[sample_id] = True
 
@@ -816,6 +851,15 @@ class Depth:
 
     def at(self, sample_id, gc_content):
         return self._nbinom_params[sample_id, gc_content, :]
+
+    def mean_read_len(self, sample_id):
+        return self._read_lengths[sample_id]
+
+    def check_read_lengths(self):
+        wo_read_length = np.sum(np.isnan(self._read_lengths))
+        if wo_read_length > 0:
+            raise ValueError(f'{wo_read_length} samples have no read length. Please rerun `parascopy depth`'
+                .format(wo_read_length))
 
     @property
     def window_size(self):
@@ -845,6 +889,10 @@ class Depth:
     @property
     def params(self):
         return self._params
+
+    @property
+    def long_reads(self):
+        return self._params.long
 
 
 def check_duplicated_samples(bam_wrappers):

@@ -203,7 +203,7 @@ def _calculate_pooled_depth(pooled_filenames, genome, samples, bg_depth, read_gr
     psv_observations = [[collections.Counter() for _j in range(n_samples)] for _i in range(len(psvs))]
 
     window_size = bg_depth.window_size
-    window_getter = depth_.Windows(0, [w.region1 for w in windows], genome, window_size, bg_depth.long)
+    window_getter = depth_.Windows(0, [w.region1 for w in windows], genome, window_size, bg_depth.long_reads)
     # Matrix of WindowCounts (n_samples x n_windows).
     window_counts = [[depth_.WindowCounts(bg_depth.params) for _j in range(n_samples)] for _i in range(n_windows)]
 
@@ -1198,6 +1198,8 @@ def main(prog_name=None, in_argv=None, is_new=None):
     else:
         bg_depth = depth_.Depth.from_filenames(args.depth, samples, window_filtering_mult=args.window_filtering)
         common.log(bg_depth.params.describe() + '    ============')
+    if bg_depth.long_reads:
+        bg_depth.check_read_lengths()
 
     run(regions, data, samples, bg_depth, loaded_models, force_agcn, modified_ref_cns)
     data.close()

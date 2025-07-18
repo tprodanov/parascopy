@@ -326,6 +326,10 @@ class CopyNumHmm(HmmModel):
         emission_matrices = np.full((self._n_samples, self._n_hidden, self._n_observations), -np.inf)
         for sample_id in range(self._n_samples):
             observations = depth_matrix[:, sample_id]
+            if bg_depth.long_reads:
+                len_mult = bg_depth.window_size / bg_depth.mean_read_len(sample_id)
+            else:
+                len_mult = 1.0
 
             for obs_ix, window in enumerate(windows):
                 mult = multipliers[obs_ix]
@@ -336,7 +340,7 @@ class CopyNumHmm(HmmModel):
 
                 n_param, p_param = bg_depth.at(sample_id, window.gc_content)
                 n_params = n_param * state_ploidies * mult
-                curr_emissions = mult_weight * nbinom.logpmf(observations[obs_ix], n_params, p_param)
+                curr_emissions = len_mult * mult_weight * nbinom.logpmf(observations[obs_ix], n_params, p_param)
                 emission_matrices[sample_id, :, obs_ix] = curr_emissions - logsumexp(curr_emissions)
         self.set_emission_matrices(emission_matrices)
 
