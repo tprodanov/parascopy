@@ -45,3 +45,12 @@ RUN python3 setup.py install
 # Include licenses
 COPY ["LICENSE", "./"]
 COPY ["Third_Party_Licenses/", "./Third_Party_Licenses/"]
+
+# Create user (UID 1000) - for running
+RUN groupadd -g 1000 parascopy && \
+    useradd -u 1000 -g 1000 -m -s /bin/bash parascopy
+
+RUN chown parascopy:parascopy /parascopy && \
+    chmod 755 /parascopy
+
+USER parascopy
