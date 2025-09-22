@@ -185,7 +185,8 @@ def _filter_windows(window_counts, bg_depth, dupl_hierarchy, min_windows, perc_s
                 window.in_hmm = False
 
 
-def _calculate_pooled_depth(pooled_filenames, genome, samples, bg_depth, read_groups_dict, dupl_hierarchy, outp):
+def _calculate_pooled_depth(
+    pool_interval, pooled_filenames, genome, samples, bg_depth, read_groups_dict, dupl_hierarchy, outp):
     """
     Returns:
         - window_counts: matrix of WindowCounts (n_windows x n_samples),
@@ -208,18 +209,24 @@ def _calculate_pooled_depth(pooled_filenames, genome, samples, bg_depth, read_gr
     window_counts = [[depth_.WindowCounts(bg_depth.params) for _j in range(n_samples)] for _i in range(n_windows)]
 
     read_centers = [[] for _ in range(n_samples)]
-    for bam_filename in pooled_filenames:
+    had_pooling = pool_interval is None
+    for bam_ix, bam_filename in enumerate(pooled_filenames):
         with pysam.AlignmentFile(bam_filename, require_index=True, reference_filename=genome.filename) as bam_file:
-            for record in bam_file:
-                if record.is_unmapped:
+            records_iter = iter(bam_file) if had_pooling else common.checked_fetch(bam_file, pool_interval, genome)
+            for record in records_iter:
+                if record.flag & 3844:
                     continue
-                sample_id = read_groups_dict[record.get_tag('RG')]
+                try:
+                    rg_tag = record.get_tag('RG')
+                except KeyError:
+                    rg_tag = None
+                sample_id = read_groups_dict[(bam_ix, rg_tag)]
                 _update_psv_observations(record, sample_id, psvs, psv_searcher, psv_observations)
 
                 cigar = Cigar.from_pysam_tuples(record.cigartuples)
                 for window_ix in window_getter.get_windows(record, cigar):
                     window_counts[window_ix][sample_id].add_read(record, cigar,
-                        trust_proper_pair=True, look_at_oa=True)
+                        trust_proper_pair=True, look_at_oa=had_pooling)
 
     outp.write('window_ix\tsample\tdepth1\tdepth2\tlow_mapq\tclipped\tunpaired\tnorm_cn1\n')
     for window, window_counts_row in zip(windows, window_counts):
@@ -464,12 +471,17 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, forc
 
     _write_bed_files(interval, duplications, const_regions, genome, subdir)
     pooled_prefix = os.path.join(subdir, 'pooled_reads')
-    pooled_filenames = pool_reads.get_pooled_filenames(len(data.bam_wrappers), pooled_prefix)
-    if pooled_filenames is None:
-        common.mkdir_clear(pooled_prefix)
-        pooled_filenames = pool_reads.pool(data.bam_wrappers, pooled_prefix,
-            interval, pool_duplications, genome, samtools=args.samtools,
-            verbose=True, time_log=time_log, write_cram=args.pool_cram, single_out=False)
+    no_pooling = len(pool_duplications) == 0
+    if no_pooling:
+        common.log(f'[{interval.name}] Skipping read pooling (non-duplicated region)')
+        pooled_filenames = None
+    else:
+        pooled_filenames = pool_reads.get_pooled_filenames(len(data.bam_wrappers), pooled_prefix)
+        if pooled_filenames is None:
+            common.mkdir_clear(pooled_prefix)
+            pooled_filenames = pool_reads.pool(data.bam_wrappers, pooled_prefix,
+                interval, pool_duplications, genome, samtools=args.samtools,
+                verbose=True, time_log=time_log, write_cram=args.pool_cram, single_out=False)
 
     extra_files = dict(depth='depth.csv', region_groups='region_groups.txt', windows='windows.bed',
         hmm_states='hmm_states.csv', hmm_params='hmm_params.csv',
@@ -487,14 +499,18 @@ def analyze_region(interval, subdir, data, samples, bg_depth, model_params, forc
         paralog_cn.write_headers(out, samples, args)
 
         read_groups_dict = {}
-        for bam_wrapper in data.bam_wrappers:
-            for read_group, sample in bam_wrapper.read_groups().values():
-                read_groups_dict[read_group] = samples.id(sample)
+        n_pooled_files = sys.maxsize if no_pooling else len(pooled_filenames)
+        for bam_ix, bam_wrapper in enumerate(data.bam_wrappers):
+            for old_read_group, (read_group, sample) in bam_wrapper.read_groups().items():
+                key = (bam_ix, old_read_group) if no_pooling else (min(bam_ix, n_pooled_files - 1), read_group)
+                read_groups_dict[key] = samples.id(sample)
 
         time_log.log('Calculating aggregate read depth')
         common.log('[{}] Calculating aggregate read depth'.format(interval.name))
-        window_counts, psv_observations = _calculate_pooled_depth(pooled_filenames, genome,
-            samples, bg_depth, read_groups_dict, dupl_hierarchy, out.depth)
+        window_counts, psv_observations = _calculate_pooled_depth(
+            pool_interval if no_pooling else None,
+            [wrapper.filename for wrapper in data.bam_wrappers] if no_pooling else pooled_filenames,
+            genome, samples, bg_depth, read_groups_dict, dupl_hierarchy, out.depth)
 
         if not model_params.is_loaded:
             _filter_windows(window_counts, bg_depth, dupl_hierarchy, min_windows=args.min_windows, perc_samples=10.0)

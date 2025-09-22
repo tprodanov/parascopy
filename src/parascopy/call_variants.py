@@ -254,12 +254,16 @@ def analyze_locus(locus, model_params, data, samples, limit_regions, assume_cn):
         filenames.pooled = pool_reads.get_pooled_filenames(None, prefix)
         keep_pooled = filenames.par_dir != filenames.out_dir # Pooled reads are located in a different directory
         if filenames.pooled is None:
+            if not pool_duplications:
+                raise RuntimeError('Non-duplicated region and no pooled reads. Skipping locus {}'.format(locus.name))
             raise FileNotFoundError('Could not find pooled reads at "{}*"'.format(prefix))
     else:
         keep_pooled = True
         prefix = os.path.join(filenames.out_dir, 'pooled_reads')
         filenames.pooled = pool_reads.get_pooled_filenames(len(data.bam_wrappers), prefix)
         if filenames.pooled is None:
+            if not pool_duplications:
+                raise RuntimeError('Non-duplicated region and no pooled reads. Skipping locus {}'.format(locus.name))
             common.mkdir_clear(prefix)
             filenames.pooled = pool_reads.pool(data.bam_wrappers, prefix, locus, pool_duplications, genome,
                 samtools=args.samtools, verbose=True, write_cram=True, single_out=False)
