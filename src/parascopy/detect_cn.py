@@ -204,7 +204,7 @@ def _calculate_pooled_depth(
     psv_observations = [[collections.Counter() for _j in range(n_samples)] for _i in range(len(psvs))]
 
     window_size = bg_depth.window_size
-    window_getter = depth_.Windows(0, [w.region1 for w in windows], genome, window_size, bg_depth.long_reads)
+    window_getter = depth_.Windows(0, [w.region1 for w in windows], genome, window_size)
     # Matrix of WindowCounts (n_samples x n_windows).
     window_counts = [[depth_.WindowCounts(bg_depth.params) for _j in range(n_samples)] for _i in range(n_windows)]
 
@@ -224,9 +224,19 @@ def _calculate_pooled_depth(
                 _update_psv_observations(record, sample_id, psvs, psv_searcher, psv_observations)
 
                 cigar = Cigar.from_pysam_tuples(record.cigartuples)
-                for window_ix in window_getter.get_windows(record, cigar):
-                    window_counts[window_ix][sample_id].add_read(record, cigar,
-                        trust_proper_pair=True, look_at_oa=had_pooling)
+                if bg_depth.long_reads:
+                    start_window = window_getter.get_window(record.reference_start)
+                    if start_window is not None:
+                        window_counts[start_window][sample_id].read_starts += 1
+                    end_window = window_getter.get_window(record.reference_start)
+                    if end_window is not None:
+                        window_counts[end_window][sample_id].read_ends += 1
+                    for window_ix in window_getter.get_all_windows(record, cigar):
+                        window_counts[window_ix][sample_id].simple_add_read(record)
+                else:
+                    window_ix = window_getter.get_window(depth_.get_read_middle(record, cigar))
+                    if window_ix is not None:
+                        window_counts[window_ix][sample_id].complex_add_read(record, cigar, look_at_oa=had_pooling)
 
     outp.write('window_ix\tsample\tdepth1\tdepth2\tlow_mapq\tclipped\tunpaired\tnorm_cn1\n')
     for window, window_counts_row in zip(windows, window_counts):

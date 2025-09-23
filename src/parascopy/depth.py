@@ -12,6 +12,7 @@ import scipy.stats
 import traceback
 import shutil
 import re
+import itertools
 import gzip
 import pkgutil
 try:
@@ -119,8 +120,17 @@ class WindowCounts:
         self._low_mapq_reads = 0
         self._clipped_reads = 0
         self._unpaired_reads = 0
+        # How many reads start and end at this window? Only relevant for long reads.
+        self.read_starts = 0
+        self.read_ends = 0
 
-    def add_read(self, read, cigar, trust_proper_pair=False, look_at_oa=False):
+    def simple_add_read(self, read):
+        if read.is_read2:
+            self._depth_read2 += 1
+        else:
+            self._depth_read1 += 1
+
+    def complex_add_read(self, read, cigar, trust_proper_pair=False, look_at_oa=False):
         """
         If trust_proper_pair, look only at flag is_proper_pair (ignore chromosome and distance).
         """
@@ -207,7 +217,7 @@ def get_read_middle(read, cigar):
 
 
 class Windows:
-    def __init__(self, start_ix, windows, genome, window_size, are_long_reads):
+    def __init__(self, start_ix, windows, genome, window_size):
         self._start_ix = start_ix
         self._window_size = window_size
         self._half_size = max(1, window_size // 2)
@@ -215,28 +225,21 @@ class Windows:
         self._chrom = genome.chrom_name(windows[0].chrom_id)
         self._reg_start = windows[0].start
         self._reg_end = windows[-1].end
-        self.get_windows = self._get_all_windows if are_long_reads else self._get_middle_window
 
-    # # Function, that is either `get_middle_window` or `get_all_windows` depending on `are_long_reads` switch.
-    # def get_windows(self, read, cigar):
-    #     pass
+    def get_window(self, pos):
+        if pos is None:
+            return None
+        ix = self._starts.searchsorted(pos, side='right') - 1
+        return None if ix == -1 or pos >= self._starts[ix] + self._window_size else ix
 
-    def _get_middle_window(self, read, cigar):
-        middle = get_read_middle(read, cigar)
-        if middle is None:
-            return ()
-        ix = self._starts.searchsorted(middle, side='right') - 1
-        if ix == -1 or middle >= self._starts[ix] + self._window_size:
-            return ()
-        return (ix,)
-
-    def _get_all_windows(self, read, cigar):
+    def get_all_windows(self, read, cigar):
         """
         Identify all windows, covered by this read (at least 50% of the read maps to the window).
         """
-        if read.reference_start >= self._reg_end or read.reference_end <= self._reg_start:
-            return
         ref_start = read.reference_start
+        if ref_start >= self._reg_end or read.reference_end <= self._reg_start:
+            return
+
         window_ix = max(0, self._starts.searchsorted(ref_start, side='right') - 1)
         window_start = self._starts[window_ix]
         window_end = window_start + self._window_size
@@ -260,9 +263,6 @@ class Windows:
         if window_cov >= self._half_size:
             yield window_ix
 
-    # def get_windows(self, read, cigar, many=False):
-    #     return self._get_all_windows(read, cigar) if many else self._get_middle_window(read, cigar)
-
     def fetch_from(self, bam_file):
         return common.checked_fetch_coord(bam_file, self._chrom, self._reg_start, self._reg_end)
 
@@ -281,10 +281,10 @@ def _get_fetch_regions(windows, genome, window_size, are_long_reads, max_distanc
     for i in range(1, len(windows)):
         assert not windows[i - 1].intersects(windows[i])
         if windows[i - 1].distance(windows[i]) > max_distance:
-            regions.append(Windows(start_ix, windows[start_ix : i], genome, window_size, are_long_reads))
+            regions.append(Windows(start_ix, windows[start_ix : i], genome, window_size))
             start_ix = i
     if windows:
-        regions.append(Windows(start_ix, windows[start_ix :], genome, window_size, are_long_reads))
+        regions.append(Windows(start_ix, windows[start_ix :], genome, window_size))
     return regions
 
 
@@ -446,76 +446,57 @@ def _predict_variance(depth_values, curr_keep_window, gc_windows, min_windows=10
     return loess(x, y, xout=np.arange(101), w=w, frac=1)
 
 
-# def _get_faraway_pairs(windows, distance):
-#     """
-#     Returns a generator of window indices that satisfy two conditions:
-#         - windows ixs[i] and ixs[i] + 1 are closeby (distance is less than window size),
-#         - windows ixs[i] and ixs[i + 1] are far away (threshold in the function arguments).
-#     """
-#     last_end = -np.inf
-#     n = len(windows)
-#     for i, w in enumerate(windows):
-#         if last_end + distance <= w.start and i + 1 < n and windows[i + 1].start < w.end + len(w):
-#             yield i
-#             last_end = w.end
-
-
-# def _calculate_nearby_correlation(sample, windows, window_counts, mean_read_len):
+# def _calculate_correlations(sample, windows, window_counts, mean_read_len):
 #     MIN_OBSERVATIONS = 10
 #     MAX_DIST = 50_000
-#     ixs = _get_faraway_pairs(windows, min(mean_read_len, MAX_DIST))
 
-#     x = []
-#     y = []
-#     for i in ixs:
-#         x.append(window_counts[i].depth_read1)
-#         y.append(window_counts[i].depth_read1)
-#         print(x[-1], y[-1])
-#     if len(x) < MIN_OBSERVATIONS:
-#         raise RuntimeError(f'ERROR: Could not calculate correlations for {sample}. '
-#             'Consider using more background windows.')
-#     return np.corrcoef((x, y))
+#     dist_thresh = int(min(round(mean_read_len), MAX_DIST))
+#     window_size = len(windows[0])
+#     n_shifts = (dist_thresh - 1) // window_size + 1
+#     # Will be a matrix NxM, where M = n_shifts, and N = number of sufficiently far-away windows.
+#     nearby_counts = []
+
+#     i = 0
+#     n = len(windows)
+#     while i < n:
+#         w = windows[i]
+#         curr_counts = np.full(n_shifts, np.nan)
+#         curr_counts[0] = window_counts[i].depth_read1
+#         print(i, i, 0, window_counts[i].depth_read1, sep='\t')
+
+#         for j in range(i + 1, n):
+#             u = windows[j]
+#             d = w.start_distance(u)
+#             if d >= dist_thresh:
+#                 i = j
+#                 break
+#             curr_counts[d // window_size] = window_counts[j].depth_read1
+#             print(i, j, d // window_size, window_counts[j].depth_read1, sep='\t')
+#         else:
+#             break
+#         nearby_counts.append(curr_counts)
+
+#     nearby_counts = np.array(nearby_counts)
+#     print('# Correlations:')
+#     x = nearby_counts[:, 0]
+#     for i in range(1, n_shifts):
+#         y = nearby_counts[:, i]
+#         avail = ~np.isnan(y)
+#         if np.sum(avail) >= MIN_OBSERVATIONS:
+#             c = scipy.stats.pearsonr(x[avail], y[avail])
+#             print(f'#{i}\t{np.sum(avail)}\t{c.statistic}')
 
 
-def _calculate_correlations(sample, windows, window_counts, mean_read_len):
-    MIN_OBSERVATIONS = 10
-    MAX_DIST = 50_000
-
-    dist_thresh = int(min(round(mean_read_len), MAX_DIST))
-    window_size = len(windows[0])
-    n_shifts = (dist_thresh - 1) // window_size + 1
-    # Will be a matrix NxM, where M = n_shifts, and N = number of sufficiently far-away windows.
-    nearby_counts = []
-
-    i = 0
-    n = len(windows)
-    while i < n:
-        w = windows[i]
-        curr_counts = np.full(n_shifts, np.nan)
-        curr_counts[0] = window_counts[i].depth_read1
-        print(i, i, 0, window_counts[i].depth_read1, sep='\t')
-
-        for j in range(i + 1, n):
-            u = windows[j]
-            d = w.start_distance(u)
-            if d >= dist_thresh:
-                i = j
-                break
-            curr_counts[d // window_size] = window_counts[j].depth_read1
-            print(i, j, d // window_size, window_counts[j].depth_read1, sep='\t')
+def _discard_close_windows(windows, keep_ixs, dist):
+    """
+    From keep_ixs, select only these windows that appear on sufficient distance from each other.
+    """
+    last = None
+    for i, window in itertools.compress(enumerate(windows), keep_ixs):
+        if last is None or last.start_distance(window) > dist:
+            last = window
         else:
-            break
-        nearby_counts.append(curr_counts)
-
-    nearby_counts = np.array(nearby_counts)
-    print('# Correlations:')
-    x = nearby_counts[:, 0]
-    for i in range(1, n_shifts):
-        y = nearby_counts[:, i]
-        avail = ~np.isnan(y)
-        if np.sum(avail) >= MIN_OBSERVATIONS:
-            c = scipy.stats.pearsonr(x[avail], y[avail])
-            print(f'#{i}\t{np.sum(avail)}\t{c.statistic}')
+            keep_ixs[i] = False
 
 
 def _summarize_sample(sample, sample_window_counts, mean_read_len, params, windows, out, res):
@@ -540,9 +521,14 @@ def _summarize_sample(sample, sample_window_counts, mean_read_len, params, windo
     gc_contents = np.array([window.gc_content for window in windows], dtype=np.int32)
     gc_windows = [np.where(gc_contents == gc_content)[0] for gc_content in range(101)]
 
-    # if params.long:
-    #     cor = _calculate_correlations(sample, windows, sample_window_counts, mean_read_len)
-    #     out.write(f'# cor {sample} {cor:.10f}\n')
+    if params.long:
+        # How many reads started in every window. Number of read ends should be almost exactly the same.
+        read_starts = [c.read_starts for c in itertools.compress(sample_window_counts, keep_window)]
+        read_starts_m = np.mean(read_starts)
+        read_starts_v = np.var(read_starts)
+        res.append(f'#start_mv {sample} {read_starts_m:.10f} {read_starts_v:.10f}\n')
+
+        _discard_close_windows(windows, keep_window, mean_read_len)
 
     for read_end, depth_values in enumerate((depth1, depth2), start=1):
         if read_end == 2 and max(depth_values) == 0:
@@ -554,8 +540,9 @@ def _summarize_sample(sample, sample_window_counts, mean_read_len, params, windo
             var_loess = _predict_variance(depth_values, keep_window, gc_windows)
             assert np.all(~np.isnan(var_loess))
         else:
-            m = np.mean(depth_values)
-            v = np.var(depth_values)
+            kept_depth_values = depth_values[keep_window]
+            m = np.mean(kept_depth_values)
+            v = np.var(kept_depth_values)
             mean_loess = [m] * 101
             var_loess = [v] * 101
 
@@ -610,7 +597,6 @@ def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_fi
         n_windows = len(windows)
         read_groups = bam_wrapper.read_groups()
         samples = list(set(map(operator.itemgetter(1), read_groups.values())))
-        # max_size = 5000 if params.long else 0
         sample_data = { sample: (
             ReadLengths(),
             [WindowCounts(params) for _ in range(n_windows)]
@@ -629,8 +615,20 @@ def _single_file_depth(bam_index, bam_wrapper, windows, fetch_regions, genome_fi
                 sample = read_groups[read.get_tag('RG') if read.has_tag('RG') else None][1]
                 read_lengths, window_counts = sample_data[sample]
                 read_lengths.add(len(read.query_sequence))
-                for window_ix in region.get_windows(read, cigar):
-                    window_counts[start_ix + window_ix].add_read(read, cigar)
+
+                if params.long:
+                    start_window = region.get_window(read.reference_start)
+                    if start_window is not None:
+                        window_counts[start_ix + start_window].read_starts += 1
+                    end_window = region.get_window(read.reference_start)
+                    if end_window is not None:
+                        window_counts[start_ix + end_window].read_ends += 1
+                    for window_ix in region.get_all_windows(read, cigar):
+                        window_counts[start_ix + window_ix].simple_add_read(read)
+                else:
+                    window_ix = region.get_window(get_read_middle(read, cigar))
+                    if window_ix is not None:
+                        window_counts[start_ix + window_ix].complex_add_read(read, cigar, look_at_oa=False)
 
         res = []
         SHORT_READ_LEN = 500
