@@ -2,6 +2,7 @@ import collections
 import numpy as np
 import itertools
 import os
+import gzip
 from scipy.special import logsumexp
 
 from . import common
@@ -589,7 +590,8 @@ class OutputFiles:
         assert self._files is None
         self._files = {}
         for key, filename in self._filenames.items():
-            self._files[key] = open(os.path.join(self._out_dir, filename), 'w')
+            path = os.path.join(self._out_dir, filename)
+            self._files[key] = gzip.open(path, 'wt') if path.endswith('.gz') else open(path, 'w')
 
     def close(self):
         for f in self._files.values():

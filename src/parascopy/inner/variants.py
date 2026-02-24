@@ -884,7 +884,7 @@ class VariantReadObservations:
             old_to_new = self._new_vcf_allele_corresp[i]
             rec_fmt = record.samples[sample_id]
             pooled_gt = gt_pred.pooled_genotype
-            pooled_gt_qual = gt_pred.pooled_genotype_qual
+            pooled_gt_qual = int(gt_pred.pooled_genotype_qual)
             gt_filter = gt_pred.filter
 
             if pooled_gt is not None:
@@ -1105,7 +1105,7 @@ class VariantReadObservations:
             vcf_header.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
             vcf_header.add_line('##FORMAT=<ID=FILT,Number=.,Type=String,Description="Sample-specific filter">')
             vcf_header.add_line('##FORMAT=<ID=GTs,Number=.,Type=String,Description="Possible genotypes.">')
-            vcf_header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Float,Description="The Phred-scaled Genotype Quality">')
+            vcf_header.add_line('##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="The Phred-scaled Genotype Quality">')
             vcf_header.add_line('##FORMAT=<ID=GQ0,Number=1,Type=Float,Description='
                 '"Unedited genotype quality in case there is a sample-specific filter present.">')
             vcf_header.add_line('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">')
@@ -1125,7 +1125,7 @@ class VariantReadObservations:
                 'Description="Unpaired reads bias: maximal Phred-scaled p-value across all alleles.">')
             if i == 1:
                 vcf_header.add_line('##FORMAT=<ID=PGT,Number=1,Type=String,Description="Pooled Genotype">')
-                vcf_header.add_line('##FORMAT=<ID=PGQ,Number=1,Type=Float,'
+                vcf_header.add_line('##FORMAT=<ID=PGQ,Number=1,Type=Integer,'
                     'Description="The Phred-scaled Pooled Genotype Quality">')
                 vcf_header.add_line('##FORMAT=<ID=PGTs,Number=.,Type=String,Description="Possible pooled genotypes.">')
             for sample in samples:

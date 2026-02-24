@@ -209,13 +209,23 @@ def _analyze_sample(locus, sample_id, sample, all_read_allele_obs, coord_index, 
         variant_obs.update_vcf_records(gt_pred, genome)
 
 
-def _debug_write_read_hashes(bam_filenames, ref_filename, out):
+def _debug_write_read_hashes(bam_filenames, ref_filename, samples, out):
     common.log('DEBUG: Get read hashes')
+    read_groups = dict()
+    names = set()
     for filename in bam_filenames:
+        names.clear()
         with pysam.AlignmentFile(filename, reference_filename=ref_filename) as in_bam:
+            read_groups.clear()
+            for read_group, sample in bam_file_.get_read_groups(in_bam):
+                read_groups[read_group] = samples.id_or_none(sample)
             for record in in_bam.fetch():
-                out.write('{}\t{:x}\n'.format(record.query_name,
-                    bam_file_.string_hash_fnv1(record.query_name, record.is_read1)))
+                if record.query_name not in names:
+                    sample_id = read_groups[record.get_tag('RG')]
+                    if sample_id is not None:
+                        out.write('{}\t{}\t{:x}\n'.format(samples[sample_id], record.query_name,
+                            bam_file_.string_hash_fnv1(record.query_name, record.is_read1)))
+                    names.add(record.query_name)
 
 
 def analyze_locus(locus, model_params, data, samples, limit_regions, assume_cn):
@@ -307,12 +317,13 @@ def analyze_locus(locus, model_params, data, samples, limit_regions, assume_cn):
 
     extra_files = dict(genotypes='genotypes.csv', psv_use='psv_use.csv')
     if args.debug:
-        extra_files.update(dict(debug_reads='debug_reads.log', debug_obs='debug_obs.log', debug='debug.log'))
+        extra_files.update(
+            dict(debug_reads='debug_reads.log.gz', debug_obs='debug_obs.log.gz', debug='debug.log.gz'))
     # Use `coord_index as coord_index` to open & close inner files.
     with coord_index as coord_index, OutputFiles(filenames.subdir, extra_files) as out:
         if args.debug:
-            out.debug_reads.write('name\thash\n')
-            _debug_write_read_hashes(filenames.pooled, genome.filename, out.debug_reads)
+            out.debug_reads.write('sample\tname\thash\n')
+            _debug_write_read_hashes(filenames.pooled, genome.filename, samples, out.debug_reads)
             out.debug_obs.write('variant\tread_hash\tread_mate\tobs_allele\tbasequal\n')
 
         out.genotypes.write('# Format: genotype=-log10(prob).\n')
