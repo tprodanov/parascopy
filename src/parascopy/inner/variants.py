@@ -884,7 +884,7 @@ class VariantReadObservations:
             old_to_new = self._new_vcf_allele_corresp[i]
             rec_fmt = record.samples[sample_id]
             pooled_gt = gt_pred.pooled_genotype
-            pooled_gt_qual = int(gt_pred.pooled_genotype_qual)
+            pooled_gt_qual = None if gt_pred.pooled_genotype_qual is None else int(gt_pred.pooled_genotype_qual)
             gt_filter = gt_pred.filter
 
             if pooled_gt is not None:
